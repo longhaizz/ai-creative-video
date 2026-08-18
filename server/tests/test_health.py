@@ -4,16 +4,16 @@ from fastapi.testclient import TestClient
 from server.app import app
 
 
-def test_health_ok(monkeypatch, tmp_path):
+def test_health_returns_ok(monkeypatch, tmp_path):
     monkeypatch.setattr("server.config.API_KEY", "test-key")
     monkeypatch.setattr("server.config.JOBS_DIR", tmp_path / "jobs")
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
-    assert (tmp_path / "jobs").is_dir(), "lifespan phải tạo JOBS_DIR"
+    assert (tmp_path / "jobs").is_dir(), "lifespan must create JOBS_DIR"
 
 
-def test_khong_co_api_key_thi_khong_khoi_dong(monkeypatch, tmp_path):
-    """Thà chết lúc boot còn hơn chạy một API không khoá cửa."""
+def test_no_api_key_means_no_start(monkeypatch, tmp_path):
+    """Better to fail at boot than to run an API with no lock."""
     monkeypatch.setattr("server.config.API_KEY", "")
     monkeypatch.setattr("server.config.JOBS_DIR", tmp_path / "jobs")
     with pytest.raises(RuntimeError):
@@ -21,7 +21,7 @@ def test_khong_co_api_key_thi_khong_khoi_dong(monkeypatch, tmp_path):
             pass
 
 
-def test_khong_phoi_openapi(monkeypatch, tmp_path):
+def test_schema_is_not_published(monkeypatch, tmp_path):
     monkeypatch.setattr("server.config.API_KEY", "test-key")
     monkeypatch.setattr("server.config.JOBS_DIR", tmp_path / "jobs")
     with TestClient(app) as client:

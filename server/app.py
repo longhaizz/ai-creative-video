@@ -1,7 +1,7 @@
-"""Dub server — một GPU, một queue, một worker.
+"""Dub server — one GPU, one queue, one worker.
 
-Bước 2 mới dựng khung: chỉ có /health. Queue/job/endpoint vào ở bước 3-4,
-model vào ở bước 6-9.
+Step 2 only builds the frame: just /health. The queue, jobs and endpoints
+come in steps 3-4. The models come in steps 6-9.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from server import config
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not config.API_KEY:
-        raise RuntimeError("Phải set biến môi trường API_KEY")
+        raise RuntimeError("You must set the API_KEY environment variable")
     config.JOBS_DIR.mkdir(parents=True, exist_ok=True)
     yield
 
@@ -25,7 +25,8 @@ app = FastAPI(
     title="Dub API",
     version="0.1.0",
     lifespan=lifespan,
-    # Không phơi schema ra ngoài: API này chỉ phục vụ đúng một client mình viết.
+    # Do not publish the schema: this API serves only one client, and we
+    # wrote that client ourselves.
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -36,6 +37,6 @@ app = FastAPI(
 def health():
     return {
         "status": "ok",
-        "models_loaded": [],  # bước 6-9 sẽ điền
-        "gpu": None,          # bước 6 (lúc có torch) sẽ điền
+        "models_loaded": [],  # steps 6-9 will fill this
+        "gpu": None,          # step 6 will fill this, once torch is installed
     }

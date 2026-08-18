@@ -1,11 +1,12 @@
 # ===========================================================================
-# Dub server — venv chính (/opt/venv-main).
+# Dub server — main venv (/opt/venv-main).
 #
-# VSR chạy venv RIÊNG (server/requirements-vsr.txt, bước 7) vì numpy 1.26 ở
-# đây xung đột ABI với numpy 2.2 mà paddle của VSR đòi.
+# VSR runs in its OWN venv (server/requirements-vsr.txt, step 7). The reason
+# is numpy: 1.26 here, but paddle in VSR needs 2.2, and the two ABIs clash.
 #
-# torch / VoxCPM / LatentSync / faster-whisper / demucs vào ở bước 8, khi có
-# code thật gọi tới. Chưa cài sớm để bước 3-5 test được trên máy không GPU.
+# torch / VoxCPM / LatentSync / faster-whisper / demucs arrive in step 8,
+# when real code calls them. We install them late on purpose, so that steps
+# 3-5 still run their tests on a machine with no GPU.
 # ===========================================================================
 
 fastapi
@@ -13,8 +14,8 @@ uvicorn[standard]
 python-multipart
 
 # --------------------------------------------------------------------------
-# [DEV] Chỉ để chạy test. Không cần trên server production.
-#   httpx: fastapi.testclient bắt buộc phải có.
+# [DEV] For tests only. Not needed on the production server.
+#   httpx: fastapi.testclient does not work without it.
 # --------------------------------------------------------------------------
 pytest
 httpx
