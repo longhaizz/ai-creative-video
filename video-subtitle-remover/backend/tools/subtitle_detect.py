@@ -46,11 +46,20 @@ class SubtitleDetect:
         hardware_accelerator = HardwareAccelerator.instance()
         onnx_providers = hardware_accelerator.onnx_providers
         model_config = ModelConfig()
+        # PATCH (dub server). Upstream leaves both thresholds at their
+        # defaults, which finds too much: logos, product text and captions
+        # baked into the artwork all get painted over. These two values come
+        # from video_subtitle_remover.ipynb, where they were tried on real ad
+        # creatives and kept.
+        #   box_thresh: how sure the model must be about a whole text box
+        #   thresh:     how sure it must be about a single pixel
         return TextDetection(
             model_name=model_config.DET_MODEL_NAME,
             model_dir=model_config.DET_MODEL_DIR,
             device="cpu",
             enable_hpi=len(onnx_providers) > 0,
+            box_thresh=0.80,
+            thresh=0.45,
         )
 
     def detect_subtitle(self, img):

@@ -22,6 +22,16 @@ JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "3600"))
 MAX_VIDEO_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(200 * 1024 * 1024)))
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))
 
+# -- outside programs ------------------------------------------------------
+FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
+FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
+
+# -- video-subtitle-remover ------------------------------------------------
+# It runs in its own venv (see server/requirements-vsr.txt), so we call it
+# with that interpreter and from its own folder.
+VSR_DIR = Path(os.getenv("VSR_DIR", "video-subtitle-remover"))
+VSR_PYTHON = os.getenv("VSR_PYTHON", "/opt/venv-vsr/bin/python")
+
 # -- LatentSync ------------------------------------------------------------
 # The vendored source, and the two files it needs. The config and the
 # checkpoint are named relative to the repo, the way upstream expects them.

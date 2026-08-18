@@ -1,0 +1,39 @@
+# ===========================================================================
+# video-subtitle-remover — its OWN venv (/opt/venv-vsr).
+#
+# Why a second venv: numpy. The main venv pins 1.26.4 for LatentSync, and
+# paddle here needs 2.2.x. The two ABIs do not mix, so anything built
+# against one crashes under the other. torch differs too (2.7.0+cu118 here,
+# 2.5.1+cu121 there).
+#
+# The two venvs never talk in-process. The worker runs this one through a
+# subprocess and waits, still holding the GPU, so it is still one job at a
+# time.
+#
+# Order matters, and three of the four lines need their own index. Install
+# exactly like this (from video_subtitle_remover.ipynb, tested on a real
+# run):
+#
+#   $VSR_PIP install torch==2.7.0 torchvision==0.22.0 \
+#       --index-url https://download.pytorch.org/whl/cu118
+#
+#   $VSR_PIP install paddlepaddle-gpu==3.0.0 \
+#       -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
+#
+#   $VSR_PIP install -r video-subtitle-remover/requirements.txt
+#   $VSR_PIP install -r server/requirements-vsr.txt      # this file
+#
+#   $VSR_PIP install onnxruntime-gpu==1.20.1 \
+#       --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-11/pypi/simple/
+#
+# Then the high-performance inference plugin (~1.2 GB, one download):
+#
+#   MPLBACKEND=Agg PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+#       $VSR_BIN/paddlex --install hpi-gpu
+#
+# Python 3.12 here, same as the notebook.
+# ===========================================================================
+
+# Nothing extra beyond what the two lines above install. This file exists to
+# hold the order and the index URLs, which a plain requirements file cannot
+# express: pip takes only one --index-url.
