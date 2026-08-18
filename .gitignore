@@ -1,0 +1,17 @@
+# Notebooks
+LatentSync_1_6.ipynb
+voxcpm.ipynb
+.ipynb_checkpoints/
+
+# IDE and environment variables
+.cursor/
+.env
+.env.*
+
+# Model checkpoint files
+*.pt
+
+# folder not need to be tracked
+myenv/
+label-studio/
+spy-ads-creative-desktop-tool/
