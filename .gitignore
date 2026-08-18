@@ -16,3 +16,12 @@ video_subtitle_remover.ipynb
 myenv/
 label-studio/
 spy-ads-creative-desktop-tool/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Dub server runtime
+jobs/
