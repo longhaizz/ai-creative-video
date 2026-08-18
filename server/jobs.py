@@ -115,11 +115,19 @@ class JobRunner:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        """Clean old files, then start the worker.
+        """Clean old files, then start the one worker.
 
         Nothing is in memory at boot, so any folder left in the jobs
         directory belongs to a job that died in a restart. Delete it.
+
+        Calling this twice is a bug, and a loud one: a second worker would
+        take jobs from the same queue, so two jobs would load models onto the
+        same GPU and run out of memory. The old thread would also keep
+        running with nobody holding it, and the disk clean-up above would
+        delete the files of the job that is running right now.
         """
+        if self._thread is not None:
+            raise RuntimeError("JobRunner.start() was already called")
         self._jobs_dir.mkdir(parents=True, exist_ok=True)
         for path in self._jobs_dir.iterdir():
             _remove(path)

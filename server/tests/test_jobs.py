@@ -130,6 +130,15 @@ def test_running_jobs_are_never_purged(make_runner):
     assert wait_until(lambda: runner.get(job.id) is None, timeout=10)
 
 
+def test_starting_twice_is_refused(make_runner):
+    """A second worker would put two jobs on the same GPU at once."""
+    import pytest
+
+    runner = make_runner(FakePipeline())
+    with pytest.raises(RuntimeError):
+        runner.start()
+
+
 def test_start_removes_files_left_by_a_dead_run(tmp_path):
     from server.jobs import JobRunner
 
