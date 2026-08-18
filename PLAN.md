@@ -216,18 +216,21 @@ Chuyển sang vendor thẳng, vì Step 6 đằng nào cũng phải patch `Latent
 
 Lệch so với plan gốc: **không track lại notebook** — giữ nguyên ignore theo ý chủ repo.
 
-### Step 2 — Dựng khung `server/`
+### Step 2 — Dựng khung `server/` ✅ `f713df5`
 
-- [ ] 🆕 `server/__init__.py`
-- [ ] 🆕 `server/config.py` — đọc env `API_KEY`, `OPENAI_API_KEY`, `JOBS_DIR`, `JOB_TTL_SECONDS`, `VSR_PYTHON`, `VSR_REPO`, `MAX_VIDEO_BYTES`, `MAX_AUDIO_BYTES`
-- [ ] 🆕 `server/app.py` — FastAPI rỗng, chỉ `GET /health` trả `{"status": "ok"}`
-- [ ] 🆕 `server/requirements.txt` — fastapi, uvicorn, python-multipart, pydantic (chưa có model nào)
-- [ ] 🆕 `server/tests/__init__.py`, `server/tests/conftest.py`
-- [ ] 🆕 `server/README.md` — cách chạy dev
-- [ ] 🗑️ `VoxCPM/api/` (cả `__init__.py`, `main.py`, `__pycache__`)
-- [ ] 🗑️ `LatentSync/api/` (cả `__init__.py`, `main.py`)
-- [ ] 🗑️ `LatentSync/requirements-api.txt`, `LatentSync/test_api.sh`, `LatentSync/test_cli.sh` nếu chỉ phục vụ api cũ
-- [ ] **Xong khi**: `uvicorn server.app:app` chạy, `GET /health` trả 200
+- [x] 🆕 `server/__init__.py`
+- [x] 🆕 `server/config.py` — chỉ `API_KEY`, `JOBS_DIR`, `JOB_TTL_SECONDS`, `MAX_VIDEO_BYTES`, `MAX_AUDIO_BYTES`. `OPENAI_API_KEY` / `VSR_PYTHON` / `VSR_REPO` để bước 7-8 thêm khi có người dùng thật
+- [x] 🆕 `server/app.py` — chỉ `GET /health`; `lifespan` chết ngay nếu thiếu `API_KEY`; tắt `docs_url` / `redoc_url` / `openapi_url`
+- [x] 🆕 `server/requirements.txt` — fastapi, uvicorn, python-multipart + khối `[DEV]` pytest, httpx. **Chưa** cài torch/VoxCPM/LatentSync để bước 3-5 test được trên máy không GPU
+- [x] 🆕 `server/tests/test_health.py` — 3 ca
+- [x] 🆕 `server/README.md`
+- [x] 🗑️ `VoxCPM/api/`, `LatentSync/api/`, `LatentSync/requirements-api.txt`, `LatentSync/test_api.sh`. Giữ `LatentSync/test_cli.sh` (test CLI upstream, vẫn dùng được)
+- [x] ✏️ `.gitignore` — thêm `__pycache__/`, `*.py[cod]`, `.venv/`, `.pytest_cache/`, `jobs/`. Repo chưa có mục nào cho Python nên `.pyc` suýt bị commit
+- [x] **Xong khi**: `pytest server/tests` 3 passed, và `uvicorn server.app:app` thật trả `{"status":"ok","models_loaded":[],"gpu":null}` ✓
+
+Bỏ so với plan gốc: `server/tests/__init__.py` và `conftest.py` — pytest không cần, và chưa có fixture nào để chứa. Thêm khi bước 3 có `run_dub` giả.
+
+Nợ nhỏ: `starlette.testclient` cảnh báo `httpx` sắp bị thay bằng `httpx2`. Chưa đổi vì chưa gãy.
 
 ---
 
