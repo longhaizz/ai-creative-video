@@ -345,12 +345,24 @@ Một test viết sai đã bị chính nó bắt: tôi khẳng định video g�
 - [ ] ✏️ `server/requirements.txt` — thêm torch 2.5.1+cu121, numpy 1.26.4, faster-whisper, demucs, soundfile, openai, `-r VoxCPM/requirements.txt`, `-r LatentSync/requirements.txt`
 - [ ] **Xong khi**: smoke test 1 clip ngắn, đủ 8 bước, ra mp4 xem được
 
-### Step 9 — Burn sub
+### Step 9 — Burn sub ✅ `e066913` (làm trước step 8; còn thiếu dòng nối vào pipeline)
 
-- [ ] 🆕 `server/steps/subtitle.py` — port `normalize_style`, `normalize_srt_file`, sinh ASS `\pos` theo % khung hình, ≤32 ký tự/dòng ≤2 dòng, burn bằng ffmpeg — từ `subtitle_api.py`
-- [ ] ✏️ `server/pipeline.py` — chèn bước burn sau mux, dùng cue tiếng đích đã có sẵn
-- [ ] ✏️ `server/schemas.py` — `subtitle_style` (font, cỡ, vị trí)
-- [ ] **Xong khi**: bật `burn_subtitle`, mp4 ra có sub tiếng đích đúng style
+- [x] 🆕 `server/steps/subtitle.py` — `wrap_text_lines`, `split_cue`, `normalize_cues`, `_ass_time`, `write_ass`, `burn`
+- [x] 🆕 `server/tests/test_subtitle.py` — 19 ca, trong đó 1 ca chạy ffmpeg thật
+- [x] `server/schemas.py` đã có `subtitle_font` / `subtitle_size` / `subtitle_position` từ bước 4
+- [x] **Xong khi**: burn thật một clip 1280×720 → chữ hiện đúng vị trí, đúng ngắt dòng, audio giữ nguyên codec, thời lượng không đổi ✓ (đã trích khung hình xem tận mắt)
+- [ ] ✏️ `server/pipeline.py` — chèn bước burn sau mux ← *chờ bước 8*
+
+**Hai thay đổi so với bản client:**
+
+1. **Làm việc trên cue trong bộ nhớ**, không qua file `.srt`. Bản desktop phải ghi ra đĩa rồi đọc lại vì các bước là những chương trình riêng; ở server thì cue đi thẳng từ bước dịch sang.
+2. **Chỉ giữ tham số client gửi được** — font, cỡ, vị trí. Màu chữ, viền, nền bị chôn cứng: code cũ có mang chúng nhưng chưa dropdown nào set.
+
+**Đặt chữ bằng ASS `\pos` chứ không dùng margin của ffmpeg.** Một tỉ lệ chiều cao ("85% từ trên xuống") rơi đúng chỗ trên cả 720p lẫn 1080p; margin tính bằng pixel thì không.
+
+**Test nhắm chỗ sai mà không ai báo**: độ dài dòng · cắt cue phải lấp kín đúng khoảng thời gian cũ, không hở · định dạng centisecond · và **hai cách một giá trị phá hỏng file ASS** — xuống dòng thật làm đứt dòng `Dialogue`, dấu phẩy trong tên font làm lệch mọi trường của `Style`.
+
+**Một ca chạy ffmpeg thật** (bỏ qua nếu máy không có). Đường dẫn `.ass` được nhét vào chuỗi `-vf`, nơi dấu `:` phân tách tuỳ chọn và `'` kết thúc giá trị — escape sai thì filter đứt đôi, chỉ chạy thật mới lộ.
 
 ---
 
