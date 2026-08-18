@@ -273,11 +273,22 @@ Kiểm bằng mutation: cho worker chạy song song (mỗi job một thread) →
 
 Placeholder `not_built_yet` ném `PipelineError("The dub pipeline is not built yet")` — app import được và chạy được trước khi có bước 8.
 
-### Step 5 — Huỷ hợp tác
+### Step 5 — Huỷ hợp tác ✅ `e145818`
 
-- [ ] ✏️ `server/jobs.py` — `should_cancel()` closure truyền vào `run_dub`; job `queued` bị huỷ thì worker bỏ qua không chạy
-- [ ] 🆕 `server/tests/test_cancel.py` — huỷ job `queued` (tức thì), huỷ job `running` (dừng trong vòng một bước), huỷ job đã `done` (không đổi gì)
-- [ ] **Xong khi**: cả ba ca xanh
+Cơ chế đã dựng sẵn ở bước 3 (`cancel()` bật cờ, `ctx.check_cancel()` ném `JobCancelled`, `_run_one` bắt) và bước 4 phơi ra `DELETE`. Bước này bổ sung thứ còn thiếu: **bằng chứng job đang chạy dừng thật**.
+
+- [x] ✏️ `server/tests/fake_pipeline.py` — `steps_done` đếm số bước đã xong, `started` là `threading.Event` để test huỷ đúng lúc pipeline đã thật sự vào chạy (huỷ sớm quá thì chỉ chứng minh lại ca `queued`)
+- [x] 🆕 `server/tests/test_cancel.py` — 9 ca, gom cả mức `JobRunner` lẫn mức HTTP
+  - job đang chờ: không bao giờ chạm pipeline
+  - job đang chạy: dừng giữa chừng (`steps_done < 10`), không sinh kết quả, không để lại file
+  - huỷ rồi worker vẫn chạy tiếp job sau
+  - huỷ job đã xong / job lạ / huỷ hai lần → từ chối
+- [x] ✏️ Dời hết test huỷ khỏi `test_jobs.py` và `test_api.py` về một chỗ
+- [x] **Xong khi**: `pytest server/tests` 39 passed ✓
+
+Mutation check: cho `check_cancel()` không ném gì → đúng hai ca "dừng giữa chừng" đỏ. Bảy ca kia vẫn xanh, đúng như mong đợi — chúng kiểm nhánh dự phòng trong `_run_one` (pipeline phớt lờ cờ mà chạy hết thì vẫn bị đánh dấu `cancelled` và xoá file).
+
+**Giới hạn đã biết**: huỷ chỉ ăn ở ranh giới bước. Bước 7 (VSR chạy `subprocess`) và bước 8 (vòng TTS từng cue) phải tự thêm điểm kiểm bên trong, nếu không một lượt LatentSync dài vẫn phải chờ hết.
 
 Hết giai đoạn B: toàn bộ logic mới đã có test, chưa đụng GPU dòng nào.
 
