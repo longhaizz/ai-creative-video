@@ -297,8 +297,7 @@ class JobRunner:
     def _run_one(self, job: Job) -> None:
         if self._is_cancelled(job.id):
             # Cancelled while it was still waiting. Never touch the GPU.
-            self._finish(job, CANCELLED)
-            _remove(job.workdir)
+            self._cancel_and_clean(job)
             return
 
         with self._lock:
@@ -308,8 +307,7 @@ class JobRunner:
         try:
             result = self._run_dub(context)
         except JobCancelled:
-            self._finish(job, CANCELLED)
-            _remove(job.workdir)
+            self._cancel_and_clean(job)
         except PipelineError as error:
             self._finish(job, FAILED, error=str(error), error_code=error.code)
         except Exception as error:  # noqa: BLE001 - any bug must land in the job
@@ -318,10 +316,18 @@ class JobRunner:
             if self._is_cancelled(job.id):
                 # The pipeline ignored the flag and ran to the end. The user
                 # asked to stop, so we still call it cancelled.
-                self._finish(job, CANCELLED)
-                _remove(job.workdir)
+                self._cancel_and_clean(job)
             else:
                 self._finish(job, DONE, result_path=Path(result))
+
+    def _cancel_and_clean(self, job: Job) -> None:
+        """Delete the files first, then mark the job cancelled.
+
+        The other way round is a lie the client can see: it polls, reads
+        "cancelled", and the folder is still on disk for a moment.
+        """
+        _remove(job.workdir)
+        self._finish(job, CANCELLED)
 
 
 def _remove(path: Path) -> None:

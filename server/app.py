@@ -27,17 +27,35 @@ def not_built_yet(context: JobContext) -> Path:
     raise PipelineError("The dub pipeline is not built yet", code="internal")
 
 
-def create_app(run_dub=not_built_yet) -> FastAPI:
+def _gpu_name() -> str | None:
+    """The GPU we are on, or None. torch is imported here, not at the top,
+    so the server still starts on a machine that has no torch at all."""
+    try:
+        import torch
+    except ImportError:
+        return None
+    return torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+
+
+def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
     """Build the app around one pipeline function.
 
     Tests pass a fake here. That is the only seam they need: everything in
     this file can then be checked with no GPU and no model files.
+
+    `models` is a list of objects with a `name` and a `load()`. They are
+    loaded once, before the first request, and stay in memory for every job
+    after that. Loading them is why the server takes a minute to come up.
     """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if not config.API_KEY:
             raise RuntimeError("You must set the API_KEY environment variable")
+        app.state.models_loaded = []
+        for model in models:
+            model.load()
+            app.state.models_loaded.append(model.name)
         runner = JobRunner(run_dub)
         runner.start()
         app.state.runner = runner
@@ -71,8 +89,8 @@ def create_app(run_dub=not_built_yet) -> FastAPI:
     def health():
         return {
             "status": "ok",
-            "models_loaded": [],  # steps 6-9 will fill this
-            "gpu": None,          # step 6 will fill this, once torch is here
+            "models_loaded": app.state.models_loaded,
+            "gpu": _gpu_name(),
         }
 
     @app.post("/dub", status_code=202)

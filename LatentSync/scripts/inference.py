@@ -24,19 +24,26 @@ from latentsync.whisper.audio2feature import Audio2Feature
 from DeepCache import DeepCacheSDHelper
 
 
-def main(config, args):
-    if not os.path.exists(args.video_path):
-        raise RuntimeError(f"Video path '{args.video_path}' not found")
-    if not os.path.exists(args.audio_path):
-        raise RuntimeError(f"Audio path '{args.audio_path}' not found")
+# PATCH (dub server). Upstream built the whole pipeline inside main(), so
+# every call reloaded the VAE, the UNet checkpoint (~1.3 GB from disk) and
+# the whisper encoder, then moved them to the GPU: 30-60 seconds of pure
+# waiting before any real work started.
+#
+# Our server runs one job after another on one GPU, so it builds the
+# pipeline once at start-up and keeps it. Only the part below was pulled out
+# into build_pipeline(); main() calls it first, so the old CLI still behaves
+# exactly as before.
+def build_pipeline(config, ckpt_path, enable_deepcache=False):
+    """Load the models and return (pipeline, dtype).
 
+    dtype comes back too, because the caller has to pass the same value as
+    weight_dtype when it runs the pipeline.
+    """
     # Check if the GPU supports float16
     is_fp16_supported = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] > 7
     dtype = torch.float16 if is_fp16_supported else torch.float32
 
-    print(f"Input video path: {args.video_path}")
-    print(f"Input audio path: {args.audio_path}")
-    print(f"Loaded checkpoint path: {args.inference_ckpt_path}")
+    print(f"Loaded checkpoint path: {ckpt_path}")
 
     scheduler = DDIMScheduler.from_pretrained("configs")
 
@@ -60,7 +67,7 @@ def main(config, args):
 
     unet, _ = UNet3DConditionModel.from_pretrained(
         OmegaConf.to_container(config.model),
-        args.inference_ckpt_path,
+        ckpt_path,
         device="cpu",
     )
 
@@ -74,10 +81,26 @@ def main(config, args):
     ).to("cuda")
 
     # use DeepCache
-    if args.enable_deepcache:
+    if enable_deepcache:
         helper = DeepCacheSDHelper(pipe=pipeline)
         helper.set_params(cache_interval=3, cache_branch_id=0)
         helper.enable()
+
+    return pipeline, dtype
+
+
+def main(config, args):
+    if not os.path.exists(args.video_path):
+        raise RuntimeError(f"Video path '{args.video_path}' not found")
+    if not os.path.exists(args.audio_path):
+        raise RuntimeError(f"Audio path '{args.audio_path}' not found")
+
+    print(f"Input video path: {args.video_path}")
+    print(f"Input audio path: {args.audio_path}")
+
+    pipeline, dtype = build_pipeline(
+        config, args.inference_ckpt_path, args.enable_deepcache
+    )
 
     if args.seed != -1:
         set_seed(args.seed)

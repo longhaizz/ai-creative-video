@@ -21,3 +21,14 @@ JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "3600"))
 
 MAX_VIDEO_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(200 * 1024 * 1024)))
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))
+
+# -- LatentSync ------------------------------------------------------------
+# The vendored source, and the two files it needs. The config and the
+# checkpoint are named relative to the repo, the way upstream expects them.
+LATENTSYNC_DIR = Path(os.getenv("LATENTSYNC_DIR", "LatentSync"))
+LATENTSYNC_CONFIG = Path(
+    os.getenv("LATENTSYNC_CONFIG", "configs/unet/stage2_512.yaml")
+)
+LATENTSYNC_CHECKPOINT = Path(
+    os.getenv("LATENTSYNC_CHECKPOINT", "checkpoints/latentsync_unet.pt")
+)
