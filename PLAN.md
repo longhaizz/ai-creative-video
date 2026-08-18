@@ -296,12 +296,21 @@ Hết giai đoạn B: toàn bộ logic mới đã có test, chưa đụng GPU d�
 
 ## Giai đoạn C — Nối model (cần GPU)
 
-### Step 6 — Patch LatentSync để preload
+### Step 6 — Patch LatentSync để preload ✅ `170bd24` (chưa chạy trên GPU)
 
-- [ ] ✏️ `LatentSync/scripts/inference.py` — tách phần dựng `Audio2Feature` + `AutoencoderKL` + `UNet3DConditionModel` + `LipsyncPipeline` ra hàm `build_pipeline(config, ckpt_path, enable_deepcache)`; `main()` gọi lại nó để CLI cũ không gãy. Ghi comment nêu lý do patch.
-- [ ] 🆕 `server/steps/lipsync.py` — giữ pipeline đã preload, hàm `run(video, audio, out, steps, guidance, seed, on_log, should_cancel)`; bắt `RuntimeError("Face not detected")` → raise `NoFaceError` riêng
-- [ ] ✏️ `server/app.py` — preload trong `lifespan`, `models_loaded` trong `/health`
-- [ ] **Xong khi**: gọi lipsync hai lần liên tiếp, lần thứ hai không còn 30–60s load
+- [x] ✏️ `LatentSync/scripts/inference.py` — `build_pipeline(config, ckpt_path, enable_deepcache) -> (pipeline, dtype)`; `main()` gọi lại nó nên CLI cũ không đổi hành vi. Trả cả `dtype` vì lúc chạy phải truyền `weight_dtype` đúng giá trị đó
+- [x] 🆕 `server/steps/lipsync.py` — `LipsyncModel` giữ pipeline giữa các job; `NoFaceError` (mã `no_face`)
+- [x] ✏️ `server/config.py` — `LATENTSYNC_DIR` / `LATENTSYNC_CONFIG` / `LATENTSYNC_CHECKPOINT`
+- [x] ✏️ `server/app.py` — `create_app(run_dub, models=())`, nạp trước request đầu tiên, `/health` báo tên model + tên GPU
+- [x] 🆕 `server/tests/test_models.py` — 5 ca, dùng `FakeModel`, không cần GPU
+- [x] `pytest server/tests` 44 passed; `import server.app` chạy được trên máy **không có torch**
+- [ ] **Xong khi**: gọi lipsync hai lần liên tiếp trên GPU, lần thứ hai không còn 30–60s load ← *chưa kiểm được, cần máy GPU + checkpoint*
+
+**Cạm bẫy phải xử lý: đường dẫn tương đối.** `build_pipeline` đọc `"configs"`, `"checkpoints/whisper/small.pt"`, và config trỏ `latentsync/utils/mask.png` — tất cả tính từ gốc repo LatentSync. Nên cả `load()` lẫn `run()` đều bọc trong `chdir(repo_dir)`. `chdir` là toàn process, chỉ an toàn vì đúng một worker chạy một job — đã ghi `ponytail:` tại chỗ, có worker thứ hai thì phải đổi sang truyền đường dẫn tuyệt đối vào upstream.
+
+**Giữ được tính chất không-cần-GPU**: `lipsync.py` không import torch/latentsync ở mức module, `_gpu_name()` bọc `import torch` trong `try/except ImportError`. 44 test vẫn chạy trên laptop.
+
+**Bug thứ tự do test mới bắt được**: job bị huỷ được đánh dấu `cancelled` **trước khi** xoá file, nên client poll thấy `cancelled` mà thư mục còn nằm đó. Gộp thành `_cancel_and_clean()` — xoá file trước, đổi trạng thái sau.
 
 ### Step 7 — Venv VSR + wrapper subprocess
 
