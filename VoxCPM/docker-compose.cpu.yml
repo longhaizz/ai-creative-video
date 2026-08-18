@@ -1,0 +1,19 @@
+services:
+  voxcpm:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: voxcpm:cpu
+    ports:
+      - "8000:8000"
+    volumes:
+      - voxcpm-models:/models
+    environment:
+      HF_HOME: /models
+      MODEL_ID: openbmb/VoxCPM2
+      DEVICE: cpu
+      VOXCPM_API_KEY: ${VOXCPM_API_KEY:?Set VOXCPM_API_KEY in .env}
+    restart: unless-stopped
+
+volumes:
+  voxcpm-models:

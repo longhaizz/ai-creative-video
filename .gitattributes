@@ -1,0 +1,4 @@
+# Giữ LF cho mọi file text. Bắt buộc: source vendor (VoxCPM, LatentSync,
+# video-subtitle-remover) có shell script sẽ chạy trong Docker/Linux, và
+# CRLF làm hỏng dòng shebang.
+* text=auto eol=lf

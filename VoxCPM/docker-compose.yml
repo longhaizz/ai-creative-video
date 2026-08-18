@@ -1,0 +1,18 @@
+services:
+  voxcpm:
+    build: .
+    image: voxcpm:try
+    ports:
+      - "8000:8000"
+    volumes:
+      - voxcpm-models:/models
+    environment:
+      HF_HOME: /models
+      MODEL_ID: openbmb/VoxCPM2
+      DEVICE: cuda:0
+      VOXCPM_API_KEY: ${VOXCPM_API_KEY:?Set VOXCPM_API_KEY in .env}
+    gpus: all
+    restart: unless-stopped
+
+volumes:
+  voxcpm-models:
