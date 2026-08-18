@@ -142,7 +142,13 @@ class JobRunner:
 
     # -- public API --------------------------------------------------------
 
-    def submit(self, params: Any) -> Job:
+    def create(self, params: Any) -> Job:
+        """Make a job and its folder, but do NOT queue it yet.
+
+        The caller still has to write the uploaded files into job.workdir.
+        If we queued here, the worker could pick the job up while the video
+        is still being uploaded.
+        """
         self.purge_expired()
         job_id = uuid.uuid4().hex
         workdir = self._jobs_dir / job_id
@@ -150,7 +156,16 @@ class JobRunner:
         job = Job(id=job_id, params=params, workdir=workdir)
         with self._lock:
             self._jobs[job_id] = job
+        return job
+
+    def enqueue(self, job_id: str) -> None:
+        """Put a created job in the line. The files must be on disk by now."""
         self._queue.put(job_id)
+
+    def submit(self, params: Any) -> Job:
+        """create() + enqueue(), for callers with no files to write."""
+        job = self.create(params)
+        self.enqueue(job.id)
         return job
 
     def get(self, job_id: str) -> Job | None:
