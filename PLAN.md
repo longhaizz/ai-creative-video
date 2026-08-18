@@ -312,13 +312,25 @@ Hết giai đoạn B: toàn bộ logic mới đã có test, chưa đụng GPU d�
 
 **Bug thứ tự do test mới bắt được**: job bị huỷ được đánh dấu `cancelled` **trước khi** xoá file, nên client poll thấy `cancelled` mà thư mục còn nằm đó. Gộp thành `_cancel_and_clean()` — xoá file trước, đổi trạng thái sau.
 
-### Step 7 — Venv VSR + wrapper subprocess
+### Step 7 — Venv VSR + wrapper subprocess ✅ `cb7a0e7` (chưa chạy trên GPU)
 
-- [ ] ✏️ `video-subtitle-remover/backend/tools/subtitle_detect.py` — thêm `box_thresh=0.80, thresh=0.45` vào `TextDetection(...)`, comment nêu nguồn (notebook)
-- [ ] 🆕 `server/requirements-vsr.txt` — torch 2.7.0+cu118, torchvision 0.22.0, paddlepaddle-gpu 3.0.0, onnxruntime-gpu 1.20.1 + `-r video-subtitle-remover/requirements.txt`
-- [ ] 🆕 `server/steps/vsr.py` — `subprocess` gọi `$VSR_PYTHON backend/main.py --input --output --subtitle-area-coords ... --inpaint-mode ...`, đọc stdout đẩy vào `on_log`, kiểm `should_cancel` để `kill()`, env `MPLBACKEND=Agg` + `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True`
-- [ ] 🆕 `server/steps/vsr.py` — hàm quy đổi `vsr_area` từ % sang pixel theo kích thước video thật
-- [ ] **Xong khi**: xoá sub một clip thật, kết quả khớp notebook
+- [x] ✏️ `video-subtitle-remover/backend/tools/subtitle_detect.py` — `box_thresh=0.80, thresh=0.45`. Bản vendor thiếu, notebook vá tay lúc runtime. Không có nó thì detector quét cả logo và chữ trong artwork
+- [x] 🆕 `server/requirements-vsr.txt` — giữ **thứ tự cài và 3 index URL riêng**; pip chỉ nhận một `--index-url` nên không diễn tả được bằng requirements thường, phải ghi thành lệnh trong comment
+- [x] 🆕 `server/steps/vsr.py` — `probe_size()` (ffprobe), `area_to_pixels()`, `build_command()`, `remove_subtitles()`
+- [x] ✏️ `server/config.py` — `VSR_DIR`, `VSR_PYTHON`, `FFPROBE_BIN`, `FFMPEG_BIN`
+- [x] 🆕 `server/tests/test_vsr.py` — 8 ca, không cần paddle
+- [x] `pytest server/tests` 54 passed
+- [ ] **Xong khi**: xoá sub một clip thật, kết quả khớp notebook ← *chưa kiểm được, cần venv VSR + GPU*
+
+**Client gửi vùng quét theo % chứ không theo pixel** — nó không biết kích thước video, và cùng một cấu hình phải đúng cho cả 720p lẫn 1080p. Server `ffprobe` lấy kích thước rồi quy đổi.
+
+**Log bị tiết chế còn 1 dòng / 2 giây.** VSR vẽ thanh tqdm; Python dịch `\r` thành `\n` nên mỗi lần vẽ lại thành một dòng riêng — không chặn thì log job phình hàng nghìn dòng gần giống nhau.
+
+**Huỷ**: kiểm cờ mỗi lần đọc được một dòng stdout rồi `process.kill()`. VSR in đủ dày nên không cần timer riêng.
+
+**Test nhắm hai chỗ sai mà không ai báo**: phép quy đổi %, và **thứ tự toạ độ** trên dòng lệnh (`YMIN YMAX XMIN XMAX`). Sai thứ tự thì nó bôi nhầm chỗ trên khung hình mà không có lỗi nào bắn ra.
+
+Một test viết sai đã bị chính nó bắt: tôi khẳng định video gấp đôi thì toạ độ gấp đôi chính xác, nhưng `int()` cắt thập phân nên lệch 1 pixel (`0.96×360=345.6→345` vs `0.96×720=691.2→691`). Sửa test thành "sai lệch ≤ 1 pixel", không sửa code.
 
 ### Step 8 — `run_dub` thật
 
