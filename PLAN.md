@@ -152,10 +152,11 @@ Kèm docs dựng bare-metal hai venv + systemd.
 **Đúng một seam mới:**
 
 ```
-run_dub(params, workdir, on_log, should_cancel) -> Path
+run_dub(ctx) -> Path
+# ctx.params · ctx.workdir · ctx.log(msg) · ctx.step(name) · ctx.check_cancel()
 ```
 
-Thuần Python, toàn bộ 8 bước GPU nằm sau nó. App FastAPI nhận nó dạng inject.
+Thuần Python, toàn bộ 8 bước GPU nằm sau nó. `JobRunner` nhận nó dạng inject.
 
 | Tầng | Cách test | Cần GPU |
 |---|---|---|
@@ -236,18 +237,22 @@ Nợ nhỏ: `starlette.testclient` cảnh báo `httpx` sắp bị thay bằng `h
 
 ## Giai đoạn B — Hạ tầng job (không cần GPU)
 
-### Step 3 — Job store + queue + worker
+### Step 3 — Job store + queue + worker ✅ `1ac3334`
 
-- [ ] 🆕 `server/jobs.py`
-  - [ ] `Job` dataclass: `id`, `status`, `step`, `log: list[str]`, `error`, `error_code`, `result_path`, `created_at`, `finished_at`, `cancel_flag`
-  - [ ] `JobStore`: `dict[str, Job]` + `threading.Lock`, `create()`, `get()`, `append_log()`, `set_step()`, `cancel()`, `purge_expired()`
-  - [ ] `queue.Queue` không giới hạn + một worker thread khởi trong `lifespan`
-  - [ ] `queue_position()` — đếm số job `queued` đứng trước
-  - [ ] TTL 1h: thread dọn định kỳ + quét `JOBS_DIR` lúc khởi động
-  - [ ] Xoá file kết quả ngay sau khi client tải xong
-- [ ] 🆕 `server/tests/fake_pipeline.py` — `run_dub` giả: sleep theo bước, phun log, raise theo yêu cầu
-- [ ] 🆕 `server/tests/test_jobs.py` — nộp 3 job chạy tuần tự, `queue_position` giảm dần, TTL xoá đúng
-- [ ] **Xong khi**: `pytest server/tests/test_jobs.py` xanh, không cần GPU
+- [x] 🆕 `server/jobs.py` — `Job` dataclass, `JobRunner` (store + `queue.Queue` + một worker thread), `JobContext`, `JobCancelled`, `PipelineError`
+  - [x] `submit()` / `get()` / `cancel()` / `queue_position()` / `snapshot(since)` / `drop()` / `purge_expired()`
+  - [x] TTL: gọi khi `submit()` và sau mỗi job, **không** dùng thread hẹn giờ. Quét sạch `JOBS_DIR` lúc `start()`
+  - [x] Xoá file ngay khi `drop()` (client tải xong)
+- [x] 🆕 `server/tests/conftest.py` — fixture `make_runner` + helper `wait_until`
+- [x] 🆕 `server/tests/fake_pipeline.py` — `FakePipeline` ghi lại thời điểm chạy để phát hiện chồng lấn, `failing_pipeline`, `crashing_pipeline`
+- [x] 🆕 `server/tests/test_jobs.py` — 12 ca
+- [x] **Xong khi**: `pytest server/tests` 15 passed, không cần GPU ✓
+
+**Đổi seam so với plan gốc.** `run_dub(params, workdir, on_log, should_cancel)` → **`run_dub(ctx) -> Path`**, với `ctx.workdir` / `ctx.params` / `ctx.log()` / `ctx.step()` / `ctx.check_cancel()`. Lý do: bốn callback rời đã thiếu chỗ báo `step`, và mỗi nhu cầu mới lại phải nới chữ ký. `check_cancel()` **ném** `JobCancelled` thay vì trả bool, nên pipeline chỉ cần rắc một dòng giữa các bước.
+
+**Bug bắt được nhờ test**: `queue_position` ban đầu sắp thứ tự bằng `created_at`. `time.time()` trên Windows chỉ nhích mỗi ~15.6ms, nên ba job nộp liên tiếp trùng timestamp và không cái nào đứng trước cái nào. Sửa bằng cách duyệt theo thứ tự chèn của `dict` — hàng đợi vốn đã có thứ tự, không cần suy ra từ đồng hồ.
+
+Kiểm bằng mutation: cho worker chạy song song (mỗi job một thread) → 5 test đỏ. Test có răng thật.
 
 ### Step 4 — Endpoint + auth
 
@@ -298,7 +303,7 @@ Hết giai đoạn B: toàn bộ logic mới đã có test, chưa đụng GPU d�
 - [ ] 🆕 `server/steps/transcribe.py` — faster-whisper in-process (không cần tách process vì không có Qt), port `asr_quality` + `load_asr_json` + `parse_srt` từ `subtitle_api.py`, giữ logic retry `large-v3`
 - [ ] 🆕 `server/steps/translate.py` — port từ `openai_translate_api.py`, key lấy từ env
 - [ ] 🆕 `server/steps/synth.py` — VoxCPM in-process; port `fit_tempo`, `fit_audio`, `match_tempo`, `stretch_if_long`, `place_segments`, `asr_needs_review`, `with_voice_instruction`, `VOICE_PRESETS` từ `voxcpm_api.py`; port vòng ratio/rewrite từ `voxcpm_panel.py:_timed_speech`
-- [ ] 🆕 `server/pipeline.py` — `run_dub(params, workdir, on_log, should_cancel) -> Path`, ghép 8 bước, kiểm `should_cancel` ở ranh giới mỗi bước và mỗi vòng cue; bắt `NoFaceError` → log warn + bỏ qua lipsync (không fail)
+- [ ] 🆕 `server/pipeline.py` — `run_dub(ctx) -> Path`, ghép 8 bước, gọi `ctx.check_cancel()` ở ranh giới mỗi bước và mỗi vòng cue; bắt `NoFaceError` → log warn + bỏ qua lipsync (không fail)
 - [ ] ✏️ `server/app.py` — thay `run_dub` giả bằng bản thật
 - [ ] 🆕 `server/tests/smoke_run_dub.py` — clip ngắn thật, chạy tay, không nằm trong `pytest` mặc định
 - [ ] ✏️ `server/requirements.txt` — thêm torch 2.5.1+cu121, numpy 1.26.4, faster-whisper, demucs, soundfile, openai, `-r VoxCPM/requirements.txt`, `-r LatentSync/requirements.txt`
