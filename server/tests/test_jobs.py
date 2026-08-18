@@ -91,27 +91,6 @@ def test_a_plain_bug_does_not_kill_the_worker(make_runner):
     assert wait_until(lambda: runner.get(second.id).status == FAILED)
 
 
-def test_cancel_before_the_job_starts_skips_the_gpu(make_runner):
-    pipeline = FakePipeline(sleep=0.3)
-    runner = make_runner(pipeline)
-
-    first = runner.submit({})
-    second = runner.submit({})
-    assert runner.cancel(second.id) is True
-
-    assert wait_until(lambda: runner.get(second.id).status == CANCELLED, timeout=10)
-    assert pipeline.ran() == [first.id], "the cancelled job must never run"
-
-
-def test_cancel_a_finished_job_changes_nothing(make_runner):
-    runner = make_runner(FakePipeline())
-    job = runner.submit({})
-
-    assert wait_until(lambda: runner.get(job.id).status == DONE)
-    assert runner.cancel(job.id) is False
-    assert runner.get(job.id).status == DONE
-
-
 def test_expired_jobs_are_purged_with_their_files(make_runner, tmp_path):
     runner = make_runner(FakePipeline(), ttl_seconds=0)
     job = runner.submit({})

@@ -197,21 +197,4 @@ def test_a_failed_job_reports_its_code(client):
         assert body["error_code"] == "no_face"
         assert "no face" in body["error"]
 
-
-# -- cancel -----------------------------------------------------------------
-
-
-def test_cancel_a_waiting_job(client):
-    with client(FakePipeline(sleep=0.3)) as http:
-        post_dub(http)
-        second = post_dub(http).json()["job_id"]
-
-        assert http.delete(f"/jobs/{second}", headers=AUTH).status_code == 200
-        assert wait_for_status(http, second, "cancelled", timeout=10)
-
-
-def test_cancel_a_finished_job_is_refused(client):
-    with client() as http:
-        job_id = post_dub(http).json()["job_id"]
-        assert wait_for_status(http, job_id, "done")
-        assert http.delete(f"/jobs/{job_id}", headers=AUTH).status_code == 409
+# Cancelling has its own file: server/tests/test_cancel.py

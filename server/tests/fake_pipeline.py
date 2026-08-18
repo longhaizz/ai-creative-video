@@ -21,13 +21,21 @@ class FakePipeline:
         self.steps = steps
         self.sleep = sleep
         self.calls: list[tuple[str, float, float]] = []  # (job_id, start, end)
+        self.steps_done: list[str] = []
+        # Set as soon as the pipeline is really inside a job. A cancel test
+        # must not fire before the worker has even started, or it would only
+        # prove the queued case again.
+        self.started = threading.Event()
         self._lock = threading.Lock()
 
     def __call__(self, context: JobContext) -> Path:
         start = time.monotonic()
+        self.started.set()
         for number in range(1, self.steps + 1):
             context.check_cancel()
             context.step(f"step {number}/{self.steps}")
+            with self._lock:
+                self.steps_done.append(f"{context.job_id}:{number}")
             time.sleep(self.sleep)
         context.check_cancel()
 
@@ -36,6 +44,10 @@ class FakePipeline:
         with self._lock:
             self.calls.append((context.job_id, start, time.monotonic()))
         return result
+
+    def steps_done_count(self) -> int:
+        with self._lock:
+            return len(self.steps_done)
 
     def ran(self) -> list[str]:
         with self._lock:
