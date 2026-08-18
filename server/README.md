@@ -8,15 +8,35 @@ Thiết kế và lộ trình: [`../PLAN.md`](../PLAN.md).
 
 ## Chạy dev
 
-```bash
-python -m venv .venv && . .venv/Scripts/activate    # Linux: . .venv/bin/activate
-pip install -r server/requirements.txt
+Chạy từ **gốc repo**, không phải trong `server/` — `server` là package.
 
-API_KEY=dev-key uvicorn server.app:app --reload
-curl localhost:8000/health
+```bash
+pip install -r server/requirements.txt
 ```
 
-Chạy từ **gốc repo**, không phải trong `server/` — `server` là package.
+**PowerShell (Windows)** — không có cú pháp `VAR=value cmd`, phải set biến trước:
+
+```powershell
+$env:API_KEY = "dev-key"
+uvicorn server.app:app --reload
+```
+
+**Bash (Linux/macOS/Git Bash)**:
+
+```bash
+API_KEY=dev-key uvicorn server.app:app --reload
+```
+
+Gọi thử ở terminal khác:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/health   # PowerShell
+```
+```bash
+curl localhost:8000/health                        # bash
+```
+
+Đúng thì trả `{"status":"ok","models_loaded":[],"gpu":null}`.
 
 ## Test
 
