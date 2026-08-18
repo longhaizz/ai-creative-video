@@ -254,20 +254,24 @@ Nợ nhỏ: `starlette.testclient` cảnh báo `httpx` sắp bị thay bằng `h
 
 Kiểm bằng mutation: cho worker chạy song song (mỗi job một thread) → 5 test đỏ. Test có răng thật.
 
-### Step 4 — Endpoint + auth
+### Step 4 — Endpoint + auth ✅ `7cb8d64`
 
-- [ ] 🆕 `server/schemas.py` — pydantic model cho `DubParams` (đủ bảng tham số ở §4), whitelist `whisper_model` / `vsr_mode`, ràng buộc `ge/le` cho các số
-- [ ] 🆕 `server/auth.py` — `HTTPBearer` + `secrets.compare_digest`, port từ `VoxCPM/api/main.py` cũ
-- [ ] 🆕 `server/uploads.py` — `save_upload()` giới hạn dung lượng theo chunk + whitelist đuôi file, port từ `LatentSync/api/main.py` cũ
-- [ ] ✏️ `server/app.py`
-  - [ ] `POST /dub` → 202 `{job_id}`
-  - [ ] `GET /jobs/{id}?since=N`
-  - [ ] `GET /jobs/{id}/result` → `FileResponse`
-  - [ ] `DELETE /jobs/{id}`
-  - [ ] `GET /health` → `{status, models_loaded, gpu}`
-  - [ ] `dependencies=[Depends(require_api_key)]`, tắt `docs_url` / `openapi_url`
-- [ ] 🆕 `server/tests/test_api.py` — 401 không token, 202 submit, poll `since`, 413 quá cỡ, 415 sai đuôi, 404 job lạ
-- [ ] **Xong khi**: `pytest server/tests/` xanh với `run_dub` giả
+- [x] 🆕 `server/schemas.py` — `DubParams` (17 field, whitelist bằng `Literal`, `ge/le` cho số, validator vùng quét phải là hộp thật) + `DubRequest` thêm hai file
+- [x] 🆕 `server/auth.py` — `HTTPBearer` + `secrets.compare_digest`
+- [x] 🆕 `server/uploads.py` — đếm dung lượng **trong lúc đọc** chứ không tin `Content-Length`, whitelist đuôi file, xoá file dở khi lỗi
+- [x] ✏️ `server/app.py` — `create_app(run_dub)`; `POST /dub`, `GET /jobs/{id}?since=N`, `GET /jobs/{id}/result`, `DELETE /jobs/{id}`, `GET /health`
+- [x] ✏️ `server/jobs.py` — tách `submit()` thành `create()` + `enqueue()`
+- [x] 🆕 `server/tests/test_api.py` — 21 ca
+- [x] 🗑️ `server/tests/test_health.py` — `/health` giờ cần token, `test_api.py` đã phủ
+- [x] **Xong khi**: `pytest server/tests` 34 passed; và uvicorn thật: không token → 401, `POST /dub` → 202 + job_id, poll ra `error_code: internal` (pipeline chưa dựng), `cfg_value=99` → 422 ✓
+
+**Hai chỗ phải chữa mới chạy được:**
+
+1. **Upload đua với worker.** `submit()` cũ vừa tạo job vừa xếp hàng trong một lệnh, nên worker có thể nhấc job lên trong lúc video còn đang upload. Tách thành `create()` → ghi file → `enqueue()`.
+
+2. **Form model bị lồng.** FastAPI chỉ trải phẳng form model khi nó là body param **duy nhất**. Có `UploadFile` đứng cạnh thì mọi tham số chui vào field `params` và request nào cũng 422. Chuyển file vào trong `DubRequest`; `settings()` trả `DubParams` sạch để pipeline không cầm file handle đang mở.
+
+Placeholder `not_built_yet` ném `PipelineError("The dub pipeline is not built yet")` — app import được và chạy được trước khi có bước 8.
 
 ### Step 5 — Huỷ hợp tác
 
