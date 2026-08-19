@@ -1,17 +1,24 @@
 # ===========================================================================
-# Dub server — main venv (/opt/venv-main).
+# Dub server - main venv (/opt/venv-main), the HTTP side.
 #
-# VSR runs in its OWN venv (server/requirements-vsr.txt, step 7). The reason
-# is numpy: 1.26 here, but paddle in VSR needs 2.2, and the two ABIs clash.
+# The models are NOT here. They live in server/requirements-models.txt, and
+# that split is deliberate: the queue, the API, the cancel path, the timing
+# maths and the subtitle work all have tests that run on a laptop with no
+# GPU. Putting torch in this file would end that.
 #
-# torch / VoxCPM / LatentSync / faster-whisper / demucs arrive in step 8,
-# when real code calls them. We install them late on purpose, so that steps
-# 3-5 still run their tests on a machine with no GPU.
+#   pip install -r server/requirements.txt          # to work on the API
+#   pip install -r server/requirements-models.txt   # to run real jobs
+#
+# The subtitle remover has a third venv of its own, because its numpy does
+# not fit next to LatentSync. See server/requirements-vsr.txt.
 # ===========================================================================
 
 fastapi
 uvicorn[standard]
 python-multipart
+
+# Used by the OpenAI calls in server/steps/translate.py.
+requests
 
 # --------------------------------------------------------------------------
 # [DEV] For tests only. Not needed on the production server.

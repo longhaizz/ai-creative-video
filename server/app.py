@@ -18,6 +18,7 @@ from starlette.background import BackgroundTask
 from server import config
 from server.auth import require_api_key
 from server.jobs import DONE, JobContext, JobRunner, PipelineError
+from server.limits import BodySizeLimit
 from server.schemas import DubRequest
 from server.uploads import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, save_upload
 
@@ -75,6 +76,11 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
+
+    # Wrapped around everything, so it runs before routing and before the
+    # token is checked. Without it, an upload of any size is written to disk
+    # first and refused afterwards.
+    app.add_middleware(BodySizeLimit, limit=config.MAX_REQUEST_BYTES)
 
     def get_runner() -> JobRunner:
         return app.state.runner
@@ -159,4 +165,30 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
     return app
 
 
-app = create_app()
+def build_production_app() -> FastAPI:
+    """The real server: every model loaded, the real pipeline behind it.
+
+    With LOAD_MODELS=0 it starts with nothing loaded instead, so the HTTP
+    side can be worked on where there is no GPU. Jobs then fail at once.
+    """
+    if not config.LOAD_MODELS:
+        return create_app()
+
+    from server.pipeline import Models, make_run_dub
+    from server.steps.lipsync import LipsyncModel
+    from server.steps.synth import VoxCPMModel
+    from server.steps.transcribe import WhisperModels
+
+    models = Models(
+        voice=VoxCPMModel(),
+        whisper=WhisperModels(),
+        lipsync=LipsyncModel(
+            config.LATENTSYNC_DIR,
+            config.LATENTSYNC_CONFIG,
+            config.LATENTSYNC_CHECKPOINT,
+        ),
+    )
+    return create_app(make_run_dub(models), models=models.as_list())
+
+
+app = build_production_app()

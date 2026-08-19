@@ -1,6 +1,4 @@
-import time
-
-from server.jobs import CANCELLED, DONE, FAILED, QUEUED, RUNNING
+from server.jobs import DONE, FAILED, RUNNING
 from server.tests.conftest import wait_until
 from server.tests.fake_pipeline import FakePipeline, crashing_pipeline, failing_pipeline
 

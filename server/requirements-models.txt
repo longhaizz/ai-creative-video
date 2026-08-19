@@ -1,0 +1,35 @@
+# ===========================================================================
+# Dub server - the GPU side of the main venv.
+#
+# Install after server/requirements.txt:
+#
+#   pip install -r server/requirements.txt
+#   pip install -r server/requirements-models.txt --extra-index-url \
+#       https://download.pytorch.org/whl/cu121
+#
+# numpy is pinned to 1.26.4 because LatentSync needs it. That pin is the
+# whole reason the subtitle remover runs in its own venv: paddle over there
+# wants numpy 2.2, and the two ABIs do not mix.
+#
+# Model files are not downloaded by pip:
+#   LatentSync/checkpoints/latentsync_unet.pt      (~1.3 GB)
+#   LatentSync/checkpoints/whisper/small.pt
+# See LatentSync/setup_env.sh.
+# ===========================================================================
+
+-r ../LatentSync/requirements.txt
+-r ../VoxCPM/requirements.txt
+
+torch==2.5.1
+torchvision==0.20.1
+numpy==1.26.4
+
+# Reads the speech. The desktop tool ran this in a child process because
+# ctranslate2 next to Qt crashed the app; there is no Qt here.
+faster-whisper==1.1.1
+
+# Splits voice from music.
+demucs==4.1.0
+
+# Writes the wav files VoxCPM returns as arrays.
+soundfile

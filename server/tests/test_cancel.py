@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.app import create_app
-from server.jobs import CANCELLED, DONE, QUEUED, RUNNING
+from server.jobs import CANCELLED, DONE, QUEUED
 from server.tests.conftest import wait_until
 from server.tests.fake_pipeline import FakePipeline
 
