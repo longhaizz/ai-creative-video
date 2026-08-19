@@ -332,18 +332,41 @@ Hết giai đoạn B: toàn bộ logic mới đã có test, chưa đụng GPU d�
 
 Một test viết sai đã bị chính nó bắt: tôi khẳng định video gấp đôi thì toạ độ gấp đôi chính xác, nhưng `int()` cắt thập phân nên lệch 1 pixel (`0.96×360=345.6→345` vs `0.96×720=691.2→691`). Sửa test thành "sai lệch ≤ 1 pixel", không sửa code.
 
-### Step 8 — `run_dub` thật
+### Step 8 — `run_dub` thật ✅ `39d8527` (chưa chạy trên GPU)
 
-- [ ] 🆕 `server/steps/audio.py` — port `_run`, `duration`, `ffmpeg_bin`, `extract_audio`, `mix_audio`, `mux_audio`, `suppress_vocal_bleed` từ `spy-ads-creative-desktop-tool/elevenlabs_api.py`
-- [ ] 🆕 `server/steps/separate.py` — port `separate_stems` (demucs), bỏ nhánh frozen/.exe, đổi `-d cpu` → GPU
-- [ ] 🆕 `server/steps/transcribe.py` — faster-whisper in-process (không cần tách process vì không có Qt), port `asr_quality` + `load_asr_json` + `parse_srt` từ `subtitle_api.py`, giữ logic retry `large-v3`
-- [ ] 🆕 `server/steps/translate.py` — port từ `openai_translate_api.py`, key lấy từ env
-- [ ] 🆕 `server/steps/synth.py` — VoxCPM in-process; port `fit_tempo`, `fit_audio`, `match_tempo`, `stretch_if_long`, `place_segments`, `asr_needs_review`, `with_voice_instruction`, `VOICE_PRESETS` từ `voxcpm_api.py`; port vòng ratio/rewrite từ `voxcpm_panel.py:_timed_speech`
-- [ ] 🆕 `server/pipeline.py` — `run_dub(ctx) -> Path`, ghép 8 bước, gọi `ctx.check_cancel()` ở ranh giới mỗi bước và mỗi vòng cue; bắt `NoFaceError` → log warn + bỏ qua lipsync (không fail)
-- [ ] ✏️ `server/app.py` — thay `run_dub` giả bằng bản thật
-- [ ] 🆕 `server/tests/smoke_run_dub.py` — clip ngắn thật, chạy tay, không nằm trong `pytest` mặc định
-- [ ] ✏️ `server/requirements.txt` — thêm torch 2.5.1+cu121, numpy 1.26.4, faster-whisper, demucs, soundfile, openai, `-r VoxCPM/requirements.txt`, `-r LatentSync/requirements.txt`
-- [ ] **Xong khi**: smoke test 1 clip ngắn, đủ 8 bước, ra mp4 xem được
+- [x] 🆕 `server/steps/audio.py` (213) — ffmpeg + `tempo_for` / `match_tempo` / `place_clips`
+- [x] 🆕 `server/steps/separate.py` (43) — demucs, `device="cuda"` thay vì ép CPU
+- [x] 🆕 `server/steps/transcribe.py` (199) — faster-whisper in-process, `asr_quality`, retry `large-v3`, `cue_needs_review`; giữ nhiều model trong `dict`
+- [x] 🆕 `server/steps/translate.py` (1277) — **copy nguyên** `openai_translate_api.py`, chỉ đổi lớp lỗi và nguồn key
+- [x] 🆕 `server/steps/synth.py` (369) — `VoxCPMModel`, `cue_slots`, `fit_cue`, `timed_speech`
+- [x] 🆕 `server/pipeline.py` (195) — `run_dub(ctx)`, 9 bước, `check_cancel` ở mỗi ranh giới và mỗi vòng cue, bắt `NoFaceError` → bỏ qua lipsync
+- [x] ✏️ `server/app.py` — `build_production_app()`; `LOAD_MODELS=0` để chạy được ở máy không GPU
+- [x] 🆕 `server/tests/smoke_run_dub.py` (120) — chạy tay, không phải file pytest
+- [x] 🆕 `server/requirements-models.txt` — tách riêng phần GPU, giữ `requirements.txt` chạy được trên laptop
+- [x] 🆕 `server/tests/test_synth.py` (267) — 21 ca, thay TTS bằng tiếng sine ffmpeg nên cả cây quyết định chạy thật
+- [x] `pytest server/tests` 101 passed; `pyflakes` sạch
+- [ ] **Xong khi**: smoke test 1 clip ngắn, đủ 9 bước, ra mp4 xem được ← *cần GPU*
+
+**Đối chiếu với bản client**: mọi ngưỡng, mọi nhánh, mọi công thức của `_fit_cue_audio` và `_timed_speech` khớp 1-1. Chỗ duy nhất khác cấu trúc là gộp hai nhánh "hơi dài" / "hơi ngắn" thành một — tương đương vì nhánh `KEEP` đứng trước đã `return`, và cả hai nhánh client đều gọi cùng một `apply_tempo`. Bỏ `_blob_speech` (chỉ `raise`, đã chết từ trước).
+
+**Hai test tôi viết sai và phải sửa**, cả hai đều lộ ra hành vi thật chưa ai ghi:
+1. Hai tầng đổi tốc độ **nhân dồn**: 1.15 × 1.25 ≈ **1.44×**, vượt xa `SOFT_SPEEDUP`.
+2. Ngay cả 1.44 vẫn có thể không đủ — code **chấp nhận tràn** thay vì cắt mất chữ.
+
+**Ràng buộc ngầm đã ghi comment**: LatentSync quyết định ghi bao nhiêu khung hình theo **độ dài audio** (`num_inferences = ceil(len(whisper_chunks) / num_frames)`). `speech` ngắn hơn video là nó âm thầm cắt cụt đuôi hình. `place_clips` pad đúng `video_seconds` nên hiện không sao — nhưng liên kết đó không nhìn thấy từ chỗ nào cả. *(Đúng cái bẫy `voxcpm_api.py` cũ từng ghi chú cho Wav2Lip.)*
+
+### Vá kèm — chặn upload quá cỡ trước khi chạm đĩa 🆕 `server/limits.py`
+
+Phát hiện khi trả lời câu hỏi "gửi video 4GB thì sao". Đo trên server thật:
+
+| | Trước | Sau |
+|---|---|---|
+| Byte gửi lên | 62.914.772 | **0** |
+| TEMP tăng | +200 MB | **0 MB** |
+
+`MAX_VIDEO_BYTES` ở bước 4 kiểm **trong lúc `save_upload` đọc** — quá muộn. Starlette đọc và ghi trọn body ra file tạm **trước cả tầng auth**, nên request **không token** cũng ghi được bao nhiêu tuỳ thích vào đĩa. Ai chạm tới cổng đều làm đầy đĩa được.
+
+`BodySizeLimit` bọc ngoài toàn app, hai lớp: đọc `Content-Length` (từ chối trước khi chạm byte nào) **và** đếm luồng khi chảy (vì header đó do client viết, có thể thiếu hoặc nói dối). 7 test, ca quan trọng nhất là `test_the_limit_applies_without_a_token`.
 
 ### Step 9 — Burn sub ✅ `e066913` (làm trước step 8; còn thiếu dòng nối vào pipeline)
 
@@ -351,7 +374,7 @@ Một test viết sai đã bị chính nó bắt: tôi khẳng định video g�
 - [x] 🆕 `server/tests/test_subtitle.py` — 19 ca, trong đó 1 ca chạy ffmpeg thật
 - [x] `server/schemas.py` đã có `subtitle_font` / `subtitle_size` / `subtitle_position` từ bước 4
 - [x] **Xong khi**: burn thật một clip 1280×720 → chữ hiện đúng vị trí, đúng ngắt dòng, audio giữ nguyên codec, thời lượng không đổi ✓ (đã trích khung hình xem tận mắt)
-- [ ] ✏️ `server/pipeline.py` — chèn bước burn sau mux ← *chờ bước 8*
+- [x] ✏️ `server/pipeline.py` — chèn bước burn sau mux ✅ *(làm ở bước 8, `39d8527`)*. Chữ lấy từ `dub_script.json` mà bước dịch đã ghi, nên phụ đề nói đúng những gì giọng nói
 
 **Hai thay đổi so với bản client:**
 
