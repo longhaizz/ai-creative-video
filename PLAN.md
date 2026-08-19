@@ -391,20 +391,26 @@ Phát hiện khi trả lời câu hỏi "gửi video 4GB thì sao". Đo trên se
 
 ## Giai đoạn D — Deploy
 
-### Step 10 — Docker
+### Step 10 — Docker ✅ `164401d` (chưa build trên máy GPU)
 
-- [ ] 🆕 `server/Dockerfile` — base CUDA, `/opt/venv-main` từ `requirements.txt`, `/opt/venv-vsr` từ `requirements-vsr.txt` + `paddlex --install hpi-gpu`, cài ffmpeg + libgl1 + libglib2.0-0
-- [ ] 🆕 `docker-compose.yml` ở gốc — mount `jobs/`, mount cache model, `--gpus all`, `env_file: .env`
-- [ ] 🆕 `.env.example` — `API_KEY=`, `OPENAI_API_KEY=`
-- [ ] ✏️ `.gitignore` — thêm `.env`, `jobs/`
-- [ ] 🗑️ `VoxCPM/docker-compose.yml`, `LatentSync/docker-compose.yml` nếu không còn dùng (hoặc để nguyên nếu là của upstream)
-- [ ] **Xong khi**: `docker compose up` trên máy sạch → `/health` xanh, chạy được một job thật
+- [x] 🆕 `server/Dockerfile` — base `nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04`, hai venv (py3.10 chính, py3.12 cho VSR từ deadsnakes), ffmpeg + libgl1 + libglib2.0-0, `paddlex --install hpi-gpu`
+- [x] 🆕 `docker-compose.yml` — `--gpus all`, volume cho weight/cache/jobs, healthcheck có token, `start_period: 300s` vì nạp model lâu
+- [x] 🆕 `.env.example`
+- [x] 🆕 `.dockerignore` — loại weight, notebook, spy-ads khỏi build context
+- [x] ✏️ `.gitignore` — thêm `!.env.example`; luật `.env.*` đang nuốt luôn cái template không thể rò rỉ gì
+- [x] 🗑️ `VoxCPM/docker-compose*.yml`, `LatentSync/docker-compose.yml`, hai `.env.example` của API cũ — chúng khai key không còn tồn tại
+- [x] `docker compose config` hợp lệ; `docker build --check` không cảnh báo
+- [ ] **Xong khi**: `docker compose up` trên máy sạch → `/health` xanh, chạy được một job thật ← *cần máy GPU*
 
-### Step 11 — Docs bare-metal
+**Sửa một tag sai của upstream**: `LatentSync/Dockerfile` dùng `12.1.1-cudnn-runtime-ubuntu22.04` — **không tồn tại**. NVIDIA chỉ bỏ số `8` sau `cudnn` từ CUDA 12.3 trở đi. Đã hỏi registry để xác minh, không đoán.
 
-- [ ] 🆕 `server/docs/bare-metal.md` — dựng hai venv theo đúng thứ tự cài của notebook, tải checkpoint, systemd unit mẫu
-- [ ] ✏️ `server/README.md` — trỏ sang cả hai đường Docker và bare-metal
-- [ ] **Xong khi**: làm theo docs trên máy sạch, ra kết quả như Docker
+### Step 11 — Docs bare-metal ✅ `164401d`
+
+- [x] 🆕 `server/docs/bare-metal.md` — hai venv theo đúng thứ tự của notebook, tải checkpoint, systemd unit, nginx, mục gỡ lỗi
+- [x] ✏️ `server/README.md` — viết lại: production / dev không GPU / test / API / biến môi trường
+- [ ] **Xong khi**: làm theo docs trên máy sạch, ra kết quả như Docker ← *cần máy GPU*
+
+Docs mang theo hai phép kiểm đáng giá nhất: **numpy phải ra 1.26.4 ở venv chính và 2.2.5 ở venv VSR** (sai là hỏng lúc chạy chứ không phải lúc cài), và **`--workers 1` là bắt buộc** — code chặn được `start()` hai lần trong một process, nhưng không chặn được hai process.
 
 ---
 
