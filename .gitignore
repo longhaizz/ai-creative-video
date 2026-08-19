@@ -1,12 +1,15 @@
 # Notebooks
 LatentSync_1_6.ipynb
 voxcpm.ipynb
+video_subtitle_remover.ipynb
 .ipynb_checkpoints/
 
 # IDE and environment variables
 .cursor/
 .env
 .env.*
+# ...but the template carries no secrets and must be in the repo.
+!.env.example
 
 # Model checkpoint files
 *.pt
@@ -15,3 +18,12 @@ voxcpm.ipynb
 myenv/
 label-studio/
 spy-ads-creative-desktop-tool/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Dub server runtime
+jobs/

@@ -1,0 +1,5 @@
+voxcpm
+fastapi
+uvicorn[standard]
+python-multipart
+soundfile
