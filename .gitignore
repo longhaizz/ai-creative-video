@@ -8,6 +8,8 @@ video_subtitle_remover.ipynb
 .cursor/
 .env
 .env.*
+# ...but the template carries no secrets and must be in the repo.
+!.env.example
 
 # Model checkpoint files
 *.pt

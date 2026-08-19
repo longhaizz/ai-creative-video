@@ -1,0 +1,42 @@
+services:
+  dub:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: dub-server
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      # The LatentSync weights, about 1.3 GB. They are not in the image:
+      # too big, and they change on their own schedule. Download them with
+      # LatentSync/setup_env.sh before the first run.
+      - ./LatentSync/checkpoints:/app/LatentSync/checkpoints:ro
+      # Everything pulled from Hugging Face on first use: whisper, VoxCPM,
+      # the VAE, demucs. Keep it in a volume or every restart re-downloads
+      # several gigabytes.
+      - models:/models
+      # Job folders. A named volume, not a bind mount: they are temporary,
+      # they are deleted on a TTL, and they should not litter the repo.
+      - jobs:/app/jobs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      # Every endpoint needs the token, /health included.
+      test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $$API_KEY\" http://localhost:8000/health || exit 1"]
+      # start_period is long because the models load first. A cold start is
+      # a minute or two, and the container is not broken during it.
+      start_period: 300s
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  models:
+  jobs:

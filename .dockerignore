@@ -1,0 +1,33 @@
+# Keep the build context small. Everything here would be copied to the
+# Docker daemon on every build, even if the Dockerfile never uses it.
+
+.git/
+.github/
+.cursor/
+myenv/
+label-studio/
+spy-ads-creative-desktop-tool/
+
+# Weights are mounted at run time, not baked in.
+LatentSync/checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Runtime and local files.
+jobs/
+.env
+.env.*
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.ipynb
+.ipynb_checkpoints/
+
+# Sample media that ships with the upstream repos.
+LatentSync/assets/
+VoxCPM/assets/
+VoxCPM/examples/
+video-subtitle-remover/design/
+video-subtitle-remover/test/
