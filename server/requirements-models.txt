@@ -36,6 +36,18 @@ torchvision==0.20.1
 torchaudio==2.5.1
 numpy==1.26.4
 
+# librosa 0.10.1, which LatentSync pins and VoxCPM calls to read the
+# reference wav, still imports pkg_resources. setuptools 81 dropped it, so
+# a fresh venv (pip install --upgrade setuptools gets 84) crashes the first
+# time a voice is cloned:
+#
+#   File "librosa/core/intervals.py", line 8, in <module>
+#     from pkg_resources import resource_filename
+#   ModuleNotFoundError: No module named 'pkg_resources'
+#
+# Held back until librosa is unpinned past 0.11.
+setuptools<81
+
 # Reads the speech. The desktop tool ran this in a child process because
 # ctranslate2 next to Qt crashed the app; there is no Qt here.
 faster-whisper==1.1.1
