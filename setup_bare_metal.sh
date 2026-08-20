@@ -52,9 +52,12 @@ sudo apt-get update
 sudo apt-get install -y --no-install-recommends software-properties-common
 sudo add-apt-repository -y ppa:deadsnakes/ppa
 sudo apt-get update
+# build-essential and the -dev headers are for insightface: it ships source
+# only, and its C++ extension needs a compiler and Python.h.
 sudo apt-get install -y --no-install-recommends \
-    python3.10 python3.10-venv \
-    python3.12 python3.12-venv \
+    python3.10 python3.10-venv python3.10-dev \
+    python3.12 python3.12-venv python3.12-dev \
+    build-essential \
     ffmpeg libgl1 libglib2.0-0 \
     fonts-noto-core fontconfig curl
 
@@ -64,6 +67,15 @@ say "main venv ($MAIN)"
 sudo chown -R "$(id -u):$(id -g)" "$MAIN"
 "$MAIN/bin/pip" install --upgrade pip setuptools wheel
 "$MAIN/bin/pip" install -r server/requirements.txt
+
+# insightface, out of order and on its own. It has no wheel, and its setup.py
+# imports numpy and Cython while pip builds it in an isolated env that has
+# neither, so the build fails. Installing them here and passing
+# --no-build-isolation lets the build see them. Cython must stay under 3.1:
+# the .pyx in 0.7.3 does not compile with 3.1.
+# Once it is installed the requirements line below finds it and moves on.
+"$MAIN/bin/pip" install "numpy==1.26.4" "Cython<3.1"
+"$MAIN/bin/pip" install insightface==0.7.3 --no-build-isolation
 "$MAIN/bin/pip" install -r server/requirements-models.txt \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
