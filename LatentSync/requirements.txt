@@ -1,4 +1,4 @@
-torch==2.5.1
+﻿torch==2.5.1
 torchvision==0.20.1
 --extra-index-url https://download.pytorch.org/whl/cu121
 diffusers==0.32.2
@@ -17,8 +17,8 @@ imageio==2.31.1
 imageio-ffmpeg==0.5.1
 lpips==0.1.4
 face-alignment==1.4.1
-gradio==5.24.0
-huggingface-hub==0.30.2
+gradio==6.17.3
+huggingface-hub==0.33.5
 numpy==1.26.4
 kornia==0.8.0
 insightface==0.7.3
