@@ -52,8 +52,14 @@ class DubParams(BaseModel):
 
     # -- lip sync ----------------------------------------------------------
     lipsync: bool = False
+    # Quality first, and these are the numbers that win: lipsync.run() passes
+    # them straight to the pipeline, so the inference_steps and guidance_scale
+    # in LatentSync/configs/unet/stage2_512.yaml are never read.
+    #   50 steps    the ceiling the pipeline accepts
+    #   1.5         the same guidance upstream uses for 512
+    #   DeepCache   off, in LipsyncModel, so all 50 steps are really computed
     latentsync_steps: int = Field(50, ge=10, le=50)
-    latentsync_guidance: float = Field(1.3, ge=1.0, le=3.0)
+    latentsync_guidance: float = Field(1.5, ge=1.0, le=3.0)
 
     # -- burn new subtitles in the target language -------------------------
     burn_subtitle: bool = False
