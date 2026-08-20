@@ -49,7 +49,6 @@ WORKDIR /app
 # -------------------------------------------------------------------------
 COPY server/requirements.txt server/requirements-models.txt server/
 COPY LatentSync/requirements.txt LatentSync/
-COPY VoxCPM/requirements.txt VoxCPM/
 
 RUN python3.10 -m venv /opt/venv-main \
     && /opt/venv-main/bin/pip install --upgrade pip setuptools wheel \

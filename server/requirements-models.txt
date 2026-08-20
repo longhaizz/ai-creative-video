@@ -18,7 +18,15 @@
 # ===========================================================================
 
 -r ../LatentSync/requirements.txt
--r ../VoxCPM/requirements.txt
+
+# Pinned, and pinned here rather than in VoxCPM/requirements.txt, which
+# only says "voxcpm". Unpinned, pip is free to backtrack onto the 1.x line,
+# and 1.x still loads the VoxCPM2 weights but has no reference_wav_path on
+# generate(): the voice cloning call raises TypeError, and anything that
+# works around the TypeError is no longer cloning. That is what made the
+# first Colab run sound wrong. 2.x also restores the device argument on
+# from_pretrained().
+voxcpm==2.0.3
 
 torch==2.5.1
 torchvision==0.20.1
