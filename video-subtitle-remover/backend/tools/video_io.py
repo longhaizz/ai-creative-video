@@ -70,7 +70,7 @@ class FFmpegVideoWriter:
             '-i', '-',
             '-c:v', 'libx264',
             '-pix_fmt', 'yuv420p',
-            '-crf', '18',
+            '-crf', '14',
             '-preset', 'fast',
             '-loglevel', 'error',
             output_path

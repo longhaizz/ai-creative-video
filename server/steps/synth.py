@@ -73,21 +73,27 @@ class VoxCPMModel:
 
     name = "voxcpm"
 
-    def __init__(self, model_id: str = "openbmb/VoxCPM2", device: str = "cuda:0"):
+    def __init__(self, model_id: str = "openbmb/VoxCPM2"):
         self.model_id = model_id
-        self.device = device
         self._model = None
 
     def load(self) -> None:
         from voxcpm import VoxCPM
 
+        # No device argument here: VoxCPM2 chooses the card itself. Use
+        # CUDA_VISIBLE_DEVICES to pin it to one.
         self._model = VoxCPM.from_pretrained(
-            self.model_id, device=self.device, load_denoiser=False
+            self.model_id, load_denoiser=False
         )
 
     def speak(self, text: str, out_wav: Path, cfg_value: float,
-              timesteps: int, reference_wav: Path | None = None) -> Path:
-        """Say one line. With reference_wav it copies that voice."""
+              timesteps: int, reference_wav: Path | None = None,
+              reference_text: str | None = None) -> Path:
+        """Say one line. With reference_wav it copies that voice.
+
+        reference_text is what the reference wav says. VoxCPM2 needs both
+        or the clone comes out wrong.
+        """
         if self._model is None:
             raise PipelineError("The voice model is not loaded")
 
@@ -95,7 +101,8 @@ class VoxCPMModel:
 
         wav = self._model.generate(
             text=text,
-            reference_wav_path=str(reference_wav) if reference_wav else None,
+            prompt_wav_path=str(reference_wav) if reference_wav else None,
+            prompt_text=reference_text if reference_wav else None,
             cfg_value=cfg_value,
             inference_timesteps=timesteps,
         )

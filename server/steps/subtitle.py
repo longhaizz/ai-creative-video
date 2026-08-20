@@ -217,9 +217,18 @@ def burn(
                 config.FFMPEG_BIN, "-y", "-loglevel", "error",
                 "-i", str(video),
                 "-vf", f"ass='{_filter_path(ass)}'",
+                # Burning the subtitles means the picture is encoded again,
+                # and this is the last encode in the pipeline. Left to
+                # itself ffmpeg picks CRF 23 here and undoes the detail
+                # LatentSync just made.
+                "-c:v", "libx264",
+                "-preset", "slow",
+                "-crf", "14",
+                "-pix_fmt", "yuv420p",
                 # The audio is already final by this point, so copy it
                 # instead of encoding it a second time.
                 "-c:a", "copy",
+                "-movflags", "+faststart",
                 str(out_path),
             ],
             capture_output=True,

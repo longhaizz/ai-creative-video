@@ -13,6 +13,10 @@ video_subtitle_remover.ipynb
 
 # Model checkpoint files
 *.pt
+# ...except the subtitle remover's Big-LAMA, which is split into five parts
+# and committed like the ProPainter .pth files next to it. Without these a
+# fresh clone has no inpainting model and every subtitle removal fails.
+!video-subtitle-remover/backend/models/big-lama/big-lama_?.pt
 
 # folder not need to be tracked
 myenv/

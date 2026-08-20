@@ -59,7 +59,7 @@ class LipsyncModel:
         repo_dir: Path,
         config_path: Path,
         checkpoint_path: Path,
-        enable_deepcache: bool = True,
+        enable_deepcache: bool = False,
     ):
         self.repo_dir = Path(repo_dir)
         self.config_path = Path(config_path)

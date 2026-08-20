@@ -57,6 +57,15 @@ def _source_video(work: Path) -> Path:
     return found[0]
 
 
+def _joined_text(cues: list[dict]) -> str:
+    """All the cue text as one line, for VoxCPM's prompt_text."""
+    return " ".join(
+        (cue.get("text") or "").strip()
+        for cue in cues
+        if (cue.get("text") or "").strip()
+    )
+
+
 def _reference_audio(work: Path) -> Path | None:
     found = sorted(work.glob("reference_audio.*"))
     return found[0] if found else None
@@ -102,7 +111,20 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             ctx.log(f"Cue {index} may be wrong ({reason}): {cue['text'][:80]}")
     ctx.check_cancel()
 
-    reference = _reference_audio(work) or vocals
+    uploaded_reference = _reference_audio(work)
+    reference = uploaded_reference or vocals
+
+    # VoxCPM2 clones a voice from the wav AND the words said in it, so the
+    # reference always needs a transcript. For the vocals we already have
+    # one; an uploaded sample has to be read first.
+    if uploaded_reference is None:
+        reference_text = _joined_text(cues)
+    else:
+        reference_cues, _ = transcribe.transcribe(
+            models.whisper, uploaded_reference, params.whisper_model, ctx=ctx
+        )
+        reference_text = _joined_text(reference_cues)
+
     if params.voice_mode == "original":
         ctx.log(f"Copying the voice from {reference.name}")
     else:
@@ -113,6 +135,7 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             return models.voice.speak(
                 text, out_wav, params.cfg_value, params.inference_timesteps,
                 reference_wav=reference,
+                reference_text=reference_text,
             )
         return models.voice.speak(
             with_voice_instruction(text, params.voice_mode),

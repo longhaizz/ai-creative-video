@@ -52,12 +52,12 @@ class DubParams(BaseModel):
 
     # -- lip sync ----------------------------------------------------------
     lipsync: bool = False
-    latentsync_steps: int = Field(20, ge=10, le=50)
-    latentsync_guidance: float = Field(1.5, ge=1.0, le=3.0)
+    latentsync_steps: int = Field(50, ge=10, le=50)
+    latentsync_guidance: float = Field(1.3, ge=1.0, le=3.0)
 
     # -- burn new subtitles in the target language -------------------------
     burn_subtitle: bool = False
-    subtitle_font: str = Field("Arial", max_length=64)
+    subtitle_font: str = Field("Noto Sans", max_length=64)
     subtitle_size: int = Field(28, ge=8, le=200)
     # Where the text sits, as a share of the frame height. 0.85 is near the
     # bottom, which is where people expect subtitles.

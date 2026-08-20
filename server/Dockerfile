@@ -29,6 +29,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # python3.12 is not in Ubuntu 22.04, and the subtitle remover was tested on
 # 3.12 (see video_subtitle_remover.ipynb), so it comes from deadsnakes.
 # libgl1 and libglib2.0-0 are for opencv; ffmpeg does every audio job.
+# fonts-noto-core carries the Vietnamese glyphs the burnt-in subtitles need;
+# without it every accented letter comes out as an empty box.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common ca-certificates curl \
     && add-apt-repository -y ppa:deadsnakes/ppa \
@@ -36,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.10 python3.10-venv \
         python3.12 python3.12-venv \
         ffmpeg libgl1 libglib2.0-0 \
+        fonts-noto-core fontconfig \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
