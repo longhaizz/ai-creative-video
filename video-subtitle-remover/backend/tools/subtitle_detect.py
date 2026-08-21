@@ -44,7 +44,6 @@ class SubtitleDetect:
         paddle.disable_signal_handler()
         from paddleocr import TextDetection
         hardware_accelerator = HardwareAccelerator.instance()
-        onnx_providers = hardware_accelerator.onnx_providers
         model_config = ModelConfig()
         # PATCH (dub server). Upstream leaves both thresholds at their
         # defaults, which finds too much: logos, product text and captions
@@ -53,11 +52,18 @@ class SubtitleDetect:
         # creatives and kept.
         #   box_thresh: how sure the model must be about a whole text box
         #   thresh:     how sure it must be about a single pixel
+        # PATCH (dub server). Upstream leaves detection on the CPU and hopes
+        # the HPI plugin moves it to the GPU through onnxruntime. Here that
+        # plugin cannot load: libonnxruntime_providers_cuda.so wants the CUDA
+        # 11 libraries and they are not on this box, so onnxruntime lists
+        # CUDAExecutionProvider, fails to load it, falls back to the CPU
+        # without saying so, and a frame takes 4 seconds. Paddle itself does
+        # see the card, so ask it directly and leave HPI off.
         return TextDetection(
             model_name=model_config.DET_MODEL_NAME,
             model_dir=model_config.DET_MODEL_DIR,
-            device="cpu",
-            enable_hpi=len(onnx_providers) > 0,
+            device="gpu" if hardware_accelerator.has_cuda() else "cpu",
+            enable_hpi=False,
             box_thresh=0.80,
             thresh=0.45,
         )
