@@ -416,47 +416,63 @@ Docs mang theo hai phép kiểm đáng giá nhất: **numpy phải ra 1.26.4 ở
 
 ## Giai đoạn E — Client (`spy-ads-creative-desktop-tool/`)
 
-### Step 12 — `voxcpm_api.py` thành client job
+### Step 12 — `voxcpm_api.py` thành client job ✅ (chưa gọi server thật)
 
-- [ ] ✏️ `global-configs.yaml` — thêm khối `dub: { base_url: "ENC(...)", api_key: "ENC(...)" }`, sinh bằng `encrypt_keys.py`
-- [ ] ✏️ `encrypt_configs.py` — thêm `base_url` và `api_key` của khối `dub` vào danh sách field cần giải mã
-- [ ] ✏️ `main.py` — thêm hai key mới vào danh sách decrypt (chỗ đang liệt kê `telemetry.api_key`, `remake.*`)
-- [ ] ✏️ `voxcpm_api.py` — viết lại thành client job:
-  - [ ] `submit_dub(...) -> job_id` (multipart), `poll(job_id, since) -> dict`, `download(job_id, out_path)`, `cancel(job_id)`
-  - [ ] Header `Authorization: Bearer`, giữ `_force_ipv4()`, giữ `_explain_http()`
-  - [ ] 🗑️ bỏ `fit_tempo`, `fit_audio`, `match_tempo`, `stretch_if_long`, `place_segments`, `asr_needs_review`, `with_voice_instruction`, `plain_text_from_srt`, `fit_to_video`, `tts`, `clone` (đã sang server)
-  - [ ] Giữ `VOICE_MODE_LABELS`, `CFG_CHOICES`, `TIMESTEP_CHOICES` (UI cần) + thêm `LATENTSYNC_STEP_CHOICES`, `GUIDANCE_CHOICES`, `VSR_MODE_CHOICES`, `VSR_AREA_CHOICES`
-  - [ ] ✏️ `_selfcheck()` — fake HTTP cho vòng submit → poll → download
+- [x] ✏️ `global-configs.yaml` — thêm khối `dub: { base_url: "ENC(...)", api_key: "ENC(...)" }`, sinh bằng `encrypt_keys.py`
+- [x] ✏️ `encrypt_configs.py` — thêm `base_url` và `api_key` của khối `dub` vào danh sách field cần giải mã
+- [x] ✏️ `main.py` — thêm hai key mới vào danh sách decrypt (chỗ đang liệt kê `telemetry.api_key`, `remake.*`)
+- [x] ✏️ `voxcpm_api.py` — viết lại thành client job:
+  - [x] `submit_dub(...) -> job_id` (multipart), `poll(job_id, since) -> dict`, `download(job_id, out_path)`, `cancel(job_id)`
+  - [x] Header `Authorization: Bearer`, giữ `_force_ipv4()`, giữ `_explain_http()`
+  - [x] 🗑️ bỏ `fit_tempo`, `fit_audio`, `match_tempo`, `stretch_if_long`, `place_segments`, `asr_needs_review`, `with_voice_instruction`, `plain_text_from_srt`, `fit_to_video`, `tts`, `clone` (đã sang server)
+  - [x] Giữ `VOICE_MODE_LABELS`, `CFG_CHOICES`, `TIMESTEP_CHOICES` (UI cần) + thêm `LATENTSYNC_STEP_CHOICES`, `GUIDANCE_CHOICES`, `VSR_MODE_CHOICES`, `VSR_AREA_CHOICES`
+  - [x] ✏️ `_selfcheck()` — fake HTTP cho vòng submit → poll → download
 - [ ] **Xong khi**: `python voxcpm_api.py` xanh, và gọi được server thật từ script rời
 
-### Step 13 — Panel mới
+`dub.base_url` / `dub.api_key` để **rỗng** trong YAML: chưa có server thật để lấy URL và key. Điền plaintext rồi chạy `encrypt_configs.py` (đã nhận hai leaf-key này) là xong — rỗng thì `DubClient` báo "chưa cấu hình" chứ không sập app.
 
-- [ ] ✏️ `voxcpm_panel.py` — viết lại:
-  - [ ] 🗑️ `DubWorker` cũ (demucs / whisper / synth / lipsync local) → worker mới chỉ upload + poll + download
-  - [ ] Nộp cả lô job một lượt, poll 2s/lần, log server append vào ô log
-  - [ ] Stop → `DELETE` mọi job của lô
-  - [ ] Ba checkbox: Xoá sub · Lipsync · Tạo sub
-  - [ ] Dropdown mới: LatentSync steps, guidance, VSR mode, VSR area (+ 4 ô % khi chọn *Tuỳ chỉnh*), style sub
-  - [ ] 🗑️ ô Base URL, ô OpenAI key, cụm chọn thư mục weight / model / detector / out_height
-  - [ ] ✏️ QSettings: bỏ `voxcpm/base_url`, `voxcpm/openai_key`, `voxcpm/wav2lip_*`; thêm key cho các dropdown mới
-- [ ] ✏️ `ui.py` — đổi nhãn tab `"VoxCPM"` → `"Dubbing"`
+`voxcpm_panel.py` **gãy import** cho tới hết step 13, vì nó còn `from voxcpm_api import tts, clone, match_tempo, ...` — đúng những thứ step 12 xoá. Step 13 viết lại panel nên không vá tạm ở đây.
+
+### Step 13 — Panel mới ✅ (chưa chạy trên UI thật)
+
+- [x] ✏️ `voxcpm_panel.py` — viết lại:
+  - [x] 🗑️ `DubWorker` cũ (demucs / whisper / synth / lipsync local) → worker mới chỉ upload + poll + download
+  - [x] Nộp cả lô job một lượt, poll 2s/lần, log server append vào ô log
+  - [x] Stop → `DELETE` mọi job của lô
+  - [x] Ba checkbox: Xoá sub · Lipsync · Tạo sub
+  - [x] Dropdown mới: LatentSync steps, guidance, VSR mode, VSR area (+ 4 ô % khi chọn *Tuỳ chỉnh*), style sub
+  - [x] 🗑️ ô Base URL, ô OpenAI key, cụm chọn thư mục weight / model / detector / out_height
+  - [x] ✏️ QSettings: bỏ `voxcpm/base_url`, `voxcpm/openai_key`, `voxcpm/wav2lip_*`; thêm key cho các dropdown mới
+- [x] ✏️ `ui.py` — đổi nhãn tab `"VoxCPM"` → `"Dubbing"`
 - [ ] **Xong khi**: chạy lô 3 video qua UI, log hiện đúng, Stop huỷ được
 
-### Step 14 — Dọn code
+`ui.py` phải giữ luôn `global_configs` (`self.global_configs`) để truyền `configs.dub` vào panel — panel không còn ô Base URL nên phải lấy từ config.
 
-- [ ] 🗑️ `elevenlabs_api.py`
-- [ ] 🗑️ `elevenlabs_dialog.py`
-- [ ] 🗑️ `wav2lip_api.py`
-- [ ] 🗑️ `openai_translate_api.py`
-- [ ] 🗑️ `subtitle_panel.py`
-- [ ] 🗑️ `subtitle_api.py`
-- [ ] 🗑️ `subtitle_worker.py`
-- [ ] ✏️ `ui.py` — xoá dòng import + hai `addTab` đã comment (`:177`, `:181`), xoá `self.elevenlabs_panel` / `self.subtitle_panel`
-- [ ] ✏️ `main.py:58` — xoá nhánh `from subtitle_api import _cli`
-- [ ] ✏️ `requirements.txt` — gỡ khối `[ELEVENLABS]` (demucs, julius, lameenc, sphn, einops…), khối `[SUBTITLE]` (faster-whisper), khối `[WAV2LIP]` (batch-face, opencv-transforms, sixdrepnet, `wav2lip-trip @ git+...`). **Giữ** torch/torchaudio/torchvision — `classifier_*.py` và CLIP còn dùng.
-- [ ] ✏️ `_build_exe.ps1` — bỏ hidden-import / data của các module đã xoá nếu có
-- [ ] ✏️ `README.md`, `GEMINI.md` — cập nhật mô tả kiến trúc
+QSettings của tab mới nằm dưới tiền tố `dub/`, không phải `voxcpm/`: key cũ trùng tên nhưng khác kiểu (`target_lang` là chuỗi, `cfg_value` là float) làm `settings.value(..., type=int)` ném ngay lúc dựng tab. `_saved_index()` còn ép int trong try/except cho chắc.
+
+`_ask()` bỏ `ask_yes_no` của `elevenlabs_dialog`, dùng `QMessageBox.question` — step 14 xoá file đó.
+
+`_selfcheck()` trong `voxcpm_panel.py` chạy `DubWorker` với client giả: nộp cả lô, log kèm tên video, `queue_position`, job `no_face` không chặn job khác, Stop huỷ mọi job còn dở. Máy này không có PyQt5 nên self-check chạy qua stub Qt; trên máy build thì `python voxcpm_panel.py` là đủ.
+
+### Step 14 — Dọn code ✅ (chưa build .exe)
+
+- [x] 🗑️ `elevenlabs_api.py`
+- [x] 🗑️ `elevenlabs_dialog.py`
+- [x] 🗑️ `wav2lip_api.py`
+- [x] 🗑️ `openai_translate_api.py`
+- [x] 🗑️ `subtitle_panel.py`
+- [x] 🗑️ `subtitle_api.py`
+- [x] 🗑️ `subtitle_worker.py`
+- [x] ✏️ `ui.py` — xoá dòng import + hai `addTab` đã comment (`:177`, `:181`), xoá `self.elevenlabs_panel` / `self.subtitle_panel`
+- [x] ✏️ `main.py:58` — xoá nhánh `from subtitle_api import _cli`
+- [x] ✏️ `requirements.txt` — gỡ khối `[ELEVENLABS]` (demucs, julius, lameenc, sphn, einops…), khối `[SUBTITLE]` (faster-whisper), khối `[WAV2LIP]` (batch-face, opencv-transforms, sixdrepnet, `wav2lip-trip @ git+...`). **Giữ** torch/torchaudio/torchvision — `classifier_*.py` và CLIP còn dùng.
+- [x] ✏️ `_build_exe.ps1` — bỏ hidden-import / data của các module đã xoá nếu có
+- [x] ✏️ `README.md`, `GEMINI.md` — cập nhật mô tả kiến trúc
 - [ ] **Xong khi**: build .exe thành công, nhẹ hơn hẳn, Downloader + Dubbing chạy đúng
+
+`main.py` mất luôn cổng `--subtitle-cli` (process con ASR) — nó chỉ tồn tại để gọi `subtitle_api._cli`. `_build_exe.ps1` bỏ nguyên khối build `subtitle-asr.exe`, bỏ hidden-import `faster_whisper`/`demucs`/`wav2lip` và collect-data `faster_whisper`/`batch_face`/`wav2lip`/`demucs`.
+
+**Giữ `--collect-data=whisper`**: `classifier_video.py` import `whisper` (openai-whisper, khác faster-whisper) để lấy transcript cho bước lọc policy. Gỡ nhầm là .exe chết khi quét audio.
 
 ---
 

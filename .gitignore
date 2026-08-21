@@ -31,3 +31,5 @@ __pycache__/
 
 # Dub server runtime
 jobs/
+
+myenv311/

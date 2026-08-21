@@ -33,8 +33,26 @@ def test_a_waiting_job_never_reaches_the_pipeline(make_runner):
     assert runner.get(waiting.id).status == QUEUED
 
     assert runner.cancel(waiting.id) is True
-    assert wait_until(lambda: runner.get(waiting.id).status == CANCELLED, timeout=10)
+    assert runner.get(waiting.id).status == CANCELLED, "no waiting for the worker"
+
+    # Let the worker finish the first job and reach the cancelled one.
+    assert wait_until(lambda: runner.get(first.id).status == DONE, timeout=10)
     assert pipeline.ran() == [first.id], "the cancelled job must never run"
+
+
+def test_cancelling_a_waiting_job_shortens_the_line_at_once(make_runner):
+    """The job behind it must not keep counting a job that is already gone."""
+    pipeline = FakePipeline(sleep=5)
+    runner = make_runner(pipeline)
+
+    runner.submit({})                       # takes the worker
+    doomed, behind = runner.submit({}), runner.submit({})
+    assert runner.queue_position(behind.id) == 1
+
+    runner.cancel(doomed.id)
+    assert runner.get(doomed.id).status == CANCELLED, "no waiting for the worker"
+    assert runner.queue_position(behind.id) == 0
+    assert not doomed.workdir.exists(), "the upload goes with it"
 
 
 def test_a_running_job_stops_part_way(make_runner):

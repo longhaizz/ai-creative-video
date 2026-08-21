@@ -175,15 +175,29 @@ class JobRunner:
     def cancel(self, job_id: str) -> bool:
         """Ask a job to stop. Returns False if it already ended.
 
-        A queued job is dropped when the worker reaches it. A running job
-        stops at its next check_cancel().
+        A waiting job ends here and now: only raising the flag would leave it
+        counted as queued until the worker reaches it, so every job behind it
+        would report a line longer than it really is. A running job cannot be
+        ended from here; it stops at its next check_cancel().
+
+        The record stays in the store, with only the files removed. The client
+        must still be able to read "cancelled" back, and purge_expired() takes
+        the record away later, once finished_at is old enough.
         """
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None or job.status in (DONE, FAILED, CANCELLED):
                 return False
             job.cancelled = True
-            return True
+            waiting = job.status == QUEUED
+            if waiting:
+                job.status = CANCELLED
+                job.finished_at = time.time()
+        if waiting:
+            # The worker still pulls the id off the queue later, sees the flag
+            # and cleans up again. _remove() of a gone folder is a no-op.
+            _remove(job.workdir)
+        return True
 
     def queue_position(self, job_id: str) -> int | None:
         """How many jobs are waiting in front of this one. 0 means next.
@@ -263,13 +277,19 @@ class JobRunner:
             job = self._jobs.get(job_id)
             if job is not None:
                 job.log.append(message)
+        # The same line goes to stdout, so `pm2 logs dub` shows the work and
+        # not only the HTTP requests. flush, because stdout under PM2 is a
+        # pipe: without it Python holds the lines back until 8KB have piled up.
+        print(f"[{job_id[:8]}] {message}", flush=True)
 
     def _set_step(self, job_id: str, name: str) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
                 job.step = name
-                job.log.append(name)
+        # Outside the lock: _append_log takes it too, and self._lock is a
+        # plain Lock, so taking it twice in one thread would hang.
+        self._append_log(job_id, name)
 
     def _is_cancelled(self, job_id: str) -> bool:
         with self._lock:

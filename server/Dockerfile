@@ -29,14 +29,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # python3.12 is not in Ubuntu 22.04, and the subtitle remover was tested on
 # 3.12 (see video_subtitle_remover.ipynb), so it comes from deadsnakes.
 # libgl1 and libglib2.0-0 are for opencv; ffmpeg does every audio job.
+# build-essential and the -dev headers are for insightface: source only, and
+# its C++ extension needs a compiler and Python.h.
 # fonts-noto-core carries the Vietnamese glyphs the burnt-in subtitles need;
 # without it every accented letter comes out as an empty box.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common ca-certificates curl \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
-        python3.10 python3.10-venv \
-        python3.12 python3.12-venv \
+        python3.10 python3.10-venv python3.10-dev \
+        python3.12 python3.12-venv python3.12-dev \
+        build-essential \
         ffmpeg libgl1 libglib2.0-0 \
         fonts-noto-core fontconfig \
     && rm -rf /var/lib/apt/lists/*
@@ -53,6 +56,8 @@ COPY LatentSync/requirements.txt LatentSync/
 RUN python3.10 -m venv /opt/venv-main \
     && /opt/venv-main/bin/pip install --upgrade pip setuptools wheel \
     && /opt/venv-main/bin/pip install -r server/requirements.txt \
+    && /opt/venv-main/bin/pip install "numpy==1.26.4" "Cython<3.1" \
+    && /opt/venv-main/bin/pip install insightface==0.7.3 --no-build-isolation \
     && /opt/venv-main/bin/pip install -r server/requirements-models.txt \
         --extra-index-url https://download.pytorch.org/whl/cu121
 
