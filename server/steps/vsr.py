@@ -28,6 +28,12 @@ LOG_EVERY_SECONDS = 2.0
 # Keep this many lines to explain a failure.
 TAIL_LINES = 25
 
+# The tool leaves with this code when it found no subtitles to paint over.
+# That is not a failure: plenty of ad creatives carry no burned-in text, and
+# the video is simply already clean. The number is set in
+# video-subtitle-remover/backend/main.py; the two must stay in step.
+NO_SUBTITLE_EXIT_CODE = 3
+
 
 def probe_size(video: Path) -> tuple[int, int]:
     """Return (width, height) of the video."""
@@ -113,7 +119,11 @@ def remove_subtitles(
     right: float,
     ctx=None,
 ) -> Path:
-    """Paint over the burned-in subtitles. Returns out_path."""
+    """Paint over the burned-in subtitles.
+
+    Returns out_path, or the video that came in when there was nothing to
+    paint over.
+    """
     video = Path(video).resolve()
     out_path = Path(out_path).resolve()
 
@@ -161,6 +171,13 @@ def remove_subtitles(
     finally:
         process.stdout.close()
         process.wait()
+
+    if process.returncode == NO_SUBTITLE_EXIT_CODE:
+        # Nothing to paint over. Hand back the video that came in, so every
+        # later step works on it and the job still counts as done.
+        if ctx is not None:
+            ctx.log("No subtitles found in the video, skipping this step")
+        return video
 
     if process.returncode != 0:
         raise PipelineError(

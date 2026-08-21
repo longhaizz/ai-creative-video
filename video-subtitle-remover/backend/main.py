@@ -31,6 +31,18 @@ import time
 from tqdm import tqdm
 import numpy as np
 
+# PATCH (dub server). A video with nothing to paint over is not an error:
+# ad creatives often carry no burned-in subtitles at all. Upstream raises
+# here, which the dub server can only read as a crash, so the whole job
+# turns red over a video that was simply already clean. Leave with a code
+# of our own instead. server/steps/vsr.py knows this number and treats it
+# as "there was nothing to do", the same way the lip sync step treats a
+# video with no face in it.
+#
+# sys.exit, not an exception: SystemExit passes through the `except
+# Exception` further up the call stack, a plain Exception does not.
+NO_SUBTITLE_EXIT_CODE = 3
+
 class SubtitleRemover:
     def __init__(self, vd_path, gui_mode=False):
         # 线程锁
@@ -160,7 +172,7 @@ class SubtitleRemover:
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         if len(sub_list) == 0:
-            raise Exception(tr['Main']['NoSubtitleDetected'].format(self.video_path))
+            sys.exit(NO_SUBTITLE_EXIT_CODE)
         continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
         scene_div_points = sub_detector.get_scene_div_frame_no(self.video_path)
         continuous_frame_no_list = sub_detector.split_range_by_scene(continuous_frame_no_list,
@@ -261,7 +273,7 @@ class SubtitleRemover:
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         if len(sub_list) == 0:
-            raise Exception(tr['Main']['NoSubtitleDetected'].format(self.video_path))
+            sys.exit(NO_SUBTITLE_EXIT_CODE)
         continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
         tbar.write(f"Subtitle detected: {continuous_frame_no_list}")
         continuous_frame_no_list = expand_frame_ranges(continuous_frame_no_list, config.subtitleTimelineBackwardFrameCount.value, config.subtitleTimelineForwardFrameCount.value)

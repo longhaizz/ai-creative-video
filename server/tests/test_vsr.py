@@ -6,9 +6,17 @@ share-to-pixel maths and the command line. A wrong scan area paints over the
 wrong part of the picture and nothing crashes to tell you.
 """
 
+import io
+
 import pytest
 
-from server.steps.vsr import area_to_pixels, build_command
+from server.jobs import PipelineError
+from server.steps.vsr import (
+    NO_SUBTITLE_EXIT_CODE,
+    area_to_pixels,
+    build_command,
+    remove_subtitles,
+)
 
 
 # -- share of the frame to pixels -------------------------------------------
@@ -70,3 +78,44 @@ def test_the_area_is_given_in_the_order_the_tool_wants():
 def test_every_mode_the_client_may_pick_is_passed_through(mode):
     command = build_command("in.mp4", "out.mp4", mode, (1, 2, 3, 4))
     assert command[command.index("--inpaint-mode") + 1] == mode
+
+
+# -- a video with no subtitles in it ----------------------------------------
+
+
+class _FakeProcess:
+    """A finished subprocess that printed one line and left with `code`."""
+
+    def __init__(self, code):
+        self.returncode = code
+        self.stdout = io.StringIO("Subtitle Finding: 100%\n")
+
+    def wait(self):
+        return self.returncode
+
+
+def _run_with_exit_code(code, monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"not really a video")
+    monkeypatch.setattr("server.steps.vsr.probe_size", lambda path: (640, 360))
+    monkeypatch.setattr(
+        "server.steps.vsr.subprocess.Popen", lambda *a, **k: _FakeProcess(code)
+    )
+    return remove_subtitles(
+        video, tmp_path / "no_subs.mp4", "sttn-det", 0.6, 0.96, 0.03, 0.97
+    )
+
+
+def test_no_subtitles_is_not_a_failure(monkeypatch, tmp_path):
+    """A clean video must not turn the whole job red.
+
+    The tool leaves with NO_SUBTITLE_EXIT_CODE and writes no file. The step
+    hands back the video it was given, so the pipeline carries on with it.
+    """
+    video = _run_with_exit_code(NO_SUBTITLE_EXIT_CODE, monkeypatch, tmp_path)
+    assert video == (tmp_path / "video.mp4").resolve()
+
+
+def test_a_real_crash_still_fails(monkeypatch, tmp_path):
+    with pytest.raises(PipelineError):
+        _run_with_exit_code(1, monkeypatch, tmp_path)
