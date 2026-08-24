@@ -175,6 +175,42 @@ def test_best_speaker_uses_overlap_then_nearest():
     assert mod._best_speaker(0.0, 1.0, []) == "SPEAKER_00"
 
 
+def test_language_is_detected_once_and_locked_on_every_cue():
+    """Cues must not pick their own language. One detect, then lock."""
+    import importlib.util
+    import inspect
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "open_dubbing_segment.py"
+    spec = importlib.util.spec_from_file_location("od_seg_lang", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class Info:
+        language = "vi"
+        language_probability = 0.97
+
+    class Segment:
+        def __init__(self, text):
+            self.text = text
+
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, wav, **kwargs):
+            calls.append(kwargs)
+            return iter([Segment("xin chao")]), Info()
+
+    language, probability = mod._detect_language(FakeModel(), Path("vocals.wav"))
+    assert language == "vi"
+    assert probability == 0.97
+    assert calls[0]["vad_filter"] is True
+    assert "language" not in calls[0]
+
+    src = inspect.getsource(mod.segment)
+    assert "_detect_language" in src
+    assert 'kwargs["language"] = language' in src
+
+
 class _FakeProcess:
     def __init__(self, text, code=0):
         import io
@@ -299,7 +335,7 @@ def test_dub_runs_vsr_then_od_then_lipsync(monkeypatch, tmp_path):
     class Lipsync:
         name = "latentsync"
 
-        def run(self, video, speech, out, steps=50, guidance=1.5):
+        def run_shots(self, video, speech, out, work, steps, guidance, ctx=None):
             order.append("lipsync")
             Path(out).write_bytes(b"lip")
             return Path(out)

@@ -182,6 +182,25 @@ def match_tempo(speech, target_seconds: float, out_wav,
     return out_wav, tempo
 
 
+def trim_audio(src, seconds: float, dest) -> Path:
+    """Keep only the first `seconds` of src. Used so a cue cannot overlap the next."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src = Path(src)
+    length = max(float(seconds), 0.05)
+    target = dest
+    if src.resolve() == dest.resolve():
+        target = dest.with_name(dest.stem + ".tmp" + dest.suffix)
+    run_ffmpeg([
+        config.FFMPEG_BIN, "-y", "-loglevel", "error",
+        "-i", str(src), "-t", f"{length:.3f}",
+        "-c:a", "pcm_s16le", str(target),
+    ])
+    if target != dest:
+        target.replace(dest)
+    return dest
+
+
 def place_clips(clips: list[tuple[float, Path]], total_seconds: float,
                 out_wav) -> Path:
     """Lay each clip at its own start time on one track of total_seconds.

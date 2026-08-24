@@ -13,8 +13,8 @@ Order of preference when a line does not fit its slot:
   1. leave it alone            (it is close enough)
   2. change the speed a little (up to +15% / -18%)
   3. ask OpenAI for a shorter or longer line, then try again
-Never cut the audio: a cut loses words, and a word lost is worse than a
-sentence that runs a little long.
+  4. speed up harder (up to 1.4x) so it stays off the next cue
+  5. cut the tail to the window — overlapping speech is worse than a lost word
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from server.steps.audio import (
     duration,
     match_tempo,
     place_clips,
+    trim_audio,
 )
 from server.steps.translate import (
     CANNOT_FIT,
@@ -45,6 +46,10 @@ RATIO_SOFT_HI = 1.15   # past these, ask for a different line
 # One rewrite only. A second one drifts away from the meaning without
 # fitting any better.
 MAX_REWRITES = 1
+
+# Last speed-up before we cut. Faster than this sounds wrong; slower leaves
+# the next cue overlapping.
+HARD_SPEEDUP = 1.4
 
 # Voice presets, put in front of the text for /tts. Not used when cloning.
 VOICE_PRESETS = {
@@ -194,22 +199,27 @@ def fit_cue(
             out, tempo = match_tempo(path, cap, fit_path, fastest=1.0)
             log(f"{why}: slowed down by {tempo:.3f}")
 
-        # Last check: if it still reaches into the next cue, speed it up a
-        # little more than the soft limit. Overlapping speech is worse.
+        # Last check: if it still reaches into the next cue, speed it up
+        # harder, then cut the tail. Overlapping speech is worse.
+        limit = max(window - 0.05, 0.4)
         length_now = duration(out)
         if length_now > window * 1.001 and length_now > 0.05:
-            needed = length_now / max(window - 0.05, 0.4)
+            needed = length_now / limit
             if needed > 1.02:
                 clamped, tempo = match_tempo(
-                    out,
-                    max(window - 0.05, 0.4),
-                    work / f"cue_{index:03d}_fit2.wav",
+                    out, limit, work / f"cue_{index:03d}_fit2.wav",
                     slowest=1.0,
-                    fastest=max(SOFT_SPEEDUP, min(needed, 1.25)),
+                    fastest=max(SOFT_SPEEDUP, min(needed, HARD_SPEEDUP)),
                 )
                 if duration(clamped) < length_now:
                     log(f"pushed to {tempo:.3f} to stay off the next cue")
                     out = clamped
+            length_now = duration(out)
+            if length_now > window * 1.001:
+                out = trim_audio(
+                    out, limit, work / f"cue_{index:03d}_trim.wav",
+                )
+                log(f"cut to {duration(out):.2f}s to stay off the next cue")
         return out
 
     def best(why: str) -> Path:
@@ -222,8 +232,6 @@ def fit_cue(
         path, length = min(candidates, key=score)
         out = stretch(path, length, why)
         final = duration(out)
-        if final > window * 1.02:
-            log(f"still longer than its {window:.2f}s window; not cutting it")
         if final < target * 0.92:
             log(f"still short: {final:.2f}s of {target:.2f}s, silence follows")
         return out

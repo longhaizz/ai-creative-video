@@ -163,10 +163,14 @@ def _dub(ctx: JobContext, models: Models) -> Path:
         )
         started = time.perf_counter()
         try:
-            picture = models.lipsync.run(
-                video.resolve(), speech.resolve(), (work / "lipsync.mp4").resolve(),
-                steps=params.latentsync_steps,
-                guidance=params.latentsync_guidance,
+            picture = models.lipsync.run_shots(
+                video.resolve(),
+                speech.resolve(),
+                (work / "lipsync.mp4").resolve(),
+                work / "shots",
+                params.latentsync_steps,
+                params.latentsync_guidance,
+                ctx=ctx,
             )
             ctx.log(f"LatentSync took {time.perf_counter() - started:.1f}s")
         except NoFaceError as error:

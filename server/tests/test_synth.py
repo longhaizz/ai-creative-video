@@ -179,16 +179,15 @@ def test_a_rewrite_that_fits_no_better_is_dropped(tmp_path):
 
 
 @needs_ffmpeg
-def test_speech_is_never_cut_short(tmp_path):
-    """A line far too long is squeezed as far as it goes, then left long.
+def test_a_line_that_still_overruns_is_cut(tmp_path):
+    """A line that still overruns after speed-up is cut to the window.
 
-    Cutting would lose words, and half a sentence is worse than a sentence
-    that runs over.
+    Overlapping the next cue is worse than losing the tail of a word.
     """
     speak = tone_maker(tmp_path, {"very long": 6.0})
     out = fit_cue("very long", slot(2.0, window=2.0), tmp_path, 0, speak)
-    assert duration(out) > 2.0, "it should still be too long, not truncated"
-    assert duration(out) < 6.0, "but it should have been squeezed"
+    assert duration(out) <= 2.0 + 0.05
+    assert duration(out) < 6.0
 
 
 @needs_ffmpeg
@@ -204,8 +203,8 @@ def test_it_stays_off_the_next_cue_when_the_limits_allow(tmp_path):
     """Overlapping speech is worse than speech that is a little too fast.
 
     This one fits inside the limits. When it does not, see
-    test_a_tight_window_pushes_past_the_soft_limit: the overlap is kept
-    rather than the words cut.
+    test_a_tight_window_is_cut_to_the_window: the tail is cut rather than
+    the next cue overlapped.
     """
     speak = tone_maker(tmp_path, {"hello": 3.0})
     out = fit_cue("hello", slot(2.8, window=2.5), tmp_path, 0, speak)
@@ -228,25 +227,14 @@ def test_cannot_fit_falls_back_to_the_speed_change(tmp_path):
 
 
 @needs_ffmpeg
-def test_a_tight_window_pushes_past_the_soft_limit(tmp_path):
-    """Two speed changes can stack, and together they pass SOFT_SPEEDUP.
-
-    First the line is squeezed towards its target, at most SOFT_SPEEDUP.
-    If it still overlaps the next cue it is squeezed again, this time up to
-    1.25. Together they reach about 1.44, which is faster than the word
-    "soft" suggests, and it is deliberate: overlapping speech sounds worse
-    than fast speech.
-
-    Even so, a line can stay too long. 1.44 is the end of it, and after
-    that the overlap is accepted rather than cut.
-    """
+def test_a_tight_window_is_cut_to_the_window(tmp_path):
+    """Speed-up first, then cut. The next cue must not be overlapped."""
     speak = tone_maker(tmp_path, {"long": 4.0})
     out = fit_cue("long", slot(2.0, window=2.0), tmp_path, 0, speak)
     length = duration(out)
 
-    assert length < 4.0 / SOFT_SPEEDUP - 0.05, "faster than one stage alone"
-    assert abs(length - 4.0 / (SOFT_SPEEDUP * 1.25)) < 0.05, "both stages, and no more"
-    assert length > 2.0, "it still overruns, because cutting is not allowed"
+    assert length < 4.0 / SOFT_SPEEDUP - 0.05, "faster than the soft cap alone"
+    assert length <= 2.0 + 0.05, "must not run into the next cue"
 
 
 @needs_ffmpeg

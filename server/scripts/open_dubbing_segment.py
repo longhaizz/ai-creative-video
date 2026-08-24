@@ -86,21 +86,18 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
     except Exception:
         model = WhisperModel(whisper_size, device="cpu", compute_type="int8")
 
-    language = ""
-    language_probability = 0.0
+    language, language_probability = _detect_language(model, vocals_16k)
     utterances = []
     for index, ((start, end), speaker) in enumerate(zip(windows, assigned)):
         wav = out / f"utt_{index:03d}.wav"
         _cut(vocals, start, end, wav)
-        segments, info = model.transcribe(str(wav), vad_filter=False)
+        kwargs = {"vad_filter": False}
+        if language:
+            kwargs["language"] = language
+        segments, _info = model.transcribe(str(wav), **kwargs)
         text = " ".join(
             segment.text.strip() for segment in segments if segment.text
         ).strip()
-        if not language:
-            language = getattr(info, "language", "") or ""
-            language_probability = float(
-                getattr(info, "language_probability", 0.0) or 0.0
-            )
         utterances.append({
             "start": round(start, 3),
             "end": round(end, 3),
@@ -150,6 +147,16 @@ def _demucs(mix: Path, out: Path) -> tuple[Path, Path]:
     save_audio(stems["vocals"], str(vocals), samplerate=separator.samplerate)
     save_audio(music, str(no_vocals), samplerate=separator.samplerate)
     return vocals, no_vocals
+
+
+def _detect_language(model, wav: Path) -> tuple[str, float]:
+    """One language for the whole clip, so cues do not flip mid-video."""
+    _segments, info = model.transcribe(str(wav), vad_filter=True)
+    for _ in _segments:
+        break
+    language = getattr(info, "language", "") or ""
+    probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+    return language, probability
 
 
 def _vad_windows(wav: Path) -> list[tuple[float, float]]:
