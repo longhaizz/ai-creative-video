@@ -40,8 +40,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 LOAD_MODELS = os.getenv("LOAD_MODELS", "1") not in ("0", "false", "no")
 
 # LatentSync sits on the GPU even when a job never asks for lip sync.
-# Set to 0 on a 16GB card (Kaggle T4): whisper and voice still load;
-# a job that sends lipsync=true fails. Default 1 keeps today's behaviour.
+# Set to 0 on a 16GB card (Kaggle T4): voice still loads; Whisper now
+# runs in the Open Dubbing venv. A job that sends lipsync=true fails.
+# Default 1 keeps today's behaviour.
 LOAD_LIPSYNC = os.getenv("LOAD_LIPSYNC", "1") not in ("0", "false", "no")
 
 # -- outside programs ------------------------------------------------------
@@ -53,6 +54,12 @@ FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 # with that interpreter and from its own folder.
 VSR_DIR = Path(os.getenv("VSR_DIR", "video-subtitle-remover"))
 VSR_PYTHON = os.getenv("VSR_PYTHON", "/opt/venv-vsr/bin/python")
+
+# -- Open Dubbing (Demucs + VAD + Pyannote + Whisper) ----------------------
+# Own venv: pyannote's transformers stack does not sit next to LatentSync.
+# HF_TOKEN must be able to download pyannote/speaker-diarization-3.1.
+OPEN_DUBBING_PYTHON = os.getenv("OPEN_DUBBING_PYTHON", "/opt/venv-od/bin/python")
+HF_TOKEN = os.getenv("HF_TOKEN", "") or os.getenv("HUGGING_FACE_HUB_TOKEN", "")
 
 # -- LatentSync ------------------------------------------------------------
 # The vendored source, and the two files it needs. The config and the

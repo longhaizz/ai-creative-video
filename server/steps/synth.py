@@ -349,7 +349,12 @@ def timed_speech(
                 lang_name=language_name,
             )
 
-        fitted = fit_cue(line, slot, work, index, speak, rewrite, ctx)
+        cue = cues[index]
+
+        def speak_this(text, path, _cue=cue):
+            return speak(text, path, _cue)
+
+        fitted = fit_cue(line, slot, work, index, speak_this, rewrite, ctx)
         clips.append((slot["start"], fitted))
 
     return place_clips(clips, video_seconds, work / "speech_timed.wav")
