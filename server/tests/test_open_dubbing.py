@@ -211,6 +211,72 @@ def test_language_is_detected_once_and_locked_on_every_cue():
     assert 'kwargs["language"] = language' in src
 
 
+def _od_script():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "open_dubbing_segment.py"
+    spec = importlib.util.spec_from_file_location("od_seg_split", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_short_line_is_not_split():
+    mod = _od_script()
+    assert mod.split_long_utterance(1.0, 3.0, "Hello there.") == [
+        (1.0, 3.0, "Hello there."),
+    ]
+
+
+def test_two_short_sentences_stay_one_cue():
+    """A 4s window with two sentences is still one breath."""
+    mod = _od_script()
+    text = "Hello there. How are you?"
+    assert mod.split_long_utterance(0.0, 4.0, text) == [(0.0, 4.0, text)]
+
+
+def test_a_long_window_of_sentences_is_split():
+    """The 15s VAD blob from a continuous take must not stay one cue."""
+    mod = _od_script()
+    text = (
+        "At the same time, it shows you how to perform each exercise. "
+        "You won't have to worry about what to do. "
+        "And even if you don't workout at the gym, this is a complete home workout plan. "
+        "All you have to do is apply it and see how it goes. "
+        "The app link is in the description."
+    )
+    pieces = mod.split_long_utterance(9.29, 24.96, text)
+    assert len(pieces) == 5
+    assert pieces[0][0] == 9.29
+    assert pieces[-1][1] == 24.96
+    assert all(piece[2].endswith((".", "?")) for piece in pieces)
+    # Each cue is a sentence, not the whole paragraph.
+    assert all(len(mod._sentence_list(piece[2])) == 1 for piece in pieces)
+
+
+def test_word_timestamps_keep_the_gaps_between_sentences():
+    """Pauses in the original stay as gaps on the timeline."""
+    mod = _od_script()
+    text = "Do this. Then that. All done."
+    # Times are relative to the clip (the VAD window), same as Whisper.
+    words = [
+        {"word": "Do", "start": 0.0, "end": 0.2},
+        {"word": " this.", "start": 0.2, "end": 0.6},
+        {"word": " Then", "start": 1.2, "end": 1.4},
+        {"word": " that.", "start": 1.4, "end": 1.8},
+        {"word": " All", "start": 2.5, "end": 2.7},
+        {"word": " done.", "start": 2.7, "end": 3.0},
+    ]
+    pieces = mod.split_long_utterance(10.0, 14.0, text, words)
+    assert len(pieces) == 3
+    assert pieces[0] == (10.0, 10.6, "Do this.")
+    assert pieces[1][0] == 11.2
+    assert pieces[1][1] == 11.8
+    assert pieces[2][0] == 12.5
+    assert pieces[2][1] == 13.0
+    assert pieces[1][0] - pieces[0][1] == pytest.approx(0.6)
+
+
 class _FakeProcess:
     def __init__(self, text, code=0):
         import io
