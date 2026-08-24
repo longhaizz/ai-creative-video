@@ -39,6 +39,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # machine with no GPU.
 LOAD_MODELS = os.getenv("LOAD_MODELS", "1") not in ("0", "false", "no")
 
+# LatentSync sits on the GPU even when a job never asks for lip sync.
+# Set to 0 on a 16GB card (Kaggle T4): whisper and voice still load;
+# a job that sends lipsync=true fails. Default 1 keeps today's behaviour.
+LOAD_LIPSYNC = os.getenv("LOAD_LIPSYNC", "1") not in ("0", "false", "no")
+
 # -- outside programs ------------------------------------------------------
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")

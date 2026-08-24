@@ -20,6 +20,7 @@ confuse it.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from server import config
@@ -38,7 +39,10 @@ class Models:
         self.lipsync = lipsync
 
     def as_list(self):
-        return [self.whisper, self.voice, self.lipsync]
+        models = [self.whisper, self.voice]
+        if self.lipsync is not None:
+            models.append(self.lipsync)
+        return models
 
 
 def make_run_dub(models: Models):
@@ -138,13 +142,28 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     # to video_seconds for this reason; do not remove that.
     picture = video
     if params.lipsync:
+        if models.lipsync is None:
+            raise PipelineError(
+                "Lip sync was requested but LatentSync is not loaded. "
+                "Start with LOAD_LIPSYNC=1, or send lipsync=false.",
+                code="invalid_input",
+            )
         ctx.step("Matching the mouth to the new voice")
+        # Log the numbers the model really got, and how long they cost. Both
+        # come from the request, so a job that looks slow can be told apart
+        # from a job that ignored its settings.
+        ctx.log(
+            f"LatentSync: steps={params.latentsync_steps} "
+            f"guidance={params.latentsync_guidance}"
+        )
+        started = time.perf_counter()
         try:
             picture = models.lipsync.run(
                 video.resolve(), speech.resolve(), (work / "lipsync.mp4").resolve(),
                 steps=params.latentsync_steps,
                 guidance=params.latentsync_guidance,
             )
+            ctx.log(f"LatentSync took {time.perf_counter() - started:.1f}s")
         except NoFaceError as error:
             # Not a failure. Ad creatives often have no talking head.
             ctx.log(f"Skipping lip sync: {error}")

@@ -85,18 +85,22 @@ def main() -> int:
         burn_subtitle=args.burn_subtitle,
     )
 
-    from server.steps.lipsync import LipsyncModel
     from server.steps.synth import VoxCPMModel
     from server.steps.transcribe import WhisperModels
 
-    models = Models(
-        voice=VoxCPMModel(),
-        whisper=WhisperModels(default_model=args.whisper),
-        lipsync=LipsyncModel(
+    lipsync = None
+    if config.LOAD_LIPSYNC:
+        from server.steps.lipsync import LipsyncModel
+
+        lipsync = LipsyncModel(
             config.LATENTSYNC_DIR,
             config.LATENTSYNC_CONFIG,
             config.LATENTSYNC_CHECKPOINT,
-        ),
+        )
+    models = Models(
+        voice=VoxCPMModel(),
+        whisper=WhisperModels(default_model=args.whisper),
+        lipsync=lipsync,
     )
 
     ctx = PrintingContext(params, work)

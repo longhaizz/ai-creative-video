@@ -37,6 +37,24 @@ def build(monkeypatch, tmp_path):
     return make
 
 
+def test_as_list_skips_lipsync_when_none():
+    from server.pipeline import Models
+
+    models = Models(voice=FakeModel("voxcpm"), whisper=FakeModel("whisper"), lipsync=None)
+    assert [m.name for m in models.as_list()] == ["whisper", "voxcpm"]
+
+
+def test_as_list_keeps_lipsync_when_set():
+    from server.pipeline import Models
+
+    models = Models(
+        voice=FakeModel("voxcpm"),
+        whisper=FakeModel("whisper"),
+        lipsync=FakeModel("latentsync"),
+    )
+    assert [m.name for m in models.as_list()] == ["whisper", "voxcpm", "latentsync"]
+
+
 def test_no_models_is_fine(build):
     with build([]) as client:
         assert client.get("/health", headers=AUTH).json()["models_loaded"] == []

@@ -170,23 +170,28 @@ def build_production_app() -> FastAPI:
 
     With LOAD_MODELS=0 it starts with nothing loaded instead, so the HTTP
     side can be worked on where there is no GPU. Jobs then fail at once.
+    With LOAD_LIPSYNC=0 it still loads whisper and voice, but not LatentSync.
     """
     if not config.LOAD_MODELS:
         return create_app()
 
     from server.pipeline import Models, make_run_dub
-    from server.steps.lipsync import LipsyncModel
     from server.steps.synth import VoxCPMModel
     from server.steps.transcribe import WhisperModels
 
-    models = Models(
-        voice=VoxCPMModel(),
-        whisper=WhisperModels(),
-        lipsync=LipsyncModel(
+    lipsync = None
+    if config.LOAD_LIPSYNC:
+        from server.steps.lipsync import LipsyncModel
+
+        lipsync = LipsyncModel(
             config.LATENTSYNC_DIR,
             config.LATENTSYNC_CONFIG,
             config.LATENTSYNC_CHECKPOINT,
-        ),
+        )
+    models = Models(
+        voice=VoxCPMModel(),
+        whisper=WhisperModels(),
+        lipsync=lipsync,
     )
     return create_app(make_run_dub(models), models=models.as_list())
 
