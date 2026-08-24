@@ -39,8 +39,12 @@ class FakePipeline:
             time.sleep(self.sleep)
         context.check_cancel()
 
-        result = context.workdir / "result.mp4"
-        result.write_bytes(b"fake video")
+        if getattr(context.params, "text", None):
+            result = context.workdir / "result.wav"
+            result.write_bytes(b"fake audio")
+        else:
+            result = context.workdir / "result.mp4"
+            result.write_bytes(b"fake video")
         with self._lock:
             self.calls.append((context.job_id, start, time.monotonic()))
         return result

@@ -508,3 +508,36 @@ def test_uploaded_reference_wins_over_cue_ref(monkeypatch, tmp_path):
 
     _dub(Ctx(), Models(voice=Voice(), lipsync=None))
     assert refs == [uploaded] or refs == [uploaded.resolve()]
+
+
+def test_speak_clones_from_the_uploaded_audio(tmp_path):
+    from server.pipeline import Models, _speak
+    from server.schemas import SpeakParams
+
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"a")
+    refs = []
+
+    class Ctx:
+        def __init__(self):
+            self.params = SpeakParams(text="hello")
+            self.workdir = tmp_path
+
+        def log(self, message):
+            return None
+
+        def step(self, name):
+            return None
+
+        def check_cancel(self):
+            return None
+
+    class Voice:
+        def speak(self, text, out_wav, cfg, steps, reference_wav=None):
+            refs.append((text, Path(reference_wav)))
+            Path(out_wav).write_bytes(b"wav")
+            return Path(out_wav)
+
+    result = _speak(Ctx(), Models(voice=Voice(), lipsync=None))
+    assert result.read_bytes() == b"wav"
+    assert refs == [("hello", audio)]

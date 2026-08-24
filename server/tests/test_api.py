@@ -197,4 +197,58 @@ def test_a_failed_job_reports_its_code(client):
         assert body["error_code"] == "no_face"
         assert "no face" in body["error"]
 
+
+# -- speak (text + reference audio → wav) -----------------------------------
+
+
+def an_audio(name: str = "voice.wav", size: int = 32):
+    return {"audio": (name, b"x" * size, "audio/wav")}
+
+
+def post_speak(http, files=None, **fields):
+    data = {"text": fields.pop("text", "xin chao"), **fields}
+    return http.post("/speak", headers=AUTH, files=files or an_audio(), data=data)
+
+
+def test_speak_returns_202_and_a_job_id(client):
+    with client() as http:
+        response = post_speak(http)
+        assert response.status_code == 202
+        assert response.json()["job_id"]
+
+
+def test_speak_result_is_wav_and_the_job_is_forgotten(client):
+    with client() as http:
+        job_id = post_speak(http).json()["job_id"]
+        assert wait_for_status(http, job_id, "done")
+
+        result = http.get(f"/jobs/{job_id}/result", headers=AUTH)
+        assert result.status_code == 200
+        assert result.content == b"fake audio"
+        assert result.headers["content-type"].startswith("audio/wav")
+
+        assert wait_until(
+            lambda: http.get(f"/jobs/{job_id}", headers=AUTH).status_code == 404
+        )
+
+
+def test_speak_without_text_is_refused(client):
+    with client() as http:
+        response = http.post(
+            "/speak", headers=AUTH, files=an_audio(), data={"text": "  "},
+        )
+        assert response.status_code == 422
+
+
+def test_speak_without_audio_is_refused(client):
+    with client() as http:
+        response = http.post("/speak", headers=AUTH, data={"text": "hello"})
+        assert response.status_code == 422
+
+
+def test_speak_rejects_a_video_as_audio(client):
+    with client() as http:
+        response = post_speak(http, files={"audio": ("clip.mp4", b"x" * 32, "video/mp4")})
+        assert response.status_code == 415
+
 # Cancelling has its own file: server/tests/test_cancel.py

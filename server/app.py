@@ -19,7 +19,7 @@ from server import config
 from server.auth import require_api_key
 from server.jobs import DONE, JobContext, JobRunner, PipelineError
 from server.limits import BodySizeLimit
-from server.schemas import DubRequest
+from server.schemas import DubRequest, SpeakRequest
 from server.uploads import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, save_upload
 
 
@@ -126,6 +126,24 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
         runner.enqueue(job.id)
         return {"job_id": job.id}
 
+    @app.post("/speak", status_code=202)
+    def speak(form: Annotated[SpeakRequest, Form()]):
+        runner = get_runner()
+        job = runner.create(form.settings())
+        try:
+            save_upload(
+                form.audio,
+                job.workdir,
+                AUDIO_EXTENSIONS,
+                config.MAX_AUDIO_BYTES,
+                "audio",
+            )
+        except Exception:
+            runner.drop(job.id)
+            raise
+        runner.enqueue(job.id)
+        return {"job_id": job.id}
+
     @app.get("/jobs/{job_id}")
     def job_state(job_id: str, since: Annotated[int, Query(ge=0)] = 0):
         get_job_or_404(job_id)
@@ -145,10 +163,17 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
             )
         # Forget the job once the file has gone out. Nobody downloads the
         # same dub twice, and the disk is not free.
+        path = job.result_path
+        suffix = path.suffix.lower() if path is not None else ".mp4"
+        media = {
+            ".mp4": "video/mp4",
+            ".wav": "audio/wav",
+            ".mp3": "audio/mpeg",
+        }.get(suffix, "application/octet-stream")
         return FileResponse(
-            job.result_path,
-            media_type="video/mp4",
-            filename=f"{job_id}.mp4",
+            path,
+            media_type=media,
+            filename=f"{job_id}{suffix}",
             background=BackgroundTask(runner.drop, job_id),
         )
 

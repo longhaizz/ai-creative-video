@@ -24,6 +24,7 @@ from pathlib import Path
 
 from server import config
 from server.jobs import JobContext, PipelineError
+from server.schemas import SpeakParams
 from server.steps import audio, open_dubbing, subtitle, transcribe, vsr
 from server.steps.lipsync import NoFaceError
 from server.steps.synth import with_voice_instruction
@@ -46,10 +47,12 @@ class Models:
 def make_run_dub(models: Models):
     """Build the run_dub the JobRunner calls, holding the loaded models."""
 
-    def run_dub(ctx: JobContext) -> Path:
+    def run(ctx: JobContext) -> Path:
+        if isinstance(ctx.params, SpeakParams):
+            return _speak(ctx, models)
         return _dub(ctx, models)
 
-    return run_dub
+    return run
 
 
 def _source_video(work: Path) -> Path:
@@ -62,6 +65,31 @@ def _source_video(work: Path) -> Path:
 def _reference_audio(work: Path) -> Path | None:
     found = sorted(work.glob("reference_audio.*"))
     return found[0] if found else None
+
+
+def _source_audio(work: Path) -> Path:
+    found = sorted(work.glob("audio.*"))
+    if not found:
+        raise PipelineError("The reference audio was not saved", code="invalid_input")
+    return found[0]
+
+
+def _speak(ctx: JobContext, models: Models) -> Path:
+    """Read one line in the uploaded voice. No video, no timing fit."""
+    params = ctx.params
+    work = ctx.workdir
+    reference = _source_audio(work)
+    text = (params.text or "").strip()
+    if not text:
+        raise PipelineError("There is no text to speak", code="invalid_input")
+    ctx.step("Making the voice")
+    ctx.log(f"Cloning from {reference.name}")
+    ctx.check_cancel()
+    return models.voice.speak(
+        text, work / "speech.wav",
+        params.cfg_value, params.inference_timesteps,
+        reference_wav=reference,
+    )
 
 
 def _dub(ctx: JobContext, models: Models) -> Path:
