@@ -1,0 +1,14 @@
+# Open Dubbing audio venv (/opt/venv-od). Do not install this into the
+# main LatentSync venv: pyannote pulls a transformers/numpy stack that
+# collides with it.
+#
+#   python3.10 -m venv /opt/venv-od
+#   /opt/venv-od/bin/pip install -r server/requirements-open-dubbing.txt
+#
+# Accept the pyannote model terms on Hugging Face, then set HF_TOKEN.
+
+torch
+torchaudio
+demucs
+faster-whisper
+pyannote.audio

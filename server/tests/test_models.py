@@ -40,8 +40,8 @@ def build(monkeypatch, tmp_path):
 def test_as_list_skips_lipsync_when_none():
     from server.pipeline import Models
 
-    models = Models(voice=FakeModel("voxcpm"), whisper=FakeModel("whisper"), lipsync=None)
-    assert [m.name for m in models.as_list()] == ["whisper", "voxcpm"]
+    models = Models(voice=FakeModel("voxcpm"), lipsync=None)
+    assert [m.name for m in models.as_list()] == ["voxcpm"]
 
 
 def test_as_list_keeps_lipsync_when_set():
@@ -49,10 +49,9 @@ def test_as_list_keeps_lipsync_when_set():
 
     models = Models(
         voice=FakeModel("voxcpm"),
-        whisper=FakeModel("whisper"),
         lipsync=FakeModel("latentsync"),
     )
-    assert [m.name for m in models.as_list()] == ["whisper", "voxcpm", "latentsync"]
+    assert [m.name for m in models.as_list()] == ["voxcpm", "latentsync"]
 
 
 def test_no_models_is_fine(build):

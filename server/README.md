@@ -4,8 +4,9 @@ Một video vào → một video ra. Toàn bộ pipeline chạy ở đây, trên
 một hàng đợi, một worker**:
 
 ```
-xoá sub → tách nhạc → nghe (whisper) → dịch (OpenAI)
-    → đọc (VoxCPM) → khớp miệng (LatentSync) → trộn → mux → burn sub
+xoá sub → Open Dubbing (Demucs + VAD + Pyannote + Whisper)
+    → dịch (OpenAI) → đọc (VoxCPM, clone từng câu) → khớp miệng
+    → trộn → mux → burn sub
 ```
 
 Thiết kế và lộ trình: [`../PLAN.md`](../PLAN.md).
@@ -15,7 +16,7 @@ Thiết kế và lộ trình: [`../PLAN.md`](../PLAN.md).
 ## Chạy production
 
 ```bash
-cp .env.example .env      # điền API_KEY và OPENAI_API_KEY
+cp .env.example .env      # điền API_KEY, OPENAI_API_KEY, HF_TOKEN
 cd LatentSync && bash setup_env.sh && cd ..   # tải weight, ~1.3GB
 docker compose up -d --build
 ```
@@ -106,6 +107,8 @@ Tham số đầy đủ: [`schemas.py`](schemas.py).
 | `OPENAI_API_KEY` | — | Cần cả khi giữ nguyên ngôn ngữ |
 | `LOAD_MODELS` | `1` | `0` = chạy không model |
 | `LOAD_LIPSYNC` | `1` | `0` = không nạp LatentSync (T4 / card 16GB) |
+| `OPEN_DUBBING_PYTHON` | `/opt/venv-od/bin/python` | venv Demucs/VAD/Pyannote/Whisper |
+| `HF_TOKEN` | — | **Bắt buộc cho job.** Pyannote gated |
 | `JOBS_DIR` | `jobs` | |
 | `JOB_TTL_SECONDS` | `3600` | |
 | `MAX_VIDEO_BYTES` | 200MB | kiểm lúc lưu |
@@ -124,9 +127,7 @@ Tham số đầy đủ: [`schemas.py`](schemas.py).
 và uvicorn phải chạy `--workers 1`. Worker thứ hai sẽ đặt hai job lên cùng
 một card.
 
-**Bộ xoá phụ đề chạy venv riêng.** numpy 2.2 cho paddle không sống chung
-được với numpy 1.26 mà LatentSync cần. Nó được gọi bằng `subprocess`, và
-worker giữ GPU trong lúc chờ — nên vẫn là một job một lúc.
+**Bộ xoá phụ đề và Open Dubbing chạy venv riêng.** numpy/transformers của paddle và pyannote không sống chung với LatentSync. Cả hai được gọi bằng `subprocess`.
 
 **Trạng thái nằm trong RAM.** Restart là mất job. Đúng thiết kế: mấy phút
 GPU đã đốt thì database cũng không tua lại được.

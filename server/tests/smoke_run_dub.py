@@ -86,7 +86,6 @@ def main() -> int:
     )
 
     from server.steps.synth import VoxCPMModel
-    from server.steps.transcribe import WhisperModels
 
     lipsync = None
     if config.LOAD_LIPSYNC:
@@ -99,7 +98,6 @@ def main() -> int:
         )
     models = Models(
         voice=VoxCPMModel(),
-        whisper=WhisperModels(default_model=args.whisper),
         lipsync=lipsync,
     )
 

@@ -3,8 +3,7 @@
 The whole job, in order:
 
     remove the burned-in subtitles   (optional, its own venv)
-    split voice from music           (demucs)
-    read the speech                  (whisper)
+    split, diarize, read speech      (Open Dubbing venv)
     rewrite and translate            (OpenAI)
     say every line                   (VoxCPM, one cue at a time)
     move the mouth                   (LatentSync, optional)
@@ -25,7 +24,7 @@ from pathlib import Path
 
 from server import config
 from server.jobs import JobContext, PipelineError
-from server.steps import audio, separate, subtitle, transcribe, vsr
+from server.steps import audio, open_dubbing, subtitle, transcribe, vsr
 from server.steps.lipsync import NoFaceError
 from server.steps.synth import with_voice_instruction
 
@@ -33,13 +32,12 @@ from server.steps.synth import with_voice_instruction
 class Models:
     """Everything that is loaded once and used by every job."""
 
-    def __init__(self, voice, whisper, lipsync):
+    def __init__(self, voice, lipsync):
         self.voice = voice
-        self.whisper = whisper
         self.lipsync = lipsync
 
     def as_list(self):
-        models = [self.whisper, self.voice]
+        models = [self.voice]
         if self.lipsync is not None:
             models.append(self.lipsync)
         return models
@@ -85,38 +83,45 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     width, height = audio.video_size(video)
     ctx.log(f"{video_seconds:.1f}s, {width}x{height}")
 
-    # 2. Split the voice from the music, so the music can be kept.
-    track = audio.extract_audio(video, work / "in.wav")
-    vocals, music = separate.separate(track, work, ctx=ctx)
+    # 2. Split, diarize and read speech in the Open Dubbing venv.
+    segmented = open_dubbing.segment(
+        video, work, params.whisper_model, ctx=ctx
+    )
+    cues = segmented["cues"]
+    meta = segmented["meta"]
+    vocals = segmented["vocals"]
+    music = segmented["music"]
     ctx.check_cancel()
 
-    # The music stem still holds some of the old voice. It only shows in the
-    # gaps, where it sounds like the old speaker never left.
     ctx.step("Cleaning the music track")
     music = audio.suppress_vocal_bleed(music, vocals, work / "music_clean.wav")
     ctx.check_cancel()
 
-    # 3. Read the speech, then 4. rewrite it, then 5. say it.
-    cues, meta = transcribe.transcribe(
-        models.whisper, vocals, params.whisper_model, ctx=ctx
-    )
     for index, cue in enumerate(cues, 1):
         reason = transcribe.cue_needs_review(cue)
         if reason:
             ctx.log(f"Cue {index} may be wrong ({reason}): {cue['text'][:80]}")
     ctx.check_cancel()
 
-    reference = _reference_audio(work) or vocals
+    uploaded = _reference_audio(work)
     if params.voice_mode == "original":
-        ctx.log(f"Copying the voice from {reference.name}")
+        if uploaded is not None:
+            ctx.log(f"Copying the voice from {uploaded.name}")
+        else:
+            ctx.log("Copying the voice from each spoken cue")
     else:
         ctx.log(f"Using the {params.voice_mode} voice")
 
-    def speak(text: str, out_wav: Path) -> Path:
+    def speak(text: str, out_wav: Path, cue: dict | None = None) -> Path:
         if params.voice_mode == "original":
+            ref = uploaded
+            if ref is None and cue is not None and cue.get("ref_wav"):
+                ref = Path(cue["ref_wav"])
+            if ref is None:
+                ref = vocals
             return models.voice.speak(
                 text, out_wav, params.cfg_value, params.inference_timesteps,
-                reference_wav=reference,
+                reference_wav=ref,
             )
         return models.voice.speak(
             with_voice_instruction(text, params.voice_mode),
@@ -158,10 +163,14 @@ def _dub(ctx: JobContext, models: Models) -> Path:
         )
         started = time.perf_counter()
         try:
-            picture = models.lipsync.run(
-                video.resolve(), speech.resolve(), (work / "lipsync.mp4").resolve(),
-                steps=params.latentsync_steps,
-                guidance=params.latentsync_guidance,
+            picture = models.lipsync.run_shots(
+                video.resolve(),
+                speech.resolve(),
+                (work / "lipsync.mp4").resolve(),
+                work / "shots",
+                params.latentsync_steps,
+                params.latentsync_guidance,
+                ctx=ctx,
             )
             ctx.log(f"LatentSync took {time.perf_counter() - started:.1f}s")
         except NoFaceError as error:
