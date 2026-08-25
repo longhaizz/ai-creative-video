@@ -138,16 +138,24 @@ def cues_from_payload(payload: dict, out_dir: Path) -> dict:
         end = float(item["end"])
         if end <= start:
             end = start + 0.4
+        speech_start = float(item.get("speech_start", start))
+        speech_end = float(item.get("speech_end", end))
+        if speech_end <= speech_start:
+            speech_end = speech_start + 0.15
         speaker = item.get("speaker_id") or "SPEAKER_00"
+        text = (item.get("text") or "").strip()
         cues.append({
             "start": start,
             "end": end,
-            "speech_start": start,
-            "speech_end": end,
-            "text": (item.get("text") or "").strip(),
+            "speech_start": speech_start,
+            "speech_end": speech_end,
+            "text": text,
             "speaker_id": speaker,
-            "avg_logprob": 0.0,
-            "no_speech_prob": 0.0 if (item.get("text") or "").strip() else 1.0,
+            "avg_logprob": float(item.get("avg_logprob", 0.0) or 0.0),
+            "no_speech_prob": (
+                float(item.get("no_speech_prob", 0.0) or 0.0)
+                if text else 1.0
+            ),
         })
 
     refs = {}
@@ -163,6 +171,7 @@ def cues_from_payload(payload: dict, out_dir: Path) -> dict:
     meta = {
         "language": payload.get("language") or "",
         "language_probability": float(payload.get("language_probability") or 0.0),
+        "whisper_model": payload.get("whisper_model") or "",
     }
     return {"cues": cues, "meta": meta, "vocals": vocals, "music": music}
 
