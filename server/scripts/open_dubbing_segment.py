@@ -116,7 +116,9 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
             utterances.append({
                 "start": round(piece_start, 3),
                 "end": round(piece_end, 3),
-                "speaker_id": _best_speaker(piece_start, piece_end, speakers),
+                # One VAD window is one take. Sentence splits must not
+                # pick up Pyannote flipping SPEAKER_00/01 mid-ad.
+                "speaker_id": speaker,
                 "text": text,
                 "wav": str(wav),
             })

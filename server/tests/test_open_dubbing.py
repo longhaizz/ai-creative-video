@@ -279,6 +279,22 @@ def test_best_speaker_uses_overlap_then_nearest():
     assert mod._best_speaker(5.12, 5.74, mixed) == "SPEAKER_01"
 
 
+def test_sentence_splits_keep_the_vad_window_speaker():
+    """Pyannote flipping 00/01 between sentences in one take must not stick."""
+    import inspect
+
+    mod = _od_script()
+    workout = [
+        {"start": 0.0, "end": 3.06, "speaker_id": "SPEAKER_01"},
+        {"start": 3.06, "end": 9.86, "speaker_id": "SPEAKER_00"},
+        {"start": 10.14, "end": 23.7, "speaker_id": "SPEAKER_01"},
+    ]
+    assert mod._best_speaker(0.0, 23.7, workout) == "SPEAKER_01"
+    src = inspect.getsource(mod.segment)
+    assert '"speaker_id": speaker' in src
+    assert "_best_speaker(piece_start, piece_end, speakers)" not in src
+
+
 def test_language_is_detected_once_and_locked_on_every_cue():
     """Cues must not pick their own language. One detect, then lock."""
     import importlib.util
