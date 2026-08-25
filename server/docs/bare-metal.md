@@ -105,7 +105,8 @@ Không cài pyannote vào venv chính. Demucs + Whisper + Pyannote chạy interp
 ```bash
 python3.10 -m venv /opt/venv-od
 /opt/venv-od/bin/pip install --upgrade pip
-/opt/venv-od/bin/pip install -r server/requirements-open-dubbing.txt
+/opt/venv-od/bin/pip install -r server/requirements-open-dubbing.txt \
+    --extra-index-url https://download.pytorch.org/whl/cu121
 ```
 
 Vào Hugging Face, chấp nhận điều khoản `pyannote/speaker-diarization-3.1`, rồi đặt `HF_TOKEN` trong `.env`.
@@ -196,6 +197,7 @@ User=dub
 WorkingDirectory=/srv/dub
 EnvironmentFile=/srv/dub/.env
 Environment=VSR_PYTHON=/opt/venv-vsr/bin/python
+Environment=OPEN_DUBBING_PYTHON=/opt/venv-od/bin/python
 Environment=HF_HOME=/models/huggingface
 ExecStart=/opt/venv-main/bin/uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 1
 Restart=on-failure
