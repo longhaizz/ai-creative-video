@@ -35,6 +35,9 @@ SPEECH_PAD_MS = 150
 # becomes one cue, and TTS cannot fill that slot. Split those.
 MAX_UTTERANCE_SECONDS = 6.0
 MAX_SENTENCES = 2
+# Pause between words within a VAD window (e.g. "Go lower." as its own cue).
+WORD_GAP_SECONDS = 0.35
+RETRY_WHISPER_MODEL = "large-v3"
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?。！？])\s+")
 _SENTENCE_END = re.compile(r"[.!?。！？]")
 
@@ -88,44 +91,53 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
 
     from faster_whisper import WhisperModel
 
-    try:
-        model = WhisperModel(whisper_size, device="cuda", compute_type="float16")
-    except Exception:
-        model = WhisperModel(whisper_size, device="cpu", compute_type="int8")
-
+    model = _load_whisper(whisper_size)
     language, language_probability = _detect_language(model, vocals_16k)
+    model, segments, all_words, language_probability, whisper_used = _transcribe_full(
+        model, vocals_16k, language, language_probability, whisper_size,
+    )
+
     utterances = []
     for index, ((start, end), speaker) in enumerate(zip(windows, assigned)):
         wav = out / f"utt_{index:03d}.wav"
         _cut(vocals, start, end, wav)
-        kwargs = {"vad_filter": False, "word_timestamps": True}
-        if language:
-            kwargs["language"] = language
-        segments, _info = model.transcribe(str(wav), **kwargs)
-        pieces = _pieces_from_segments(list(segments), start, end)
+        window_words = [
+            word for word in all_words
+            if word["end"] > start and word["start"] < end
+        ]
+        pieces = _pieces_from_words(window_words, start, end)
         if not pieces:
             utterances.append({
                 "start": round(start, 3),
                 "end": round(end, 3),
+                "speech_start": round(start, 3),
+                "speech_end": round(end, 3),
                 "speaker_id": speaker,
                 "text": "",
+                "avg_logprob": 0.0,
+                "no_speech_prob": 1.0,
                 "wav": str(wav),
             })
             continue
-        for piece_start, piece_end, text in pieces:
+        for piece in pieces:
             utterances.append({
-                "start": round(piece_start, 3),
-                "end": round(piece_end, 3),
+                "start": round(piece["start"], 3),
+                "end": round(piece["end"], 3),
+                "speech_start": round(piece["speech_start"], 3),
+                "speech_end": round(piece["speech_end"], 3),
                 # One VAD window is one take. Sentence splits must not
                 # pick up Pyannote flipping SPEAKER_00/01 mid-ad.
                 "speaker_id": speaker,
-                "text": text,
+                "text": piece["text"],
+                "avg_logprob": piece["avg_logprob"],
+                "no_speech_prob": piece["no_speech_prob"],
                 "wav": str(wav),
             })
 
     return {
         "language": language,
         "language_probability": language_probability,
+        "whisper_model": whisper_used,
         "vocals": str(vocals),
         "no_vocals": str(no_vocals),
         "utterances": utterances,
@@ -166,6 +178,30 @@ def _demucs(mix: Path, out: Path) -> tuple[Path, Path]:
     return vocals, no_vocals
 
 
+def _load_whisper(size: str):
+    from faster_whisper import WhisperModel
+
+    try:
+        return WhisperModel(size, device="cuda", compute_type="float16")
+    except Exception:
+        return WhisperModel(size, device="cpu", compute_type="int8")
+
+
+def _transcribe_kwargs(language: str) -> dict:
+    kwargs = {
+        "vad_filter": False,
+        "word_timestamps": True,
+        "beam_size": 5,
+        "temperature": 0.0,
+    }
+    if language:
+        kwargs["language"] = language
+    prompt = (os.environ.get("WHISPER_INITIAL_PROMPT") or "").strip()
+    if prompt:
+        kwargs["initial_prompt"] = prompt
+    return kwargs
+
+
 def _detect_language(model, wav: Path) -> tuple[str, float]:
     """One language for the whole clip, so cues do not flip mid-video."""
     _segments, info = model.transcribe(str(wav), vad_filter=True)
@@ -174,6 +210,204 @@ def _detect_language(model, wav: Path) -> tuple[str, float]:
     language = getattr(info, "language", "") or ""
     probability = float(getattr(info, "language_probability", 0.0) or 0.0)
     return language, probability
+
+
+    return language, probability
+
+
+def _run_transcribe(model, wav: Path, language: str):
+    segments, info = model.transcribe(str(wav), **_transcribe_kwargs(language))
+    return list(segments), info
+
+
+def _flatten_words(segments) -> list[dict]:
+    words = []
+    for segment in segments:
+        avg_logprob = float(getattr(segment, "avg_logprob", 0.0) or 0.0)
+        no_speech_prob = float(getattr(segment, "no_speech_prob", 0.0) or 0.0)
+        for word in segment.words or []:
+            token = (word.word or "").strip()
+            if not token:
+                continue
+            words.append({
+                "word": word.word or "",
+                "start": float(word.start),
+                "end": float(word.end),
+                "avg_logprob": avg_logprob,
+                "no_speech_prob": no_speech_prob,
+            })
+    return words
+
+
+def _segments_to_cues(segments) -> list[dict]:
+    cues = []
+    for segment in segments:
+        text = (segment.text or "").strip()
+        if not text:
+            continue
+        cues.append({
+            "text": text,
+            "avg_logprob": float(getattr(segment, "avg_logprob", 0.0) or 0.0),
+            "no_speech_prob": float(getattr(segment, "no_speech_prob", 0.0) or 0.0),
+        })
+    return cues
+
+
+def _asr_quality(cues: list[dict], language_probability: float = 0.0) -> dict:
+    """Same heuristics as server/steps/transcribe.py (this script runs in venv-od)."""
+    reasons = []
+    count = len(cues) or 1
+    probability = float(language_probability or 0.0)
+    if 0 < probability < 0.75:
+        reasons.append(f"language_prob={probability:.2f}<0.75")
+
+    garbled = 0
+    low_confidence = 0
+    for cue in cues:
+        text = (cue.get("text") or "").strip()
+        words = [word for word in re.sub(r"[,.!?]+", " ", text).split() if word]
+        if len(words) >= 2:
+            titled = sum(
+                1 for word in words
+                if len(word) > 1 and word[0].isupper() and word[1:].islower()
+            )
+            if titled / len(words) >= 0.6 and not text.endswith((".", "!", "?")):
+                garbled += 1
+            longish = sum(1 for word in words if len(word) >= 8)
+            if len(words) >= 3 and longish / len(words) >= 0.5:
+                garbled += 1
+        if float(cue.get("avg_logprob") or 0) < -1.0:
+            low_confidence += 1
+        if float(cue.get("no_speech_prob") or 0) > 0.6:
+            low_confidence += 1
+
+    if garbled / count >= 0.35:
+        reasons.append(f"garbled_cues={garbled}/{count}")
+    if low_confidence / count >= 0.35:
+        reasons.append(f"low_confidence_cues={low_confidence}/{count}")
+
+    return {"ok": not reasons, "reasons": reasons}
+
+
+def _transcribe_full(model, wav: Path, language: str, language_probability: float,
+                     whisper_size: str):
+    segments, info = _run_transcribe(model, wav, language)
+    language_probability = float(
+        getattr(info, "language_probability", language_probability) or language_probability
+    )
+    quality = _asr_quality(_segments_to_cues(segments), language_probability)
+    used = whisper_size
+
+    if not quality["ok"] and whisper_size != RETRY_WHISPER_MODEL:
+        print(
+            f"Transcript looks poor ({', '.join(quality['reasons'])}); "
+            f"retrying with {RETRY_WHISPER_MODEL}",
+            file=sys.stderr,
+        )
+        model = _load_whisper(RETRY_WHISPER_MODEL)
+        segments, info = _run_transcribe(model, wav, language)
+        language_probability = float(
+            getattr(info, "language_probability", language_probability)
+            or language_probability
+        )
+        used = RETRY_WHISPER_MODEL
+
+    return model, segments, _flatten_words(segments), language_probability, used
+
+
+def _pieces_from_words(
+    words: list[dict], window_start: float, window_end: float,
+) -> list[dict]:
+    pieces = []
+    for group in _word_groups(words, window_start, window_end):
+        text = _join_tokens([item["word"] for item in group])
+        if not text:
+            continue
+        speech_start = max(window_start, group[0]["start"])
+        speech_end = min(window_end, group[-1]["end"])
+        if speech_end <= speech_start:
+            speech_end = speech_start + 0.15
+        pieces.append({
+            "start": speech_start,
+            "end": speech_end,
+            "speech_start": speech_start,
+            "speech_end": speech_end,
+            "text": text,
+            "avg_logprob": sum(item["avg_logprob"] for item in group) / len(group),
+            "no_speech_prob": max(item["no_speech_prob"] for item in group),
+        })
+    return pieces
+
+
+def _word_groups(
+    words: list[dict], window_start: float, window_end: float,
+) -> list[list[dict]]:
+    cleaned = [
+        word for word in words
+        if (word.get("word") or "").strip()
+        and word["end"] > window_start and word["start"] < window_end
+    ]
+    if not cleaned:
+        return []
+
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+
+    def flush():
+        nonlocal current
+        if current:
+            groups.append(current)
+            current = []
+
+    def sentence_count(group: list[dict]) -> int:
+        return sum(1 for item in group if _SENTENCE_END.search(item["word"]))
+
+    for index, word in enumerate(cleaned):
+        if current:
+            gap = word["start"] - current[-1]["end"]
+            span = word["end"] - current[0]["start"]
+            split = gap >= WORD_GAP_SECONDS
+            if _SENTENCE_END.search(current[-1]["word"]):
+                split = True
+            if span > MAX_UTTERANCE_SECONDS and len(current) >= 2:
+                split = True
+            if split:
+                flush()
+        current.append(word)
+        if sentence_count(current) >= MAX_SENTENCES and index + 1 < len(cleaned):
+            flush()
+    flush()
+
+    out: list[list[dict]] = []
+    for group in groups:
+        out.extend(_split_oversized_word_group(group, window_start, window_end))
+    return out
+
+
+def _split_oversized_word_group(
+    group: list[dict], window_start: float, window_end: float,
+) -> list[list[dict]]:
+    span = group[-1]["end"] - group[0]["start"]
+    if span <= MAX_UTTERANCE_SECONDS or len(group) <= 1:
+        return [group]
+
+    best_gap = 0.0
+    best_index = len(group) // 2
+    for index in range(1, len(group)):
+        gap = group[index]["start"] - group[index - 1]["end"]
+        if gap > best_gap:
+            best_gap = gap
+            best_index = index
+
+    if best_gap >= WORD_GAP_SECONDS * 0.5:
+        left = _split_oversized_word_group(group[:best_index], window_start, window_end)
+        right = _split_oversized_word_group(group[best_index:], window_start, window_end)
+        return left + right
+
+    mid = max(1, len(group) // 2)
+    left = _split_oversized_word_group(group[:mid], window_start, window_end)
+    right = _split_oversized_word_group(group[mid:], window_start, window_end)
+    return left + right
 
 
 def _sentence_list(text: str) -> list[str]:
@@ -222,6 +456,9 @@ def split_long_utterance(
     by_words = _split_on_word_punctuation(start, end, words, origin) if words else None
     if by_words and len(by_words) > 1:
         return by_words
+    by_gaps = _split_on_word_gaps(start, end, words, origin) if words else None
+    if by_gaps and len(by_gaps) > 1:
+        return by_gaps
     return _split_proportional(start, end, sentences)
 
 
@@ -239,6 +476,38 @@ def _split_on_word_punctuation(
         if _SENTENCE_END.search(token):
             groups.append(current)
             current = []
+    if current:
+        groups.append(current)
+    if len(groups) <= 1:
+        return None
+    pieces = []
+    for group in groups:
+        piece_start = max(start, group[0][0])
+        piece_end = min(end, max(group[-1][1], piece_start + 0.15))
+        tokens = [item[2] for item in group]
+        pieces.append((piece_start, piece_end, _join_tokens(tokens)))
+    return pieces
+
+
+def _split_on_word_gaps(
+    start: float, end: float, words: list, origin: float,
+    min_gap: float = WORD_GAP_SECONDS,
+) -> list[tuple[float, float, str]] | None:
+    groups: list[list[tuple[float, float, str]]] = []
+    current: list[tuple[float, float, str]] = []
+    previous_end = None
+    for item in words:
+        token = _word_token(item)
+        if not str(token).strip():
+            continue
+        rel_start, rel_end = _word_times(item)
+        abs_start = origin + rel_start
+        abs_end = origin + rel_end
+        if previous_end is not None and abs_start - previous_end >= min_gap and current:
+            groups.append(current)
+            current = []
+        current.append((abs_start, abs_end, token))
+        previous_end = abs_end
     if current:
         groups.append(current)
     if len(groups) <= 1:

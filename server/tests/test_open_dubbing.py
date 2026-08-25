@@ -327,8 +327,16 @@ def test_language_is_detected_once_and_locked_on_every_cue():
     assert "language" not in calls[0]
 
     src = inspect.getsource(mod.segment)
+    assert "_transcribe_full" in src
     assert "_detect_language" in src
-    assert 'kwargs["language"] = language' in src
+
+
+def test_transcribe_kwargs_lock_language_and_beam():
+    mod = _od_script()
+    kwargs = mod._transcribe_kwargs("en")
+    assert kwargs["language"] == "en"
+    assert kwargs["beam_size"] == 5
+    assert kwargs["word_timestamps"] is True
 
 
 def _od_script():
@@ -372,6 +380,67 @@ def test_a_long_window_of_sentences_is_split():
     assert all(piece[2].endswith((".", "?")) for piece in pieces)
     # Each cue is a sentence, not the whole paragraph.
     assert all(len(mod._sentence_list(piece[2])) == 1 for piece in pieces)
+
+
+def test_word_gap_splits_short_asides():
+    """A pause before 'Go lower.' should become its own cue."""
+    mod = _od_script()
+    words = [
+        {"word": "cheers", "start": 13.5, "end": 13.9, "avg_logprob": -0.2, "no_speech_prob": 0.01},
+        {"word": " you", "start": 13.9, "end": 14.1, "avg_logprob": -0.2, "no_speech_prob": 0.01},
+        {"word": " up.", "start": 14.1, "end": 14.4, "avg_logprob": -0.2, "no_speech_prob": 0.01},
+        {"word": " Go", "start": 17.0, "end": 17.2, "avg_logprob": -0.2, "no_speech_prob": 0.01},
+        {"word": " lower.", "start": 17.2, "end": 17.5, "avg_logprob": -0.2, "no_speech_prob": 0.01},
+    ]
+    groups = mod._word_groups(words, 13.0, 18.0)
+    assert len(groups) == 2
+    assert "lower" in groups[1][-1]["word"]
+
+
+def test_pieces_from_words_carry_speech_bounds():
+    mod = _od_script()
+    words = [
+        {"word": "Hello", "start": 1.0, "end": 1.3, "avg_logprob": -0.3, "no_speech_prob": 0.02},
+        {"word": " there.", "start": 1.3, "end": 1.7, "avg_logprob": -0.3, "no_speech_prob": 0.02},
+    ]
+    pieces = mod._pieces_from_words(words, 0.5, 2.0)
+    assert len(pieces) == 1
+    assert pieces[0]["speech_start"] == 1.0
+    assert pieces[0]["speech_end"] == 1.7
+    assert pieces[0]["text"] == "Hello there."
+
+
+def test_cues_from_payload_use_speech_bounds(monkeypatch, tmp_path):
+    vocals = tmp_path / "vocals.wav"
+    music = tmp_path / "no_vocals.wav"
+    vocals.write_bytes(b"v")
+    music.write_bytes(b"m")
+    monkeypatch.setattr(
+        "server.steps.open_dubbing.pad_reference",
+        lambda src, start, end, dest: Path(dest),
+    )
+    result = cues_from_payload(
+        {
+            "vocals": str(vocals),
+            "no_vocals": str(music),
+            "utterances": [{
+                "start": 0.0,
+                "end": 3.0,
+                "speech_start": 0.2,
+                "speech_end": 2.8,
+                "speaker_id": "SPEAKER_00",
+                "text": "hi",
+                "avg_logprob": -0.4,
+                "no_speech_prob": 0.05,
+            }],
+        },
+        tmp_path,
+    )
+    cue = result["cues"][0]
+    assert cue["speech_start"] == 0.2
+    assert cue["speech_end"] == 2.8
+    assert cue["avg_logprob"] == -0.4
+    assert cue["no_speech_prob"] == 0.05
 
 
 def test_word_timestamps_keep_the_gaps_between_sentences():
