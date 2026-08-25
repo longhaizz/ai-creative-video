@@ -218,6 +218,43 @@ def test_missing_speaker_id_becomes_speaker_00(monkeypatch, tmp_path):
     assert result["cues"][0]["speaker_id"] == "SPEAKER_00"
 
 
+def test_turns_from_pyannote3_annotation():
+    mod = _od_script()
+
+    class Segment:
+        def __init__(self, start, end):
+            self.start = start
+            self.end = end
+
+    class Annotation:
+        def itertracks(self, yield_label=True):
+            yield Segment(0.0, 1.2), None, "SPEAKER_01"
+
+    assert mod._turns_from_diarization(Annotation()) == [
+        {"start": 0.0, "end": 1.2, "speaker_id": "SPEAKER_01"},
+    ]
+
+
+def test_turns_from_pyannote4_diarize_output():
+    mod = _od_script()
+
+    class Segment:
+        def __init__(self, start, end):
+            self.start = start
+            self.end = end
+
+    class Annotation:
+        def itertracks(self, yield_label=True):
+            yield Segment(0.4, 2.0), None, "SPEAKER_02"
+
+    class DiarizeOutput:
+        speaker_diarization = Annotation()
+
+    assert mod._turns_from_diarization(DiarizeOutput()) == [
+        {"start": 0.4, "end": 2.0, "speaker_id": "SPEAKER_02"},
+    ]
+
+
 def test_best_speaker_uses_overlap_then_nearest():
     import importlib.util
 

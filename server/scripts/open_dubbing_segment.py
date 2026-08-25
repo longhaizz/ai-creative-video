@@ -323,17 +323,23 @@ def _diarize(wav: Path, token: str) -> list[dict]:
         if torch.cuda.is_available():
             pipeline.to(torch.device("cuda"))
         diarization = pipeline(str(wav))
-        turns = []
-        for segment, _, speaker in diarization.itertracks(yield_label=True):
-            turns.append({
-                "start": float(segment.start),
-                "end": float(segment.end),
-                "speaker_id": str(speaker),
-            })
-        return turns
+        return _turns_from_diarization(diarization)
     except Exception as error:
         print(f"Pyannote failed, using SPEAKER_00: {error}", file=sys.stderr)
         return []
+
+
+def _turns_from_diarization(diarization) -> list[dict]:
+    """Pyannote 3 returns Annotation; 4 wraps it in DiarizeOutput."""
+    annotation = getattr(diarization, "speaker_diarization", diarization)
+    turns = []
+    for segment, _, speaker in annotation.itertracks(yield_label=True):
+        turns.append({
+            "start": float(segment.start),
+            "end": float(segment.end),
+            "speaker_id": str(speaker),
+        })
+    return turns
 
 
 def _best_speaker(start: float, end: float, turns: list[dict]) -> str:
