@@ -10,7 +10,6 @@ import pytest
 
 from server.jobs import PipelineError
 from server.steps.open_dubbing import (
-    MIN_REF_SECONDS,
     build_command,
     cues_from_payload,
     pad_reference,
@@ -70,7 +69,9 @@ def test_cues_from_payload_keep_timing_and_pad_refs(monkeypatch, tmp_path):
     assert result["cues"][0]["text"] == "xin chao"
     assert result["cues"][1]["speaker_id"] == "SPEAKER_01"
     assert written[0][:2] == (1.0, 2.0)
-    assert Path(result["cues"][0]["ref_wav"]).name == "ref_000.wav"
+    assert written[1][:2] == (4.0, 5.5)
+    assert Path(result["cues"][0]["ref_wav"]).name == "ref_SPEAKER_00.wav"
+    assert result["cues"][0]["ref_wav"] != result["cues"][1]["ref_wav"]
 
 
 def test_empty_utterances_are_invalid_input(tmp_path):
@@ -106,7 +107,66 @@ def test_original_speak_uses_the_cue_ref(tmp_path):
     assert refs == [str(tmp_path / "r0.wav"), str(tmp_path / "r1.wav")]
 
 
-def test_pad_reference_widens_a_short_clip(monkeypatch, tmp_path):
+def test_same_speaker_cues_share_one_ref(monkeypatch, tmp_path):
+    vocals = tmp_path / "vocals.wav"
+    music = tmp_path / "no_vocals.wav"
+    vocals.write_bytes(b"v")
+    music.write_bytes(b"m")
+    written = []
+
+    def fake_pad(src, start, end, dest):
+        written.append((start, end, dest))
+        Path(dest).write_bytes(b"r")
+        return Path(dest)
+
+    monkeypatch.setattr("server.steps.open_dubbing.pad_reference", fake_pad)
+    result = cues_from_payload(
+        {
+            "vocals": str(vocals),
+            "no_vocals": str(music),
+            "utterances": [
+                {"start": 0.0, "end": 4.0, "speaker_id": "SPEAKER_00", "text": "a"},
+                {"start": 5.0, "end": 6.0, "speaker_id": "SPEAKER_00", "text": "b"},
+            ],
+        },
+        tmp_path,
+    )
+    assert result["cues"][0]["ref_wav"] == result["cues"][1]["ref_wav"]
+    assert written == [(0.0, 4.0, tmp_path / "ref_SPEAKER_00.wav")]
+
+
+def test_short_same_speaker_lines_are_concatenated(monkeypatch, tmp_path):
+    vocals = tmp_path / "vocals.wav"
+    music = tmp_path / "no_vocals.wav"
+    vocals.write_bytes(b"v")
+    music.write_bytes(b"m")
+    commands = []
+    monkeypatch.setattr("server.steps.audio.duration", lambda path: 10.0)
+
+    def fake_ffmpeg(command):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"x")
+        return ""
+
+    monkeypatch.setattr("server.steps.audio.run_ffmpeg", fake_ffmpeg)
+    result = cues_from_payload(
+        {
+            "vocals": str(vocals),
+            "no_vocals": str(music),
+            "utterances": [
+                {"start": 5.12, "end": 5.74, "speaker_id": "SPEAKER_01",
+                 "text": "Get down lower."},
+                {"start": 6.41, "end": 7.39, "speaker_id": "SPEAKER_01",
+                 "text": "Yes, that's better."},
+            ],
+        },
+        tmp_path,
+    )
+    assert result["cues"][0]["ref_wav"] == result["cues"][1]["ref_wav"]
+    assert any("concat" in command for command in commands)
+
+
+def test_pad_reference_cuts_the_span_and_does_not_widen(monkeypatch, tmp_path):
     vocals = tmp_path / "vocals.wav"
     vocals.write_bytes(b"v")
     dest = tmp_path / "ref.wav"
@@ -124,8 +184,8 @@ def test_pad_reference_widens_a_short_clip(monkeypatch, tmp_path):
     assert dest.is_file()
     ss = commands[0][commands[0].index("-ss") + 1]
     length = float(commands[0][commands[0].index("-t") + 1])
-    assert abs(length - MIN_REF_SECONDS) < 0.02
-    assert float(ss) <= 1.0
+    assert abs(float(ss) - 1.0) < 0.02
+    assert abs(length - 0.5) < 0.02
 
 
 def test_missing_od_python_is_invalid_input(monkeypatch, tmp_path):
@@ -173,6 +233,13 @@ def test_best_speaker_uses_overlap_then_nearest():
     assert mod._best_speaker(2.1, 2.9, turns) == "SPEAKER_01"
     assert mod._best_speaker(1.8, 1.9, turns) == "SPEAKER_01"
     assert mod._best_speaker(0.0, 1.0, []) == "SPEAKER_00"
+    # A 5.7s VAD window is still the narrator; the 0.6s aside is not.
+    mixed = [
+        {"start": 0.0, "end": 5.0, "speaker_id": "SPEAKER_00"},
+        {"start": 5.12, "end": 5.74, "speaker_id": "SPEAKER_01"},
+    ]
+    assert mod._best_speaker(0.0, 5.74, mixed) == "SPEAKER_00"
+    assert mod._best_speaker(5.12, 5.74, mixed) == "SPEAKER_01"
 
 
 def test_language_is_detected_once_and_locked_on_every_cue():

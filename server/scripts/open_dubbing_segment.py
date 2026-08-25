@@ -116,7 +116,7 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
             utterances.append({
                 "start": round(piece_start, 3),
                 "end": round(piece_end, 3),
-                "speaker_id": speaker,
+                "speaker_id": _best_speaker(piece_start, piece_end, speakers),
                 "text": text,
                 "wav": str(wav),
             })
