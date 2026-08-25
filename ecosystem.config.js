@@ -30,7 +30,7 @@ module.exports = {
       script: '/opt/venv-main/bin/uvicorn',
       // One worker on purpose. A second one takes jobs from the same queue
       // and puts two of them on the same card.
-      args: 'server.app:app --host 0.0.0.0 --port 8000 --workers 1',
+      args: 'server.app:app --host 0.0.0.0 --port 6006 --workers 1',
       interpreter: 'none',
       instances: 1,
       autorestart: true,
