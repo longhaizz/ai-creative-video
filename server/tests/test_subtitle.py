@@ -11,12 +11,18 @@ import subprocess
 
 import pytest
 
+from pydantic import ValidationError
+
+from server.schemas import DubParams
 from server.steps.subtitle import (
+    AUTO_SIZE,
     MAX_CHARS_PER_LINE,
     MAX_LINES_PER_CUE,
     _ass_time,
     burn,
+    chars_per_line,
     normalize_cues,
+    resolve_font_size,
     split_cue,
     wrap_text_lines,
     write_ass,
@@ -99,6 +105,51 @@ def test_empty_cues_disappear():
     assert normalize_cues([{"start": 0, "end": 1, "text": "  "}]) == []
 
 
+def test_cues_are_one_line():
+    cue = {"start": 0.0, "end": 8.0, "text": "mot hai ba bon nam sau bay " * 6}
+    for part in split_cue(cue):
+        assert "\n" not in part["text"]
+        assert part["text"].count("\n") + 1 <= MAX_LINES_PER_CUE
+
+
+# -- auto size and wrap width -----------------------------------------------
+
+
+def test_omitted_size_is_56_on_9_16():
+    assert resolve_font_size(None, 1920) == AUTO_SIZE
+
+
+def test_omitted_size_scales_with_height():
+    assert resolve_font_size(None, 1080) == round(56 * 1080 / 1920)
+
+
+def test_a_typed_size_is_not_scaled():
+    assert resolve_font_size(56, 1080) == 56
+    assert resolve_font_size(40, 1920) == 40
+
+
+def test_chars_per_line_shrinks_on_a_tall_narrow_frame():
+    portrait = chars_per_line(1080, 56)
+    landscape = chars_per_line(1920, 32)
+    assert portrait < landscape
+    assert 20 <= portrait <= 32
+
+
+def test_schema_omits_size_for_auto():
+    assert DubParams().subtitle_size is None
+    assert DubParams(subtitle_size="").subtitle_size is None
+    assert DubParams(subtitle_size=42).subtitle_size == 42
+
+
+def test_schema_rejects_a_size_below_eight():
+    with pytest.raises(ValidationError):
+        DubParams(subtitle_size=7)
+
+
+def test_schema_default_position_is_three_quarters_down():
+    assert DubParams().subtitle_position == 0.75
+
+
 # -- time format ------------------------------------------------------------
 
 
@@ -120,7 +171,7 @@ def test_rounding_up_carries_into_the_seconds():
 
 
 def read_ass(tmp_path, cues, width=1920, height=1080, **kwargs):
-    settings = {"font": "Arial", "size": 28, "position": 0.85, **kwargs}
+    settings = {"font": "Arial", "size": 28, "position": 0.75, **kwargs}
     path = write_ass(cues, tmp_path / "s.ass", width, height, **settings)
     return path.read_text(encoding="utf-8")
 
@@ -136,8 +187,20 @@ def test_position_is_a_share_of_the_height(tmp_path):
     """The same setting must sit in the same place on 720p and on 1080p."""
     small = read_ass(tmp_path, [{"start": 0, "end": 1, "text": "hi"}], 1280, 720)
     large = read_ass(tmp_path, [{"start": 0, "end": 1, "text": "hi"}], 1920, 1080)
-    assert "\\pos(640,612)" in small
-    assert "\\pos(960,918)" in large
+    assert "\\pos(640,540)" in small
+    assert "\\pos(960,810)" in large
+
+
+def test_the_box_is_black_text_on_white_with_a_border(tmp_path):
+    text = read_ass(tmp_path, [{"start": 0, "end": 1, "text": "hi"}])
+    styles = [line for line in text.splitlines() if line.startswith("Style:")]
+    assert len(styles) == 2
+    box, fill = styles
+    assert ",3,10,0,5," in box, "outer black box: BorderStyle 3, outline 10, no shadow"
+    assert ",3,8,0,5," in fill, "inner white box: padding 8"
+    assert box.split(",")[3] == "&H00000000", "text is black"
+    assert "&H00FFFFFF" in fill
+    assert text.count("Dialogue:") == 2
 
 
 def test_two_lines_use_the_ass_line_break(tmp_path):
@@ -150,8 +213,10 @@ def test_two_lines_use_the_ass_line_break(tmp_path):
 def test_a_font_name_cannot_break_the_style_line(tmp_path):
     """Commas and colons separate fields in ASS, so they must not survive."""
     text = read_ass(tmp_path, [{"start": 0, "end": 1, "text": "hi"}], font="Ba,d:'font")
-    style = next(line for line in text.splitlines() if line.startswith("Style:"))
-    assert style.count(",") == 22, "one comma per field, none from the font name"
+    styles = [line for line in text.splitlines() if line.startswith("Style:")]
+    assert styles, "the file must name at least one style"
+    for style in styles:
+        assert style.count(",") == 22, "one comma per field, none from the font name"
 
 
 def test_an_empty_font_falls_back_to_arial(tmp_path):
