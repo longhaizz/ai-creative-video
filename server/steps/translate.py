@@ -627,6 +627,58 @@ def _repair_cue_languages(script: dict, mismatched: list, lang_name: str,
     return out
 
 
+def _reconstruct_system_prompt(*, n: int, lang_name: str, expected_code: str,
+                               lang_det: str, lang_p: float, conf: str,
+                               task: str) -> str:
+    """Prompt reconstruct — tách ra để self-check index-lock rules."""
+    return (
+        f"You are reconstructing an ASR transcript for video dubbing. "
+        f"The ASR may contain severe phonetic errors, mixed-language "
+        f"transcriptions, duplicated words, and incorrect segmentation. "
+        f"Detected language hint: {lang_det} (p={lang_p:.2f}), "
+        f"overall ASR confidence: {conf}. "
+        f"Output language MUST be {lang_name} (code={expected_code}). "
+        f"First infer the most likely intended message using the ENTIRE "
+        f"transcript as context. "
+        f"Do not invent product claims, prices, or information that cannot "
+        f"reasonably be inferred from context. "
+        f"{task} "
+        f"HARD RULE: master_translation, every cue_translations[i], and "
+        f"every semantic_group.translation MUST be entirely in {lang_name}. "
+        f"Do not mix languages (e.g. do not insert Vietnamese into an "
+        f"Indonesian script, or vice versa). "
+        f"INDEX LOCK: cue_translations[i] MUST be the spoken line for ASR "
+        f"cue [i] only. Never put cue j's speech-act into cue_translations[i] "
+        f"when i != j. A second-speaker aside (different speaker_id, or a "
+        f"coach / in-app line) stays in its own index. "
+        f"If Whisper split one sentence across two cues, split the "
+        f"{lang_name} translation across those two indices — the short slot "
+        f"gets a short clause, not the whole sentence. Do not merge two ASR "
+        f"cues into one cue_translations slot and shift later lines. "
+        f"CRITICAL: TTS keeps each ASR cue's original pause timing, so you "
+        f"MUST allocate spoken lines into cue_translations — an array of "
+        f"exactly {n} strings, index-aligned with ASR cues [0..{n - 1}]. "
+        f"Each string is what should be spoken in that cue's speech window; "
+        f"use \"\" only if that cue has no speech to dub. "
+        f"DURATION-AWARE: match how much is said to each cue's "
+        f"[speech_start–speech_end] length — do NOT pack most of the "
+        f"script into an early cue when later cues still have time. "
+        f"cue_translations must only redistribute master_translation — "
+        f"no new facts. "
+        f"master_translation MUST be the FULL spoken script (every idea "
+        f"that appears in cue_translations / groups — do not truncate). "
+        f"semantic_groups may SPAN multiple ASR indices for meaning/"
+        f"context only (not TTS units). "
+        f"Return ONLY valid JSON (no markdown) with keys: "
+        f"source_language, asr_confidence (low|medium|high), "
+        f"master_meaning, master_translation, uncertain_spans (array), "
+        f"cue_translations (array of {n} strings), "
+        f"semantic_groups (array of objects with id, source_segment_indices, "
+        f"start, end, source_text, translation). "
+        f"start/end on groups are informational only."
+    )
+
+
 def reconstruct_script(segs, target_lang: str, api_key: str,
                        asr_meta=None, model: str = DEFAULT_MODEL) -> dict:
     """Phục hồi nghĩa TOÀN video + master translation + per-cue lines.
@@ -646,7 +698,8 @@ def reconstruct_script(segs, target_lang: str, api_key: str,
         ss = float(s.get("speech_start", s["start"]))
         se = float(s.get("speech_end", s["end"]))
         t = (s.get("text") or "").replace("\n", " ").strip()
-        blocks.append(f"[{i}] [{ss:.2f}-{se:.2f}]\n{t}")
+        speaker = s.get("speaker_id") or "SPEAKER_00"
+        blocks.append(f"[{i}] [{ss:.2f}-{se:.2f}] {speaker}\n{t}")
     body = "\n\n".join(blocks)
     lang_det = asr_meta.get("language") or "unknown"
     lang_p = float(asr_meta.get("language_probability") or 0.0)
@@ -667,45 +720,9 @@ def reconstruct_script(segs, target_lang: str, api_key: str,
         )
 
     raw = _chat(
-        (
-            f"You are reconstructing an ASR transcript for video dubbing. "
-            f"The ASR may contain severe phonetic errors, mixed-language "
-            f"transcriptions, duplicated words, and incorrect segmentation. "
-            f"Detected language hint: {lang_det} (p={lang_p:.2f}), "
-            f"overall ASR confidence: {conf}. "
-            f"Output language MUST be {lang_name} (code={expected_code}). "
-            f"First infer the most likely intended message using the ENTIRE "
-            f"transcript as context. Do not treat each ASR segment as an "
-            f"independent sentence — adjacent segments may form one sentence. "
-            f"Do not invent product claims, prices, or information that cannot "
-            f"reasonably be inferred from context. "
-            f"{task} "
-            f"HARD RULE: master_translation, every cue_translations[i], and "
-            f"every semantic_group.translation MUST be entirely in {lang_name}. "
-            f"Do not mix languages (e.g. do not insert Vietnamese into an "
-            f"Indonesian script, or vice versa). "
-            f"CRITICAL: TTS keeps each ASR cue's original pause timing, so you "
-            f"MUST allocate spoken lines into cue_translations — an array of "
-            f"exactly {n} strings, index-aligned with ASR cues [0..{n - 1}]. "
-            f"Each string is what should be spoken in that cue's speech window; "
-            f"use \"\" only if that cue has no speech to dub. "
-            f"DURATION-AWARE: match how much is said to each cue's "
-            f"[speech_start–speech_end] length — do NOT pack most of the "
-            f"script into an early cue when later cues still have time. "
-            f"Whisper may split mid-sentence; still balance by timing. "
-            f"cue_translations must only redistribute master_translation — "
-            f"no new facts. "
-            f"master_translation MUST be the FULL spoken script (every idea "
-            f"that appears in cue_translations / groups — do not truncate). "
-            f"semantic_groups may SPAN multiple ASR indices for meaning/"
-            f"context only (not TTS units). "
-            f"Return ONLY valid JSON (no markdown) with keys: "
-            f"source_language, asr_confidence (low|medium|high), "
-            f"master_meaning, master_translation, uncertain_spans (array), "
-            f"cue_translations (array of {n} strings), "
-            f"semantic_groups (array of objects with id, source_segment_indices, "
-            f"start, end, source_text, translation). "
-            f"start/end on groups are informational only."
+        _reconstruct_system_prompt(
+            n=n, lang_name=lang_name, expected_code=expected_code,
+            lang_det=lang_det, lang_p=lang_p, conf=conf, task=task,
         ),
         body, api_key, model,
     )
@@ -1203,6 +1220,16 @@ def _selfcheck():
     assert "light expansion" in long_p.lower()
     assert "aim close" in long_p.lower()
     assert "stay near" in short_p.lower() or "target band" in short_p.lower()
+    recon_p = _reconstruct_system_prompt(
+        n=11, lang_name="Vietnamese", expected_code="vi",
+        lang_det="en", lang_p=0.97, conf="medium",
+        task="Produce a natural spoken translation into Vietnamese only.",
+    )
+    assert "index lock" in recon_p.lower()
+    assert "cue [i] only" in recon_p.lower()
+    assert "do not merge two asr" in recon_p.lower()
+    assert "second-speaker" in recon_p.lower()
+    assert "adjacent segments may form one sentence" not in recon_p.lower()
     # Empty ASR cue helper + garbled → silence
     segs_e = [
         {"text": "hello there friends"},

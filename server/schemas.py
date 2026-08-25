@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import UploadFile
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Bigger models are slower but read speech better. The server retries with
 # large-v3 by itself when the first pass looks bad, so this is only a start.
@@ -65,10 +65,19 @@ class DubParams(BaseModel):
     # -- burn new subtitles in the target language -------------------------
     burn_subtitle: bool = False
     subtitle_font: str = Field("Noto Sans", max_length=64)
-    subtitle_size: int = Field(28, ge=8, le=200)
-    # Where the text sits, as a share of the frame height. 0.85 is near the
-    # bottom, which is where people expect subtitles.
-    subtitle_position: float = Field(0.85, ge=0.0, le=1.0)
+    # None / omitted / "" → server picks 56px at 1920 tall, scaled by height.
+    # A number is exact pixels, not scaled.
+    subtitle_size: int | None = Field(None, ge=8, le=200)
+    # Where the text sits, as a share of the frame height. 0.75 is still the
+    # lower third, higher than the old 0.85 default.
+    subtitle_position: float = Field(0.75, ge=0.0, le=1.0)
+
+    @field_validator("subtitle_size", mode="before")
+    @classmethod
+    def _blank_size_is_auto(cls, value):
+        if value is None or value == "":
+            return None
+        return value
 
     @model_validator(mode="after")
     def _area_must_be_a_real_box(self):

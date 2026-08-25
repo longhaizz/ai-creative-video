@@ -145,6 +145,12 @@ def test_defaults_are_enough(client):
 def test_a_value_out_of_range_is_refused(client):
     with client() as http:
         assert post_dub(http, cfg_value=9.0).status_code == 422
+        assert post_dub(http, subtitle_size=7).status_code == 422
+
+
+def test_a_blank_subtitle_size_is_auto(client):
+    with client() as http:
+        assert post_dub(http, subtitle_size="").status_code == 202
 
 
 def test_a_choice_outside_the_list_is_refused(client):

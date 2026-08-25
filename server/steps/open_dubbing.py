@@ -133,23 +133,32 @@ def cues_from_payload(payload: dict, out_dir: Path) -> dict:
         raise PipelineError("No speech was found in the video", code="invalid_input")
 
     cues = []
-    for index, item in enumerate(utterances):
+    for item in utterances:
         start = float(item["start"])
         end = float(item["end"])
         if end <= start:
             end = start + 0.4
-        ref = pad_reference(vocals, start, end, out_dir / f"ref_{index:03d}.wav")
+        speaker = item.get("speaker_id") or "SPEAKER_00"
         cues.append({
             "start": start,
             "end": end,
             "speech_start": start,
             "speech_end": end,
             "text": (item.get("text") or "").strip(),
-            "speaker_id": item.get("speaker_id") or "SPEAKER_00",
-            "ref_wav": str(ref),
+            "speaker_id": speaker,
             "avg_logprob": 0.0,
             "no_speech_prob": 0.0 if (item.get("text") or "").strip() else 1.0,
         })
+
+    refs = {}
+    for speaker in dict.fromkeys(cue["speaker_id"] for cue in cues):
+        spans = [(c["start"], c["end"]) for c in cues if c["speaker_id"] == speaker]
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in speaker)
+        refs[speaker] = reference_for_spans(
+            vocals, spans, out_dir / f"ref_{safe}.wav",
+        )
+    for cue in cues:
+        cue["ref_wav"] = str(refs[cue["speaker_id"]])
 
     meta = {
         "language": payload.get("language") or "",
@@ -158,24 +167,57 @@ def cues_from_payload(payload: dict, out_dir: Path) -> dict:
     return {"cues": cues, "meta": meta, "vocals": vocals, "music": music}
 
 
+def reference_for_spans(
+    vocals: Path, spans: list[tuple[float, float]], dest: Path,
+) -> Path:
+    """One clone wav for a speaker: longest clip, or concat if all are short.
+
+    Never grows a short cue into a neighbour's time.
+    """
+    cleaned = [(float(s), float(e)) for s, e in spans if e > s]
+    if not cleaned:
+        raise PipelineError("No speech to clone from", code="internal")
+    longest = max(cleaned, key=lambda pair: pair[1] - pair[0])
+    if longest[1] - longest[0] >= MIN_REF_SECONDS or len(cleaned) == 1:
+        return pad_reference(vocals, longest[0], longest[1], dest)
+    parts = []
+    for index, (start, end) in enumerate(sorted(cleaned)):
+        part = dest.with_name(f"{dest.stem}_p{index:02d}{dest.suffix}")
+        parts.append(pad_reference(vocals, start, end, part))
+    return _concat_wavs(parts, dest)
+
+
 def pad_reference(vocals: Path, start: float, end: float, dest: Path) -> Path:
-    """Widen a short clone clip to MIN_REF_SECONDS, clamped to the file."""
+    """Cut exactly this span from vocals."""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     total = audio.duration(vocals)
-    span = max(end - start, 0.05)
-    if span >= MIN_REF_SECONDS or total <= MIN_REF_SECONDS:
-        left, right = max(start, 0.0), min(end, total)
-    else:
-        extra = MIN_REF_SECONDS - span
-        left = max(0.0, start - extra / 2)
-        right = min(total, left + MIN_REF_SECONDS)
-        left = max(0.0, right - MIN_REF_SECONDS)
+    left = max(float(start), 0.0)
+    right = min(float(end), total) if total > 0 else float(end)
+    if right <= left:
+        right = left + 0.05
     length = max(right - left, 0.05)
     audio.run_ffmpeg([
         config.FFMPEG_BIN, "-y", "-loglevel", "error",
         "-ss", f"{left:.3f}", "-t", f"{length:.3f}",
         "-i", str(vocals), "-c:a", "pcm_s16le", str(dest),
+    ])
+    return dest
+
+
+def _concat_wavs(parts: list[Path], dest: Path) -> Path:
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    listing = dest.with_name(dest.stem + "_concat.txt")
+    lines = []
+    for part in parts:
+        path = Path(part).resolve().as_posix().replace("'", r"'\''")
+        lines.append(f"file '{path}'")
+    listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    audio.run_ffmpeg([
+        config.FFMPEG_BIN, "-y", "-loglevel", "error",
+        "-f", "concat", "-safe", "0", "-i", str(listing),
+        "-c:a", "pcm_s16le", str(dest),
     ])
     return dest
 

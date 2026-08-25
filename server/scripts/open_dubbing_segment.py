@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import traceback
@@ -30,6 +31,12 @@ from pathlib import Path
 SAMPLE_RATE = 16000
 MIN_SILENCE_MS = 350
 SPEECH_PAD_MS = 150
+# VAD only cuts on a long pause. A continuous take of five sentences
+# becomes one cue, and TTS cannot fill that slot. Split those.
+MAX_UTTERANCE_SECONDS = 6.0
+MAX_SENTENCES = 2
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?。！？])\s+")
+_SENTENCE_END = re.compile(r"[.!?。！？]")
 
 
 def main() -> int:
@@ -91,20 +98,28 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
     for index, ((start, end), speaker) in enumerate(zip(windows, assigned)):
         wav = out / f"utt_{index:03d}.wav"
         _cut(vocals, start, end, wav)
-        kwargs = {"vad_filter": False}
+        kwargs = {"vad_filter": False, "word_timestamps": True}
         if language:
             kwargs["language"] = language
         segments, _info = model.transcribe(str(wav), **kwargs)
-        text = " ".join(
-            segment.text.strip() for segment in segments if segment.text
-        ).strip()
-        utterances.append({
-            "start": round(start, 3),
-            "end": round(end, 3),
-            "speaker_id": speaker,
-            "text": text,
-            "wav": str(wav),
-        })
+        pieces = _pieces_from_segments(list(segments), start, end)
+        if not pieces:
+            utterances.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "speaker_id": speaker,
+                "text": "",
+                "wav": str(wav),
+            })
+            continue
+        for piece_start, piece_end, text in pieces:
+            utterances.append({
+                "start": round(piece_start, 3),
+                "end": round(piece_end, 3),
+                "speaker_id": _best_speaker(piece_start, piece_end, speakers),
+                "text": text,
+                "wav": str(wav),
+            })
 
     return {
         "language": language,
@@ -159,6 +174,121 @@ def _detect_language(model, wav: Path) -> tuple[str, float]:
     return language, probability
 
 
+def _sentence_list(text: str) -> list[str]:
+    return [part.strip() for part in _SENTENCE_SPLIT.split((text or "").strip()) if part.strip()]
+
+
+def _word_token(item) -> str:
+    if isinstance(item, dict):
+        return item.get("word") or item.get("text") or ""
+    return getattr(item, "word", None) or getattr(item, "text", None) or ""
+
+
+def _word_times(item) -> tuple[float, float]:
+    if isinstance(item, dict):
+        return float(item["start"]), float(item["end"])
+    return float(item.start), float(item.end)
+
+
+def _join_tokens(tokens: list[str]) -> str:
+    if any(token[:1].isspace() for token in tokens):
+        return "".join(tokens).strip()
+    return " ".join(token.strip() for token in tokens if token.strip())
+
+
+def split_long_utterance(
+    start: float,
+    end: float,
+    text: str,
+    words: list | None = None,
+    word_origin: float | None = None,
+) -> list[tuple[float, float, str]]:
+    """Turn one VAD window into sentence-sized cues.
+
+    `words` times are relative to `word_origin` (the clip). Default origin
+    is `start`, which matches a window that is the whole clip.
+    """
+    text = (text or "").strip()
+    sentences = _sentence_list(text)
+    span = end - start
+    if len(sentences) <= MAX_SENTENCES and span <= MAX_UTTERANCE_SECONDS:
+        return [(start, end, text)]
+    if len(sentences) <= 1:
+        return [(start, end, text)]
+
+    origin = start if word_origin is None else word_origin
+    by_words = _split_on_word_punctuation(start, end, words, origin) if words else None
+    if by_words and len(by_words) > 1:
+        return by_words
+    return _split_proportional(start, end, sentences)
+
+
+def _split_on_word_punctuation(
+    start: float, end: float, words: list, origin: float,
+) -> list[tuple[float, float, str]] | None:
+    groups: list[list[tuple[float, float, str]]] = []
+    current: list[tuple[float, float, str]] = []
+    for item in words:
+        token = _word_token(item)
+        if not str(token).strip():
+            continue
+        rel_start, rel_end = _word_times(item)
+        current.append((origin + rel_start, origin + rel_end, token))
+        if _SENTENCE_END.search(token):
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+    if len(groups) <= 1:
+        return None
+    pieces = []
+    for group in groups:
+        piece_start = max(start, group[0][0])
+        piece_end = min(end, max(group[-1][1], piece_start + 0.15))
+        tokens = [item[2] for item in group]
+        pieces.append((piece_start, piece_end, _join_tokens(tokens)))
+    return pieces
+
+
+def _split_proportional(
+    start: float, end: float, sentences: list[str],
+) -> list[tuple[float, float, str]]:
+    weights = [max(len(sentence), 1) for sentence in sentences]
+    total = sum(weights)
+    span = end - start
+    cursor = start
+    pieces = []
+    for index, sentence in enumerate(sentences):
+        if index == len(sentences) - 1:
+            nxt = end
+        else:
+            nxt = cursor + span * (weights[index] / total)
+        pieces.append((cursor, nxt, sentence))
+        cursor = nxt
+    return pieces
+
+
+def _pieces_from_segments(segments, origin: float, window_end: float):
+    pieces: list[tuple[float, float, str]] = []
+    for segment in segments:
+        text = (segment.text or "").strip()
+        if not text:
+            continue
+        start = origin + float(segment.start)
+        end = origin + float(segment.end)
+        words = getattr(segment, "words", None)
+        pieces.extend(
+            split_long_utterance(start, end, text, words, word_origin=origin)
+        )
+    out = []
+    for start, end, text in pieces:
+        start = max(start, origin)
+        end = min(end, window_end)
+        if text and end - start >= 0.15:
+            out.append((start, end, text))
+    return out
+
+
 def _vad_windows(wav: Path) -> list[tuple[float, float]]:
     from faster_whisper.audio import decode_audio
     from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -193,17 +323,23 @@ def _diarize(wav: Path, token: str) -> list[dict]:
         if torch.cuda.is_available():
             pipeline.to(torch.device("cuda"))
         diarization = pipeline(str(wav))
-        turns = []
-        for segment, _, speaker in diarization.itertracks(yield_label=True):
-            turns.append({
-                "start": float(segment.start),
-                "end": float(segment.end),
-                "speaker_id": str(speaker),
-            })
-        return turns
+        return _turns_from_diarization(diarization)
     except Exception as error:
         print(f"Pyannote failed, using SPEAKER_00: {error}", file=sys.stderr)
         return []
+
+
+def _turns_from_diarization(diarization) -> list[dict]:
+    """Pyannote 3 returns Annotation; 4 wraps it in DiarizeOutput."""
+    annotation = getattr(diarization, "speaker_diarization", diarization)
+    turns = []
+    for segment, _, speaker in annotation.itertracks(yield_label=True):
+        turns.append({
+            "start": float(segment.start),
+            "end": float(segment.end),
+            "speaker_id": str(speaker),
+        })
+    return turns
 
 
 def _best_speaker(start: float, end: float, turns: list[dict]) -> str:

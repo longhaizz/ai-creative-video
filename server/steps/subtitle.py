@@ -5,12 +5,11 @@ Ported from spy-ads subtitle_api.py, with two changes:
 * It works on the cue list the pipeline already holds. The desktop tool went
   through an .srt file on disk because its steps were separate programs;
   here the cues come straight from the translation step.
-* Only the settings the client can actually send are kept: font, size and
-  height on screen. Colour, outline and background were in the old code but
-  no dropdown ever set them, so they are fixed here.
+* Only font, size and height on screen come from the client. Colour and the
+  box are fixed: black text on a white rectangle with a thin black border.
 
 Subtitles are placed with an ASS \\pos tag instead of ffmpeg margins,
-because a share of the frame height ("85% down") behaves the same on 720p
+because a share of the frame height ("75% down") behaves the same on 720p
 and 1080p, while a margin in pixels does not.
 """
 
@@ -23,17 +22,40 @@ from pathlib import Path
 from server import config
 from server.jobs import PipelineError
 
-# A line longer than this is hard to read at a glance, and two lines are as
-# many as fit under a talking head without covering it.
+# Fallback when wrap is called without a frame size. burn() always replaces
+# this with chars_per_line(width, size).
 MAX_CHARS_PER_LINE = 32
-MAX_LINES_PER_CUE = 2
+MAX_LINES_PER_CUE = 1
 
-# Fixed look. White text, black outline, centred on the \pos point.
-TEXT_COLOUR = "&H00FFFFFF"
-OUTLINE_COLOUR = "&H00000000"
-OUTLINE_WIDTH = 2
-SHADOW = 1
+# 56px on a 1920-tall 9:16 frame. Other heights scale when size is omitted.
+AUTO_SIZE = 56
+AUTO_SIZE_HEIGHT = 1920
+WRAP_WIDTH_RATIO = 0.80
+CHAR_WIDTH_EM = 0.55
+
+# Black on white. ASS BorderStyle 3 treats OutlineColour as the box fill in
+# some renderers and BackColour in others, so both are set the same.
+# A second, slightly larger black box behind the white one is the 2px border:
+# ASS has no real rounded-rect stroke.
+TEXT_COLOUR = "&H00000000"
+BOX_FILL = "&H00FFFFFF"
+BOX_BORDER = "&H00000000"
+BOX_PADDING = 8
+BOX_BORDER_WIDTH = 2
+SHADOW = 0
 ALIGNMENT = 5  # 5 means the \pos point is the middle of the text
+
+
+def resolve_font_size(size: int | None, height: int) -> int:
+    """None → scale from 56px at 1920 tall. A number is used as-is."""
+    if size is None:
+        size = round(AUTO_SIZE * max(height, 1) / AUTO_SIZE_HEIGHT)
+    return max(8, min(200, int(size)))
+
+
+def chars_per_line(width: int, size: int) -> int:
+    """How many characters fit in ~80% of the frame at this font size."""
+    return max(1, int(width * WRAP_WIDTH_RATIO / (CHAR_WIDTH_EM * max(size, 1))))
 
 
 def wrap_text_lines(text: str, max_chars: int = MAX_CHARS_PER_LINE) -> list[str]:
@@ -122,6 +144,14 @@ def _ass_time(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{whole:02d}.{centis:02d}"
 
 
+def _ass_style(name: str, font: str, size: int, fill: str, outline: int) -> str:
+    return (
+        f"Style: {name},{font},{size},{TEXT_COLOUR},&H000000FF,"
+        f"{fill},{fill},0,0,0,0,100,100,0,0,"
+        f"3,{outline},{SHADOW},{ALIGNMENT},0,0,0,1"
+    )
+
+
 def write_ass(
     cues: list[dict],
     out_ass: Path,
@@ -138,6 +168,7 @@ def write_ass(
     font = font or "Arial"
     x = width // 2
     y = int(round(height * position))
+    border = BOX_PADDING + BOX_BORDER_WIDTH
 
     header = (
         "[Script Info]\n"
@@ -151,9 +182,8 @@ def write_ass(
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{font},{size},{TEXT_COLOUR},&H000000FF,"
-        f"{OUTLINE_COLOUR},&H80000000,0,0,0,0,100,100,0,0,"
-        f"1,{OUTLINE_WIDTH},{SHADOW},{ALIGNMENT},0,0,0,1\n\n"
+        f"{_ass_style('Box', font, size, BOX_BORDER, border)}\n"
+        f"{_ass_style('Default', font, size, BOX_FILL, BOX_PADDING)}\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
         "Effect, Text\n"
@@ -164,10 +194,11 @@ def write_ass(
         text = (cue.get("text") or "").strip().replace("\n", "\\N")
         if not text:
             continue
-        body.append(
-            f"Dialogue: 0,{_ass_time(cue['start'])},{_ass_time(cue['end'])},"
-            f"Default,,0,0,0,,{{\\pos({x},{y})}}{text}"
-        )
+        start = _ass_time(cue["start"])
+        end = _ass_time(cue["end"])
+        pos = f"{{\\pos({x},{y})}}{text}"
+        body.append(f"Dialogue: 0,{start},{end},Box,,0,0,0,,{pos}")
+        body.append(f"Dialogue: 1,{start},{end},Default,,0,0,0,,{pos}")
 
     out_ass = Path(out_ass)
     out_ass.parent.mkdir(parents=True, exist_ok=True)
@@ -190,15 +221,16 @@ def burn(
     out_path: Path,
     width: int,
     height: int,
-    font: str = "Arial",
-    size: int = 28,
-    position: float = 0.85,
+    font: str = "Noto Sans",
+    size: int | None = None,
+    position: float = 0.75,
     ctx=None,
 ) -> Path:
     """Draw the cues onto the video for good. Returns out_path."""
     video = Path(video)
     out_path = Path(out_path)
-    cues = normalize_cues(cues)
+    size = resolve_font_size(size, height)
+    cues = normalize_cues(cues, max_chars=chars_per_line(width, size))
     if not cues:
         raise PipelineError("There is no text to burn", code="invalid_input")
 
