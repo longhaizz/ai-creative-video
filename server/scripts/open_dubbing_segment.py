@@ -37,6 +37,10 @@ MAX_UTTERANCE_SECONDS = 6.0
 MAX_SENTENCES = 2
 # Pause between words within a VAD window (e.g. "Go lower." as its own cue).
 WORD_GAP_SECONDS = 0.35
+# Ignore Pyannote crumbs under this length when cutting a VAD window.
+MIN_SPEAKER_TURN_SECONDS = 0.25
+# A brief mid-take flip (A-B-A) shorter than this is noise; real asides are longer.
+ABSORB_SPEAKER_ISLAND_SECONDS = 0.5
 RETRY_WHISPER_MODEL = "large-v3"
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?。！？])\s+")
 _SENTENCE_END = re.compile(r"[.!?。！？]")
@@ -82,12 +86,13 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
     _ffmpeg(["-y", "-loglevel", "error", "-i", str(vocals),
              "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", str(vocals_16k)])
 
-    windows = _vad_windows(vocals_16k)
-    if not windows:
+    vad_windows = _vad_windows(vocals_16k)
+    if not vad_windows:
         raise RuntimeError("No speech was found in the video")
 
-    speakers = _diarize(vocals_16k, token)
-    assigned = [_best_speaker(start, end, speakers) for start, end in windows]
+    turns = _diarize(vocals_16k, token)
+    # One VAD blob can hold two people ("Tolong…? Help me."). Cut on turns.
+    windows = _windows_with_speakers(vad_windows, turns)
 
     from faster_whisper import WhisperModel
 
@@ -97,14 +102,15 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
         model, vocals_16k, language, language_probability, whisper_size,
     )
 
+    per_window = _assign_words_to_windows(
+        all_words, [(start, end) for start, end, _speaker in windows],
+    )
     utterances = []
-    for index, ((start, end), speaker) in enumerate(zip(windows, assigned)):
+    for index, ((start, end, speaker), window_words) in enumerate(
+        zip(windows, per_window)
+    ):
         wav = out / f"utt_{index:03d}.wav"
         _cut(vocals, start, end, wav)
-        window_words = [
-            word for word in all_words
-            if word["end"] > start and word["start"] < end
-        ]
         pieces = _pieces_from_words(window_words, start, end)
         if not pieces:
             utterances.append({
@@ -125,8 +131,6 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
                 "end": round(piece["end"], 3),
                 "speech_start": round(piece["speech_start"], 3),
                 "speech_end": round(piece["speech_end"], 3),
-                # One VAD window is one take. Sentence splits must not
-                # pick up Pyannote flipping SPEAKER_00/01 mid-ad.
                 "speaker_id": speaker,
                 "text": piece["text"],
                 "avg_logprob": piece["avg_logprob"],
@@ -313,6 +317,126 @@ def _transcribe_full(model, wav: Path, language: str, language_probability: floa
         used = RETRY_WHISPER_MODEL
 
     return model, segments, _flatten_words(segments), language_probability, used
+
+
+def _assign_words_to_windows(
+    words: list[dict], windows: list[tuple[float, float]],
+) -> list[list[dict]]:
+    """Each Whisper word belongs to exactly one window (ties → earlier)."""
+    buckets: list[list[dict]] = [[] for _ in windows]
+    if not windows:
+        return buckets
+    for word in words:
+        if not (word.get("word") or "").strip():
+            continue
+        start = float(word["start"])
+        end = float(word["end"])
+        best_i = 0
+        best_ov = -1.0
+        for index, (left, right) in enumerate(windows):
+            overlap = max(0.0, min(end, right) - max(start, left))
+            if overlap > best_ov:
+                best_ov = overlap
+                best_i = index
+        if best_ov <= 0:
+            mid = (start + end) / 2.0
+            best_i = min(
+                range(len(windows)),
+                key=lambda i: min(
+                    abs(mid - windows[i][0]), abs(mid - windows[i][1]),
+                ),
+            )
+        buckets[best_i].append(word)
+    return buckets
+
+
+def _windows_with_speakers(
+    vad_windows: list[tuple[float, float]], turns: list[dict],
+) -> list[tuple[float, float, str]]:
+    """Cut each VAD window on Pyannote speaker changes.
+
+    Real dialogue ("Tolong…? Help me.") becomes separate cues with the right
+    speaker_id. A short A-B-A island mid-narrator is absorbed so workout ads
+    do not flip clone voice every sentence.
+    """
+    if not vad_windows:
+        return []
+    if not turns:
+        return [(start, end, "SPEAKER_00") for start, end in vad_windows]
+
+    ordered = sorted(turns, key=lambda turn: (turn["start"], turn["end"]))
+    out: list[tuple[float, float, str]] = []
+    for start, end in vad_windows:
+        cuts = {start, end}
+        for turn in ordered:
+            if start < turn["start"] < end:
+                cuts.add(float(turn["start"]))
+            if start < turn["end"] < end:
+                cuts.add(float(turn["end"]))
+        points = sorted(cuts)
+        raw: list[list] = []
+        for left, right in zip(points, points[1:]):
+            if right - left < 1e-6:
+                continue
+            raw.append([left, right, _best_speaker(left, right, ordered)])
+        if not raw:
+            out.append((start, end, _best_speaker(start, end, ordered)))
+            continue
+
+        spans: list[list] = [raw[0]]
+        for seg in raw[1:]:
+            if seg[2] == spans[-1][2]:
+                spans[-1][1] = seg[1]
+            else:
+                spans.append(seg)
+
+        folded: list[list] = [spans[0]]
+        for seg in spans[1:]:
+            if seg[1] - seg[0] < MIN_SPEAKER_TURN_SECONDS:
+                folded[-1][1] = seg[1]
+            elif folded[-1][1] - folded[-1][0] < MIN_SPEAKER_TURN_SECONDS:
+                seg = [folded[-1][0], seg[1], seg[2]]
+                folded[-1] = seg
+            else:
+                folded.append(seg)
+        folded[0][0] = start
+        folded[-1][1] = end
+        for left, right, speaker in _absorb_speaker_islands(folded):
+            out.append((left, right, speaker))
+    return out
+
+
+def _absorb_speaker_islands(spans: list[list]) -> list[tuple[float, float, str]]:
+    """Fold a short different-speaker island between the same neighbours."""
+    if len(spans) < 3:
+        return [(float(s[0]), float(s[1]), str(s[2])) for s in spans]
+    merged: list[list] = []
+    index = 0
+    while index < len(spans):
+        left, right, speaker = spans[index]
+        dur = right - left
+        if (
+            0 < index < len(spans) - 1
+            and dur < ABSORB_SPEAKER_ISLAND_SECONDS
+            and spans[index - 1][2] == spans[index + 1][2] != speaker
+            and merged
+        ):
+            merged[-1][1] = right
+            index += 1
+            continue
+        if merged and merged[-1][2] == speaker:
+            merged[-1][1] = max(merged[-1][1], right)
+        else:
+            merged.append([left, right, speaker])
+        index += 1
+    # After absorbing an island, the next span may match the previous speaker.
+    tight: list[list] = []
+    for seg in merged:
+        if tight and tight[-1][2] == seg[2]:
+            tight[-1][1] = seg[1]
+        else:
+            tight.append(seg)
+    return [(float(s[0]), float(s[1]), str(s[2])) for s in tight]
 
 
 def _pieces_from_words(

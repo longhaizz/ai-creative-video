@@ -279,20 +279,69 @@ def test_best_speaker_uses_overlap_then_nearest():
     assert mod._best_speaker(5.12, 5.74, mixed) == "SPEAKER_01"
 
 
-def test_sentence_splits_keep_the_vad_window_speaker():
-    """Pyannote flipping 00/01 between sentences in one take must not stick."""
-    import inspect
-
+def test_dialogue_vad_window_splits_by_speaker():
+    """Indonesian app ad: host and English prompt must not share one cue."""
     mod = _od_script()
+    vad = [(0.0, 4.15)]
+    turns = [
+        {"start": 0.0, "end": 1.4, "speaker_id": "SPEAKER_02"},
+        {"start": 1.4, "end": 2.0, "speaker_id": "SPEAKER_01"},
+        {"start": 2.0, "end": 3.1, "speaker_id": "SPEAKER_02"},
+        {"start": 3.1, "end": 4.15, "speaker_id": "SPEAKER_01"},
+    ]
+    windows = mod._windows_with_speakers(vad, turns)
+    assert [(round(s, 2), round(e, 2), sp) for s, e, sp in windows] == [
+        (0.0, 1.4, "SPEAKER_02"),
+        (1.4, 2.0, "SPEAKER_01"),
+        (2.0, 3.1, "SPEAKER_02"),
+        (3.1, 4.15, "SPEAKER_01"),
+    ]
+
+
+def test_short_speaker_island_is_absorbed_into_narrator():
+    """Pyannote flipping 00 mid-workout must not become its own cue."""
+    mod = _od_script()
+    vad = [(0.0, 23.7)]
     workout = [
         {"start": 0.0, "end": 3.06, "speaker_id": "SPEAKER_01"},
-        {"start": 3.06, "end": 9.86, "speaker_id": "SPEAKER_00"},
-        {"start": 10.14, "end": 23.7, "speaker_id": "SPEAKER_01"},
+        {"start": 3.06, "end": 3.4, "speaker_id": "SPEAKER_00"},
+        {"start": 3.4, "end": 23.7, "speaker_id": "SPEAKER_01"},
     ]
-    assert mod._best_speaker(0.0, 23.7, workout) == "SPEAKER_01"
-    src = inspect.getsource(mod.segment)
-    assert '"speaker_id": speaker' in src
-    assert "_best_speaker(piece_start, piece_end, speakers)" not in src
+    windows = mod._windows_with_speakers(vad, workout)
+    assert len(windows) == 1
+    assert windows[0][2] == "SPEAKER_01"
+    assert windows[0][0] == 0.0
+    assert windows[0][1] == 23.7
+
+
+def test_aside_after_narrator_stays_its_own_speaker():
+    """A real 0.6s coach line after the take stays SPEAKER_01."""
+    mod = _od_script()
+    vad = [(0.0, 5.74)]
+    turns = [
+        {"start": 0.0, "end": 5.0, "speaker_id": "SPEAKER_00"},
+        {"start": 5.12, "end": 5.74, "speaker_id": "SPEAKER_01"},
+    ]
+    windows = mod._windows_with_speakers(vad, turns)
+    assert len(windows) == 2
+    assert windows[0][2] == "SPEAKER_00"
+    assert windows[1][2] == "SPEAKER_01"
+
+
+def test_a_word_on_the_speaker_boundary_is_not_copied():
+    mod = _od_script()
+    windows = [(0.0, 1.4), (1.4, 2.0)]
+    words = [
+        {"word": "apa?", "start": 1.2, "end": 1.35,
+         "avg_logprob": -0.2, "no_speech_prob": 0.05},
+        {"word": "Help", "start": 1.38, "end": 1.55,
+         "avg_logprob": -0.2, "no_speech_prob": 0.05},
+        {"word": "me.", "start": 1.55, "end": 1.8,
+         "avg_logprob": -0.2, "no_speech_prob": 0.05},
+    ]
+    buckets = mod._assign_words_to_windows(words, windows)
+    assert [w["word"] for w in buckets[0]] == ["apa?"]
+    assert [w["word"] for w in buckets[1]] == ["Help", "me."]
 
 
 def test_language_is_detected_once_and_locked_on_every_cue():
