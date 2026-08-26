@@ -25,9 +25,6 @@ from server.steps import audio
 LOG_EVERY_SECONDS = 2.0
 TAIL_LINES = 25
 MIN_REF_SECONDS = 3.0
-# Match open_dubbing_segment.py. A 0.5s leftover cannot hold English TTS.
-MIN_CUE_SECONDS = 2.0
-MERGE_GAP_SECONDS = 0.35
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "open_dubbing_segment.py"
 
@@ -124,42 +121,6 @@ def segment(video: Path, work: Path, whisper_model: str, ctx=None) -> dict:
     return cues_from_payload(payload, out_dir)
 
 
-def merge_short_cues(cues: list[dict]) -> list[dict]:
-    """Fold a cue shorter than MIN into its neighbour when they nearly touch.
-
-    A 6s ASR split leaving 0.52s ("记住了吗") cannot hold an English line.
-    A paused aside ("Go lower." after 2s of silence) stays its own cue.
-    """
-    if len(cues) < 2:
-        return list(cues)
-    out = [dict(cues[0])]
-    for item in cues[1:]:
-        prev = out[-1]
-        same = (prev.get("speaker_id") or "SPEAKER_00") == (
-            item.get("speaker_id") or "SPEAKER_00"
-        )
-        prev_end = float(prev.get("speech_end", prev["end"]))
-        start = float(item.get("speech_start", item["start"]))
-        gap = start - prev_end
-        prev_dur = prev_end - float(prev.get("speech_start", prev["start"]))
-        dur = float(item.get("speech_end", item["end"])) - start
-        if same and gap <= MERGE_GAP_SECONDS and (
-            dur < MIN_CUE_SECONDS or prev_dur < MIN_CUE_SECONDS
-        ):
-            prev["end"] = item["end"]
-            prev["speech_end"] = item.get("speech_end", item["end"])
-            left = (prev.get("text") or "").strip()
-            right = (item.get("text") or "").strip()
-            prev["text"] = f"{left} {right}".strip()
-            prev["no_speech_prob"] = max(
-                float(prev.get("no_speech_prob") or 0),
-                float(item.get("no_speech_prob") or 0),
-            )
-        else:
-            out.append(dict(item))
-    return out
-
-
 def cues_from_payload(payload: dict, out_dir: Path) -> dict:
     """Turn the child JSON into the cue list timed_speech already knows."""
     vocals = Path(payload["vocals"])
@@ -196,8 +157,6 @@ def cues_from_payload(payload: dict, out_dir: Path) -> dict:
                 if text else 1.0
             ),
         })
-
-    cues = merge_short_cues(cues)
 
     refs = {}
     for speaker in dict.fromkeys(cue["speaker_id"] for cue in cues):

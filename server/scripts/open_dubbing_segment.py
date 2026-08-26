@@ -34,14 +34,9 @@ SPEECH_PAD_MS = 150
 # VAD only cuts on a long pause. A continuous take of five sentences
 # becomes one cue, and TTS cannot fill that slot. Split those.
 MAX_UTTERANCE_SECONDS = 6.0
-# A leftover shorter than this after a 6s split is not its own cue.
-# zh→en cannot fit a real sentence in 0.5–1.6s; attach it to the neighbour.
-MIN_UTTERANCE_SECONDS = 2.0
 MAX_SENTENCES = 2
 # Pause between words within a VAD window (e.g. "Go lower." as its own cue).
 WORD_GAP_SECONDS = 0.35
-# Only fold a short piece into its neighbour when they nearly touch.
-MERGE_GAP_SECONDS = WORD_GAP_SECONDS
 RETRY_WHISPER_MODEL = "large-v3"
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?。！？])\s+")
 _SENTENCE_END = re.compile(r"[.!?。！？]")
@@ -102,13 +97,14 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
         model, vocals_16k, language, language_probability, whisper_size,
     )
 
-    per_window = _assign_words_to_windows(all_words, windows)
     utterances = []
-    for index, ((start, end), speaker, window_words) in enumerate(
-        zip(windows, assigned, per_window)
-    ):
+    for index, ((start, end), speaker) in enumerate(zip(windows, assigned)):
         wav = out / f"utt_{index:03d}.wav"
         _cut(vocals, start, end, wav)
+        window_words = [
+            word for word in all_words
+            if word["end"] > start and word["start"] < end
+        ]
         pieces = _pieces_from_words(window_words, start, end)
         if not pieces:
             utterances.append({
@@ -138,7 +134,6 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
                 "wav": str(wav),
             })
 
-    utterances = _merge_short_utterances(utterances)
     return {
         "language": language,
         "language_probability": language_probability,
@@ -320,71 +315,6 @@ def _transcribe_full(model, wav: Path, language: str, language_probability: floa
     return model, segments, _flatten_words(segments), language_probability, used
 
 
-def _assign_words_to_windows(
-    words: list[dict], windows: list[tuple[float, float]],
-) -> list[list[dict]]:
-    """Each Whisper word belongs to exactly one VAD window.
-
-    Overlap on the boundary used to copy the last character into the next
-    cue ("兰花" / "花很多人"). Ties go to the earlier window.
-    """
-    buckets: list[list[dict]] = [[] for _ in windows]
-    if not windows:
-        return buckets
-    for word in words:
-        if not (word.get("word") or "").strip():
-            continue
-        start = float(word["start"])
-        end = float(word["end"])
-        best_i = 0
-        best_ov = -1.0
-        for index, (left, right) in enumerate(windows):
-            overlap = max(0.0, min(end, right) - max(start, left))
-            if overlap > best_ov:
-                best_ov = overlap
-                best_i = index
-        if best_ov <= 0:
-            mid = (start + end) / 2.0
-            best_i = min(
-                range(len(windows)),
-                key=lambda i: min(
-                    abs(mid - windows[i][0]), abs(mid - windows[i][1]),
-                ),
-            )
-        buckets[best_i].append(word)
-    return buckets
-
-
-def _merge_short_utterances(utterances: list[dict]) -> list[dict]:
-    """Fold a cue shorter than MIN into its neighbour when they nearly touch."""
-    if len(utterances) < 2:
-        return utterances
-    out = [dict(utterances[0])]
-    for item in utterances[1:]:
-        prev = out[-1]
-        same = (prev.get("speaker_id") or "SPEAKER_00") == (
-            item.get("speaker_id") or "SPEAKER_00"
-        )
-        gap = float(item["start"]) - float(prev["end"])
-        prev_dur = float(prev["end"]) - float(prev["start"])
-        dur = float(item["end"]) - float(item["start"])
-        if same and gap <= MERGE_GAP_SECONDS and (
-            dur < MIN_UTTERANCE_SECONDS or prev_dur < MIN_UTTERANCE_SECONDS
-        ):
-            prev["end"] = item["end"]
-            prev["speech_end"] = item.get("speech_end", item["end"])
-            left = (prev.get("text") or "").strip()
-            right = (item.get("text") or "").strip()
-            prev["text"] = f"{left} {right}".strip()
-            prev["no_speech_prob"] = max(
-                float(prev.get("no_speech_prob") or 0),
-                float(item.get("no_speech_prob") or 0),
-            )
-        else:
-            out.append(dict(item))
-    return out
-
-
 def _pieces_from_words(
     words: list[dict], window_start: float, window_end: float,
 ) -> list[dict]:
@@ -451,28 +381,6 @@ def _word_groups(
     out: list[list[dict]] = []
     for group in groups:
         out.extend(_split_oversized_word_group(group, window_start, window_end))
-    return _merge_short_word_groups(out)
-
-
-def _group_span(group: list[dict]) -> float:
-    return float(group[-1]["end"]) - float(group[0]["start"])
-
-
-def _merge_short_word_groups(groups: list[list[dict]]) -> list[list[dict]]:
-    """A 6s hard split must not leave a 0.5s orphan as its own cue."""
-    if len(groups) < 2:
-        return groups
-    out = [list(groups[0])]
-    for group in groups[1:]:
-        prev = out[-1]
-        gap = float(group[0]["start"]) - float(prev[-1]["end"])
-        if gap <= MERGE_GAP_SECONDS and (
-            _group_span(group) < MIN_UTTERANCE_SECONDS
-            or _group_span(prev) < MIN_UTTERANCE_SECONDS
-        ):
-            out[-1] = prev + list(group)
-        else:
-            out.append(list(group))
     return out
 
 

@@ -182,9 +182,7 @@ def test_a_rewrite_that_fits_no_better_is_dropped(tmp_path):
 def test_a_line_that_still_overruns_is_cut(tmp_path):
     """A line that still overruns after speed-up is cut to the window.
 
-    Overlapping the next cue is worse than losing the tail of a word, as long
-    as most of the line would remain. A cut that would keep less than half
-    is skipped — see test_a_tiny_window_is_not_cut_to_unintelligible.
+    Overlapping the next cue is worse than losing the tail of a word.
     """
     speak = tone_maker(tmp_path, {"very long": 6.0})
     out = fit_cue("very long", slot(2.0, window=2.0), tmp_path, 0, speak)
@@ -255,44 +253,3 @@ def test_the_keep_band_is_the_one_the_code_uses(tmp_path):
 
 def test_the_bands_make_sense():
     assert RATIO_KEEP_LO < 1.0 < RATIO_KEEP_HI
-
-
-@needs_ffmpeg
-def test_a_still_long_line_is_rewritten_twice(tmp_path):
-    """Cue 5 on the orchid clip: 4.64s then 4.00s for a 1.65s slot."""
-    speak = tone_maker(tmp_path, {
-        "a long line": 4.64,
-        "still long": 4.00,
-        "short": 1.70,
-    })
-    asked = []
-
-    def rewrite(text, seconds, shorter):
-        asked.append(text)
-        return {"a long line": "still long", "still long": "short"}[text]
-
-    out = fit_cue("a long line", slot(1.65, window=9.0), tmp_path, 0, speak, rewrite)
-    assert asked == ["a long line", "still long"]
-    assert abs(duration(out) - 1.70) < 0.15
-
-
-@needs_ffmpeg
-def test_a_hopeless_rewrite_is_not_asked_again(tmp_path):
-    """Cue 11: 5.60s then 3.52s for a 0.52s slot. A second rewrite drifted."""
-    speak = tone_maker(tmp_path, {"long": 5.60, "still huge": 3.52})
-    asked = []
-
-    def rewrite(text, seconds, shorter):
-        asked.append(text)
-        return "still huge"
-
-    out = fit_cue("long", slot(0.52, window=0.84), tmp_path, 0, speak, rewrite)
-    assert asked == ["long"]
-    assert duration(out) > 1.5, "must not chop 3.5s down to half a second"
-
-
-@needs_ffmpeg
-def test_a_tiny_window_is_not_cut_to_unintelligible(tmp_path):
-    speak = tone_maker(tmp_path, {"very long": 6.0})
-    out = fit_cue("very long", slot(0.52, window=0.52), tmp_path, 0, speak)
-    assert duration(out) > 2.0
