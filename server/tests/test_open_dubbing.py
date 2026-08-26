@@ -12,7 +12,6 @@ from server.jobs import PipelineError
 from server.steps.open_dubbing import (
     build_command,
     cues_from_payload,
-    merge_short_cues,
     pad_reference,
     segment,
 )
@@ -280,20 +279,69 @@ def test_best_speaker_uses_overlap_then_nearest():
     assert mod._best_speaker(5.12, 5.74, mixed) == "SPEAKER_01"
 
 
-def test_sentence_splits_keep_the_vad_window_speaker():
-    """Pyannote flipping 00/01 between sentences in one take must not stick."""
-    import inspect
-
+def test_dialogue_vad_window_splits_by_speaker():
+    """Indonesian app ad: host and English prompt must not share one cue."""
     mod = _od_script()
+    vad = [(0.0, 4.15)]
+    turns = [
+        {"start": 0.0, "end": 1.4, "speaker_id": "SPEAKER_02"},
+        {"start": 1.4, "end": 2.0, "speaker_id": "SPEAKER_01"},
+        {"start": 2.0, "end": 3.1, "speaker_id": "SPEAKER_02"},
+        {"start": 3.1, "end": 4.15, "speaker_id": "SPEAKER_01"},
+    ]
+    windows = mod._windows_with_speakers(vad, turns)
+    assert [(round(s, 2), round(e, 2), sp) for s, e, sp in windows] == [
+        (0.0, 1.4, "SPEAKER_02"),
+        (1.4, 2.0, "SPEAKER_01"),
+        (2.0, 3.1, "SPEAKER_02"),
+        (3.1, 4.15, "SPEAKER_01"),
+    ]
+
+
+def test_short_speaker_island_is_absorbed_into_narrator():
+    """Pyannote flipping 00 mid-workout must not become its own cue."""
+    mod = _od_script()
+    vad = [(0.0, 23.7)]
     workout = [
         {"start": 0.0, "end": 3.06, "speaker_id": "SPEAKER_01"},
-        {"start": 3.06, "end": 9.86, "speaker_id": "SPEAKER_00"},
-        {"start": 10.14, "end": 23.7, "speaker_id": "SPEAKER_01"},
+        {"start": 3.06, "end": 3.4, "speaker_id": "SPEAKER_00"},
+        {"start": 3.4, "end": 23.7, "speaker_id": "SPEAKER_01"},
     ]
-    assert mod._best_speaker(0.0, 23.7, workout) == "SPEAKER_01"
-    src = inspect.getsource(mod.segment)
-    assert '"speaker_id": speaker' in src
-    assert "_best_speaker(piece_start, piece_end, speakers)" not in src
+    windows = mod._windows_with_speakers(vad, workout)
+    assert len(windows) == 1
+    assert windows[0][2] == "SPEAKER_01"
+    assert windows[0][0] == 0.0
+    assert windows[0][1] == 23.7
+
+
+def test_aside_after_narrator_stays_its_own_speaker():
+    """A real 0.6s coach line after the take stays SPEAKER_01."""
+    mod = _od_script()
+    vad = [(0.0, 5.74)]
+    turns = [
+        {"start": 0.0, "end": 5.0, "speaker_id": "SPEAKER_00"},
+        {"start": 5.12, "end": 5.74, "speaker_id": "SPEAKER_01"},
+    ]
+    windows = mod._windows_with_speakers(vad, turns)
+    assert len(windows) == 2
+    assert windows[0][2] == "SPEAKER_00"
+    assert windows[1][2] == "SPEAKER_01"
+
+
+def test_a_word_on_the_speaker_boundary_is_not_copied():
+    mod = _od_script()
+    windows = [(0.0, 1.4), (1.4, 2.0)]
+    words = [
+        {"word": "apa?", "start": 1.2, "end": 1.35,
+         "avg_logprob": -0.2, "no_speech_prob": 0.05},
+        {"word": "Help", "start": 1.38, "end": 1.55,
+         "avg_logprob": -0.2, "no_speech_prob": 0.05},
+        {"word": "me.", "start": 1.55, "end": 1.8,
+         "avg_logprob": -0.2, "no_speech_prob": 0.05},
+    ]
+    buckets = mod._assign_words_to_windows(words, windows)
+    assert [w["word"] for w in buckets[0]] == ["apa?"]
+    assert [w["word"] for w in buckets[1]] == ["Help", "me."]
 
 
 def test_language_is_detected_once_and_locked_on_every_cue():
@@ -398,93 +446,6 @@ def test_word_gap_splits_short_asides():
     assert "lower" in groups[1][-1]["word"]
 
 
-def _w(word, start, end):
-    return {
-        "word": word, "start": start, "end": end,
-        "avg_logprob": -0.2, "no_speech_prob": 0.05,
-    }
-
-
-def test_a_word_on_the_vad_boundary_is_not_copied():
-    """The last character of one window used to also start the next."""
-    mod = _od_script()
-    windows = [(0.106, 1.718), (1.802, 3.638)]
-    words = [
-        _w("兰", 1.50, 1.62),
-        _w("花", 1.70, 1.82),
-        _w("很", 1.85, 1.95),
-    ]
-    buckets = mod._assign_words_to_windows(words, windows)
-    assert [item["word"] for item in buckets[0]] == ["兰", "花"]
-    assert [item["word"] for item in buckets[1]] == ["很"]
-
-
-def test_a_seven_second_chinese_phrase_stays_one_cue():
-    """A 6s hard split must not peel 1.6s of 晾根 off as its own cue."""
-    mod = _od_script()
-    text = "这一步就是种前要晾根要把兰花倒挂在通风明亮处晾至根系发白发软"
-    start, end = 6.954, 14.454
-    step = (end - start) / len(text)
-    words = [
-        _w(ch, start + i * step, start + (i + 1) * step)
-        for i, ch in enumerate(text)
-    ]
-    groups = mod._word_groups(words, start, end)
-    assert len(groups) == 1
-
-
-def test_a_twelve_second_take_does_not_leave_a_half_second_tail():
-    """The orchid-clip ending was 6s + 6s + 0.52s. The 0.52s must fold back."""
-    mod = _od_script()
-    text = (
-        "三太阳直射紫外线可以消灭根系上大部分的病菌这样栽种之后就可以"
-        "大大减少根部病害的发生这就是兰花栽种前晾根的好处你记住了吗"
-    )
-    start, end = 26.73, 39.18
-    step = (end - start) / len(text)
-    words = [
-        _w(ch, start + i * step, start + (i + 1) * step)
-        for i, ch in enumerate(text)
-    ]
-    groups = mod._word_groups(words, start, end)
-    durs = [g[-1]["end"] - g[0]["start"] for g in groups]
-    assert all(d >= mod.MIN_UTTERANCE_SECONDS - 0.05 for d in durs)
-    assert 2 <= len(groups) <= 3
-
-
-def test_merge_short_cues_folds_a_half_second_orphan():
-    cues = [
-        {"start": 32.66, "end": 38.66, "speech_start": 32.66,
-         "speech_end": 38.66, "text": "好处你", "speaker_id": "SPEAKER_00"},
-        {"start": 38.66, "end": 39.18, "speech_start": 38.66,
-         "speech_end": 39.18, "text": "记住了吗", "speaker_id": "SPEAKER_00"},
-    ]
-    out = merge_short_cues(cues)
-    assert len(out) == 1
-    assert out[0]["end"] == 39.18
-    assert "记住了吗" in out[0]["text"]
-
-
-def test_merge_short_cues_keeps_a_paused_aside():
-    cues = [
-        {"start": 13.5, "end": 14.4, "speech_start": 13.5,
-         "speech_end": 14.4, "text": "cheers you up.", "speaker_id": "SPEAKER_00"},
-        {"start": 17.0, "end": 17.5, "speech_start": 17.0,
-         "speech_end": 17.5, "text": "Go lower.", "speaker_id": "SPEAKER_00"},
-    ]
-    assert len(merge_short_cues(cues)) == 2
-
-
-def test_merge_short_cues_does_not_join_different_speakers():
-    cues = [
-        {"start": 0.0, "end": 1.5, "speech_start": 0.0,
-         "speech_end": 1.5, "text": "hi", "speaker_id": "SPEAKER_00"},
-        {"start": 1.5, "end": 2.0, "speech_start": 1.5,
-         "speech_end": 2.0, "text": "what", "speaker_id": "SPEAKER_01"},
-    ]
-    assert len(merge_short_cues(cues)) == 2
-
-
 def test_pieces_from_words_carry_speech_bounds():
     mod = _od_script()
     words = [
@@ -529,33 +490,6 @@ def test_cues_from_payload_use_speech_bounds(monkeypatch, tmp_path):
     assert cue["speech_end"] == 2.8
     assert cue["avg_logprob"] == -0.4
     assert cue["no_speech_prob"] == 0.05
-
-
-def test_cues_from_payload_merges_a_half_second_tail(monkeypatch, tmp_path):
-    vocals = tmp_path / "vocals.wav"
-    music = tmp_path / "no_vocals.wav"
-    vocals.write_bytes(b"v")
-    music.write_bytes(b"m")
-    monkeypatch.setattr(
-        "server.steps.open_dubbing.pad_reference",
-        lambda src, start, end, dest: Path(dest).write_bytes(b"r") or Path(dest),
-    )
-    result = cues_from_payload(
-        {
-            "vocals": str(vocals),
-            "no_vocals": str(music),
-            "utterances": [
-                {"start": 32.66, "end": 38.66, "speaker_id": "SPEAKER_00",
-                 "text": "好处你"},
-                {"start": 38.66, "end": 39.18, "speaker_id": "SPEAKER_00",
-                 "text": "记住了吗"},
-            ],
-        },
-        tmp_path,
-    )
-    assert len(result["cues"]) == 1
-    assert result["cues"][0]["speech_end"] == 39.18
-    assert "记住了吗" in result["cues"][0]["text"]
 
 
 def test_word_timestamps_keep_the_gaps_between_sentences():
