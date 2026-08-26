@@ -12,9 +12,10 @@ time, and only the length inside a cue is adjusted.
 Order of preference when a line does not fit its slot:
   1. leave it alone            (it is close enough)
   2. change the speed a little (up to +15% / -18%)
-  3. ask OpenAI for a shorter or longer line, then try again
+  3. ask OpenAI for a shorter or longer line (up to twice if still long)
   4. speed up harder (up to 1.4x) so it stays off the next cue
-  5. cut the tail to the window — overlapping speech is worse than a lost word
+  5. cut the tail to the window — only when most of the line would remain.
+     Cutting a 5s take down to 0.5s is unintelligible; leave the sped-up take.
 """
 
 from __future__ import annotations
@@ -42,14 +43,17 @@ RATIO_KEEP_LO = 0.92   # close enough, leave it
 RATIO_KEEP_HI = 1.08
 RATIO_SOFT_LO = 0.85   # a bit short or long, change the speed
 RATIO_SOFT_HI = 1.15   # past these, ask for a different line
+# After one rewrite, a take this far off will not get a second (it drifts).
+RATIO_HOPELESS = 3.0
 
-# One rewrite only. A second one drifts away from the meaning without
-# fitting any better.
-MAX_REWRITES = 1
+# Two rewrites when the first is still too long. A third drifts from meaning.
+MAX_REWRITES = 2
 
 # Last speed-up before we cut. Faster than this sounds wrong; slower leaves
 # the next cue overlapping.
 HARD_SPEEDUP = 1.4
+# If a cut would keep less than this fraction, leave the sped-up take.
+TRIM_KEEP_MIN = 0.5
 
 # Voice presets, put in front of the text for /tts. Not used when cloning.
 VOICE_PRESETS = {
@@ -216,10 +220,13 @@ def fit_cue(
                     out = clamped
             length_now = duration(out)
             if length_now > window * 1.001:
-                out = trim_audio(
-                    out, limit, work / f"cue_{index:03d}_trim.wav",
-                )
-                log(f"cut to {duration(out):.2f}s to stay off the next cue")
+                if length_now > 0 and limit / length_now < TRIM_KEEP_MIN:
+                    log("cut would drop most of the line, leaving the sped-up take")
+                else:
+                    out = trim_audio(
+                        out, limit, work / f"cue_{index:03d}_trim.wav",
+                    )
+                    log(f"cut to {duration(out):.2f}s to stay off the next cue")
         return out
 
     def best(why: str) -> Path:
@@ -248,38 +255,48 @@ def fit_cue(
     if rewrite is None or MAX_REWRITES < 1:
         return best("clamp")
 
-    shorter = ratio > RATIO_SOFT_HI
-    log(f"{'too long' if shorter else 'too short'}; asking for another line")
-    new_line = rewrite(line, target, shorter)
-    if new_line == CANNOT_FIT:
-        log("no shorter wording exists, changing the speed instead")
-        return best("cannot fit")
+    current_text = line
+    current_len = spoken
+    current_ratio = ratio
+    for attempt in range(MAX_REWRITES):
+        if attempt > 0 and current_ratio > RATIO_HOPELESS:
+            log("still far too long after rewrite, not asking again")
+            return best("hopeless")
+        shorter = current_ratio > RATIO_SOFT_HI
+        log(f"{'too long' if shorter else 'too short'}; asking for another line")
+        new_line = rewrite(current_text, target, shorter)
+        if new_line == CANNOT_FIT:
+            log("no shorter wording exists, changing the speed instead")
+            return best("cannot fit")
 
-    log(f"new line: {new_line}")
-    second = speak(new_line, work / f"cue_{index:03d}_r0.wav")
-    second_length = duration(second)
-    second_ratio = second_length / target if target > 0 else 1.0
-    log(f"spoke {second_length:.2f}s (ratio {second_ratio:.2f})")
-    candidates.append((second, second_length))
+        log(f"new line: {new_line}")
+        nxt = speak(new_line, work / f"cue_{index:03d}_r{attempt}.wav")
+        nxt_len = duration(nxt)
+        nxt_ratio = nxt_len / target if target > 0 else 1.0
+        log(f"spoke {nxt_len:.2f}s (ratio {nxt_ratio:.2f})")
+        candidates.append((nxt, nxt_len))
 
-    # Asking for something shorter can overshoot into far too short.
-    overshoot = shorter and second_ratio < RATIO_SOFT_LO
-    improved = (
-        abs(predicted(second_length) - cap) < abs(predicted(spoken) - cap) - 1e-6
-    )
-    if overshoot:
-        log(f"the rewrite went too far ({ratio:.2f} to {second_ratio:.2f})")
-        return best("overshoot")
-    if not improved:
-        log(f"the rewrite fits no better ({ratio:.2f} to {second_ratio:.2f})")
-        return best("no better")
+        # Asking for something shorter can overshoot into far too short.
+        overshoot = shorter and nxt_ratio < RATIO_SOFT_LO
+        improved = (
+            abs(predicted(nxt_len) - cap) < abs(predicted(current_len) - cap) - 1e-6
+        )
+        if overshoot:
+            log(f"the rewrite went too far ({current_ratio:.2f} to {nxt_ratio:.2f})")
+            return best("overshoot")
+        if not improved:
+            log(f"the rewrite fits no better ({current_ratio:.2f} to {nxt_ratio:.2f})")
+            return best("no better")
 
-    if RATIO_KEEP_LO <= second_ratio <= RATIO_KEEP_HI:
-        if second_length > window * 1.001:
-            return stretch(second, second_length, "clamp")
-        return second
-    if RATIO_SOFT_LO <= second_ratio <= RATIO_SOFT_HI:
-        return stretch(second, second_length, "after rewrite")
+        if RATIO_KEEP_LO <= nxt_ratio <= RATIO_KEEP_HI:
+            if nxt_len > window * 1.001:
+                return stretch(nxt, nxt_len, "clamp")
+            return nxt
+        if RATIO_SOFT_LO <= nxt_ratio <= RATIO_SOFT_HI:
+            return stretch(nxt, nxt_len, "after rewrite")
+        current_text = new_line
+        current_len = nxt_len
+        current_ratio = nxt_ratio
     return best("final")
 
 
@@ -307,6 +324,13 @@ def timed_speech(
 
     if ctx is not None:
         ctx.step("Rewriting the script")
+
+    from server.steps.open_dubbing import merge_short_cues
+
+    before = len(cues)
+    cues = merge_short_cues(cues)
+    if ctx is not None and len(cues) < before:
+        ctx.log(f"Merged {before - len(cues)} short cue(s) into their neighbours")
 
     script = reconstruct_script(cues, target_lang, openai_key, asr_meta=meta or {})
     (work / "dub_script.json").write_text(
