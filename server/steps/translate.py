@@ -623,6 +623,16 @@ def _asr_is_no_speech_crumb(seg: dict) -> bool:
     return len((seg.get("text") or "").split()) <= 2
 
 
+def _asr_is_one_word_continuation(seg: dict, prev: dict | None) -> bool:
+    """A leftover 1-word token after the previous line ('रखूं।'). Don't invent."""
+    if prev is None:
+        return False
+    if (seg.get("speaker_id") or "SPEAKER_00") != (
+            prev.get("speaker_id") or "SPEAKER_00"):
+        return False
+    return len((seg.get("text") or "").split()) == 1
+
+
 def _crumb_indices(segs) -> list:
     """ASR slots the rewrite model usually drops (prefix / no-speech crumbs)."""
     out = []
@@ -870,6 +880,8 @@ def _reconstruct_system_prompt(*, n: int, lang_name: str, expected_code: str,
         f"cue [i] only. Never put cue j's speech-act into cue_translations[i] "
         f"when i != j. A second-speaker aside (different speaker_id, or a "
         f"coach / in-app line) stays in its own index. "
+        f"A leftover crumb (1–2 ASR tokens under 0.5s, or a 1–2 word cue "
+        f"with no_speech) MUST be \"\" — do not invent a sentence for it. "
         f"If Whisper split one sentence across two cues, split the "
         f"{lang_name} translation across those two indices — the short slot "
         f"gets a short clause, not the whole sentence. Do not merge two ASR "
@@ -1136,9 +1148,15 @@ def _fill_empty_cues(script: dict, segs, empty_idxs: list, lang_name: str,
 
     silent_idxs = []
     fill_idxs = []
+    crumb_idxs = set(_crumb_indices(segs))
     for i in empty_idxs:
         asr = (segs[i].get("text") or "").replace("\n", " ").strip()
-        if _asr_empty_should_stay_silent(asr, master_t):
+        prev = segs[i - 1] if i else None
+        if (
+            i in crumb_idxs
+            or _asr_is_one_word_continuation(segs[i], prev)
+            or _asr_empty_should_stay_silent(asr, master_t)
+        ):
             silent_idxs.append(i)
             merged[i] = ""
             for tag in (f"garbled_asr[{i}]", f"empty_cue[{i}]"):
@@ -1459,6 +1477,7 @@ def _selfcheck():
     assert "index lock" in recon_p.lower()
     assert "cue [i] only" in recon_p.lower()
     assert "do not merge two asr" in recon_p.lower()
+    assert "leftover crumb" in recon_p.lower()
     assert "second-speaker" in recon_p.lower()
     assert "adjacent segments may form one sentence" not in recon_p.lower()
     # Model merged 'I' + 'I gotta go' → pad the leftover index
@@ -1492,6 +1511,33 @@ def _selfcheck():
     ]
     assert _empty_asr_cue_indices(segs_e, ["Xin chào.", "", ""]) == [1]
     assert _empty_asr_cue_indices(segs_e, ["a", "b", ""]) == []
+    assert _asr_is_one_word_continuation(
+        {"text": "रखूं।", "speaker_id": "SPEAKER_00"},
+        {"text": "on the screen.", "speaker_id": "SPEAKER_00"},
+    )
+    assert not _asr_is_one_word_continuation(
+        {"text": "Help me.", "speaker_id": "SPEAKER_00"},
+        {"text": "Hi.", "speaker_id": "SPEAKER_00"},
+    )
+    segs_one = [
+        {"text": "finger on the screen", "speaker_id": "SPEAKER_00"},
+        {"text": "रखूं।", "speaker_id": "SPEAKER_00"},
+    ]
+    script_one = {
+        "cue_translations": ["Place your finger on the screen.", ""],
+        "master_translation": "Place your finger on the screen.",
+        "master_meaning": "app",
+        "uncertain_spans": [],
+    }
+    real_chat = _chat
+    def _no_fill(*_a, **_k):
+        raise AssertionError("must not fill a 1-word leftover")
+    globals()["_chat"] = _no_fill
+    try:
+        filled = _fill_empty_cues(script_one, segs_one, [1], "English", "k")
+    finally:
+        globals()["_chat"] = real_chat
+    assert filled["cue_translations"][1] == ""
     assert _asr_empty_should_stay_silent(
         "Sing Jemah kanil, tapi cepetan selamat tinggi.")
     assert not _asr_empty_should_stay_silent(

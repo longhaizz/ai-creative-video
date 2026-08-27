@@ -37,11 +37,20 @@ MAX_UTTERANCE_SECONDS = 6.0
 MAX_SENTENCES = 2
 # Pause between words within a VAD window (e.g. "Go lower." as its own cue).
 WORD_GAP_SECONDS = 0.35
+# Whisper sometimes stamps one token across a whole VAD blob (Hindi
+# "रखूं।" = 22s of B-roll). A real word is never this long.
+MAX_WORD_SECONDS = 1.2
+MAX_SECONDS_PER_WORD = 1.5
+SECONDS_PER_WORD = 0.7
+WORD_SPAN_PAD = 0.3
 # Ignore Pyannote crumbs under this length when cutting a VAD window.
 MIN_SPEAKER_TURN_SECONDS = 0.25
 # A brief mid-take flip (A-B-A) shorter than this is noise; real asides are longer.
 ABSORB_SPEAKER_ISLAND_SECONDS = 0.5
 RETRY_WHISPER_MODEL = "large-v3"
+# medium + Latin-script heuristics miss Arabic/Hindi garbage. Always
+# retry these on large-v3. Also retry if any Whisper segment is "no speech".
+RETRY_LANGUAGES = {"ar", "hi", "ur", "fa", "he"}
 # Peak at or above this is already audible. Below it, raise toward TARGET.
 QUIET_PEAK_DB = -12.0
 TARGET_PEAK_DB = -3.0
@@ -300,16 +309,20 @@ def _segments_to_cues(segments) -> list[dict]:
     return cues
 
 
-def _asr_quality(cues: list[dict], language_probability: float = 0.0) -> dict:
+def _asr_quality(cues: list[dict], language_probability: float = 0.0,
+                 language: str = "") -> dict:
     """Same heuristics as server/steps/transcribe.py (this script runs in venv-od)."""
     reasons = []
     count = len(cues) or 1
     probability = float(language_probability or 0.0)
     if 0 < probability < 0.75:
         reasons.append(f"language_prob={probability:.2f}<0.75")
+    if (language or "") in RETRY_LANGUAGES:
+        reasons.append(f"retry_script={language}")
 
     garbled = 0
     low_confidence = 0
+    high_no_speech = 0
     for cue in cues:
         text = (cue.get("text") or "").strip()
         words = [word for word in re.sub(r"[,.!?]+", " ", text).split() if word]
@@ -327,11 +340,15 @@ def _asr_quality(cues: list[dict], language_probability: float = 0.0) -> dict:
             low_confidence += 1
         if float(cue.get("no_speech_prob") or 0) > 0.6:
             low_confidence += 1
+        if float(cue.get("no_speech_prob") or 0) > 0.85:
+            high_no_speech += 1
 
     if garbled / count >= 0.35:
         reasons.append(f"garbled_cues={garbled}/{count}")
     if low_confidence / count >= 0.35:
         reasons.append(f"low_confidence_cues={low_confidence}/{count}")
+    if high_no_speech:
+        reasons.append(f"high_no_speech={high_no_speech}/{count}")
 
     return {"ok": not reasons, "reasons": reasons}
 
@@ -342,7 +359,9 @@ def _transcribe_full(model, wav: Path, language: str, language_probability: floa
     language_probability = float(
         getattr(info, "language_probability", language_probability) or language_probability
     )
-    quality = _asr_quality(_segments_to_cues(segments), language_probability)
+    quality = _asr_quality(
+        _segments_to_cues(segments), language_probability, language,
+    )
     used = whisper_size
 
     if not quality["ok"] and whisper_size != RETRY_WHISPER_MODEL:
@@ -482,6 +501,34 @@ def _absorb_speaker_islands(spans: list[list]) -> list[tuple[float, float, str]]
     return [(float(s[0]), float(s[1]), str(s[2])) for s in tight]
 
 
+def _clamp_word_end(start: float, end: float) -> float:
+    if end - start > MAX_WORD_SECONDS:
+        return start + MAX_WORD_SECONDS
+    return end
+
+
+def _piece_span(group: list[dict], window_start: float, window_end: float
+                ) -> tuple[float, float]:
+    """Word times, not the VAD blob. One token must not fill 22s of B-roll."""
+    clamped = []
+    for item in group:
+        start = float(item["start"])
+        end = _clamp_word_end(start, float(item["end"]))
+        clamped.append((start, end))
+    speech_start = max(window_start, clamped[0][0])
+    speech_end = min(window_end, clamped[-1][1])
+    count = max(len(clamped), 1)
+    span = speech_end - speech_start
+    if count and span / count > MAX_SECONDS_PER_WORD:
+        speech_end = min(
+            window_end,
+            speech_start + count * SECONDS_PER_WORD + WORD_SPAN_PAD,
+        )
+    if speech_end <= speech_start:
+        speech_end = speech_start + 0.15
+    return speech_start, speech_end
+
+
 def _pieces_from_words(
     words: list[dict], window_start: float, window_end: float,
 ) -> list[dict]:
@@ -490,10 +537,7 @@ def _pieces_from_words(
         text = _join_tokens([item["word"] for item in group])
         if not text:
             continue
-        speech_start = max(window_start, group[0]["start"])
-        speech_end = min(window_end, group[-1]["end"])
-        if speech_end <= speech_start:
-            speech_end = speech_start + 0.15
+        speech_start, speech_end = _piece_span(group, window_start, window_end)
         pieces.append({
             "start": speech_start,
             "end": speech_end,
@@ -509,11 +553,17 @@ def _pieces_from_words(
 def _word_groups(
     words: list[dict], window_start: float, window_end: float,
 ) -> list[list[dict]]:
-    cleaned = [
-        word for word in words
-        if (word.get("word") or "").strip()
-        and word["end"] > window_start and word["start"] < window_end
-    ]
+    cleaned = []
+    for word in words:
+        if not (word.get("word") or "").strip():
+            continue
+        item = dict(word)
+        start = float(item["start"])
+        end = _clamp_word_end(start, float(item["end"]))
+        item["start"] = start
+        item["end"] = end
+        if end > window_start and start < window_end:
+            cleaned.append(item)
     if not cleaned:
         return []
 
