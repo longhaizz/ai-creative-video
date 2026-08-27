@@ -103,24 +103,45 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
 
     vocals, no_vocals = _demucs(mix, out)
     vocals_16k = out / "vocals_16k.wav"
+    mix_16k = out / "mix_16k.wav"
     _ffmpeg(["-y", "-loglevel", "error", "-i", str(vocals),
              "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", str(vocals_16k)])
+    _ffmpeg(["-y", "-loglevel", "error", "-i", str(mix),
+             "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", str(mix_16k)])
 
-    vad_windows = _vad_windows(vocals_16k)
+    vad_vocals = _vad_windows(vocals_16k)
+    vad_mix = _vad_windows(mix_16k)
+    missed = _uncovered_intervals(vad_mix, vad_vocals)
+    if missed:
+        print(
+            f"Vocals stem missed {len(missed)} speech region(s) still in "
+            f"the mix; keeping those",
+            file=sys.stderr,
+        )
+    vad_windows = _merge_intervals([vad_vocals, vad_mix])
     if not vad_windows:
         raise RuntimeError("No speech was found in the video")
 
     turns = _diarize(vocals_16k, token)
-    # One VAD blob can hold two people ("Tolong…? Help me."). Cut on turns.
-    windows = _windows_with_speakers(vad_windows, turns)
 
     from faster_whisper import WhisperModel
 
     model = _load_whisper(whisper_size)
-    language, language_probability = _detect_language(model, vocals_16k)
+    # Mix, not vocals: Demucs often parks quiet VO in accompaniment, and
+    # Hindi B-roll then looks like silence so the middle of the ad is dropped.
+    language, language_probability = _detect_language(model, mix_16k)
     model, segments, all_words, language_probability, whisper_used = _transcribe_full(
-        model, vocals_16k, language, language_probability, whisper_size,
+        model, mix_16k, language, language_probability, whisper_size,
     )
+    orphan = _orphan_word_windows(all_words, vad_windows)
+    if orphan:
+        print(
+            f"Whisper heard {len(orphan)} extra speech region(s) outside VAD",
+            file=sys.stderr,
+        )
+        vad_windows = _merge_intervals([vad_windows, orphan])
+    # One VAD blob can hold two people ("Tolong…? Help me."). Cut on turns.
+    windows = _windows_with_speakers(vad_windows, turns)
 
     per_window = _assign_words_to_windows(
         all_words, [(start, end) for start, end, _speaker in windows],
@@ -268,9 +289,6 @@ def _detect_language(model, wav: Path) -> tuple[str, float]:
     return language, probability
 
 
-    return language, probability
-
-
 def _run_transcribe(model, wav: Path, language: str):
     segments, info = model.transcribe(str(wav), **_transcribe_kwargs(language))
     return list(segments), info
@@ -379,6 +397,77 @@ def _transcribe_full(model, wav: Path, language: str, language_probability: floa
         used = RETRY_WHISPER_MODEL
 
     return model, segments, _flatten_words(segments), language_probability, used
+
+
+def _merge_intervals(groups, join_gap: float = 0.25) -> list[tuple[float, float]]:
+    """Union of (start, end) lists; neighbours closer than join_gap merge."""
+    items = [pair for group in groups for pair in (group or [])]
+    if not items:
+        return []
+    items.sort(key=lambda pair: (pair[0], pair[1]))
+    out = [[float(items[0][0]), float(items[0][1])]]
+    for start, end in items[1:]:
+        start, end = float(start), float(end)
+        if start <= out[-1][1] + join_gap:
+            out[-1][1] = max(out[-1][1], end)
+        else:
+            out.append([start, end])
+    return [(left, right) for left, right in out]
+
+
+def _uncovered_intervals(candidate, covered, min_seconds: float = 0.4):
+    """Pieces of `candidate` that `covered` does not already include."""
+    extra = []
+    for start, end in candidate or []:
+        remain = float(end) - float(start)
+        for left, right in covered or []:
+            remain -= max(0.0, min(end, right) - max(start, left))
+        if remain >= min_seconds:
+            extra.append((float(start), float(end)))
+    return extra
+
+
+def _overlaps_any(start: float, end: float, windows, min_ov: float = 0.05) -> bool:
+    return any(
+        max(0.0, min(end, right) - max(start, left)) > min_ov
+        for left, right in windows or []
+    )
+
+
+def _orphan_word_windows(words, windows) -> list[tuple[float, float]]:
+    """Whisper word clusters that VAD never marked as speech.
+
+    Demucs/VAD miss quiet middle VO; Whisper on the mix still timestamps it.
+    Skip high no-speech and one-token B-roll stamps (Hindi 'रखूं।' × 22s).
+    """
+    orphans = []
+    for word in words or []:
+        if float(word.get("no_speech_prob") or 0) > 0.65:
+            continue
+        start = float(word["start"])
+        end = _clamp_word_end(start, float(word["end"]))
+        if end - start < 0.04:
+            continue
+        if _overlaps_any(start, end, windows):
+            continue
+        orphans.append({"start": start, "end": end})
+    if not orphans:
+        return []
+    clusters = [[orphans[0]]]
+    for word in orphans[1:]:
+        if word["start"] - clusters[-1][-1]["end"] <= 0.6:
+            clusters[-1].append(word)
+        else:
+            clusters.append([word])
+    out = []
+    for group in clusters:
+        if len(group) < 2:
+            continue
+        start, end = group[0]["start"], group[-1]["end"]
+        if end - start < 0.3:
+            continue
+        out.append((start, end))
+    return out
 
 
 def _assign_words_to_windows(

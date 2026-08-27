@@ -380,6 +380,57 @@ def test_language_is_detected_once_and_locked_on_every_cue():
     src = inspect.getsource(mod.segment)
     assert "_transcribe_full" in src
     assert "_detect_language" in src
+    assert "mix_16k" in src
+    assert "_orphan_word_windows" in src
+
+
+def test_merge_intervals_unions_mix_and_vocals_vad():
+    mod = _od_script()
+    vocals = [(0.0, 8.2), (30.0, 37.1)]
+    mix = [(0.0, 8.0), (12.4, 16.2), (21.0, 24.5), (29.8, 37.0)]
+    merged = mod._merge_intervals([vocals, mix])
+    assert merged[0] == (0.0, 8.2)
+    assert (12.4, 16.2) in merged
+    assert (21.0, 24.5) in merged
+    assert merged[-1][0] <= 30.0
+    assert merged[-1][1] >= 37.0
+
+
+def test_uncovered_intervals_are_the_mix_only_middle():
+    mod = _od_script()
+    vocals = [(0.0, 8.2), (30.0, 37.1)]
+    mix = [(0.0, 8.0), (12.4, 16.2), (21.0, 24.5), (29.8, 37.0)]
+    missed = mod._uncovered_intervals(mix, vocals)
+    assert missed == [(12.4, 16.2), (21.0, 24.5)]
+
+
+def test_orphan_words_in_the_vad_hole_become_a_window():
+    """Hindi ad: VAD heard 0–8s and 30s+, Whisper still heard the demo VO."""
+    mod = _od_script()
+    windows = [(0.0, 8.2), (30.0, 37.1)]
+    words = [
+        {"word": "Hello", "start": 0.2, "end": 0.6, "no_speech_prob": 0.05},
+        {"word": "Use", "start": 12.5, "end": 12.8, "no_speech_prob": 0.08},
+        {"word": " this", "start": 12.8, "end": 13.1, "no_speech_prob": 0.08},
+        {"word": " app", "start": 13.1, "end": 13.5, "no_speech_prob": 0.08},
+        {"word": " now.", "start": 13.5, "end": 13.9, "no_speech_prob": 0.08},
+        {"word": "Download", "start": 30.2, "end": 30.7, "no_speech_prob": 0.04},
+    ]
+    extra = mod._orphan_word_windows(words, windows)
+    assert len(extra) == 1
+    assert extra[0][0] == 12.5
+    assert extra[0][1] == 13.9
+
+
+def test_orphan_windows_skip_b_roll_stamps_and_no_speech():
+    mod = _od_script()
+    windows = [(0.0, 5.0)]
+    words = [
+        {"word": "रखूं।", "start": 14.6, "end": 37.3, "no_speech_prob": 0.003},
+        {"word": "hi", "start": 20.0, "end": 20.2, "no_speech_prob": 0.97},
+        {"word": "there", "start": 20.2, "end": 20.5, "no_speech_prob": 0.97},
+    ]
+    assert mod._orphan_word_windows(words, windows) == []
 
 
 def test_transcribe_kwargs_lock_language_and_beam():
