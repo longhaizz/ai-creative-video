@@ -33,7 +33,9 @@ from server.steps.audio import (
 )
 from server.steps.translate import (
     CANNOT_FIT,
+    pace_counts,
     reconstruct_script,
+    refit_script_pace,
     rephrase_for_duration,
 )
 
@@ -155,6 +157,7 @@ def fit_cue(
     speak,
     rewrite=None,
     ctx=None,
+    stats=None,
 ) -> Path:
     """Speak one line and make it fit its slot. Returns the wav path.
 
@@ -176,6 +179,19 @@ def fit_cue(
     spoken = duration(raw)
     ratio = spoken / target if target > 0 else 1.0
     log(f"spoke {spoken:.2f}s for a {target:.2f}s slot (ratio {ratio:.2f})")
+    if stats is not None:
+        if ratio > RATIO_SOFT_HI:
+            heard = "too_fast"
+        elif ratio < RATIO_SOFT_LO:
+            heard = "too_slow"
+        else:
+            heard = "ok"
+        stats.update({
+            "spoken": round(spoken, 3),
+            "target": round(target, 3),
+            "ratio": round(ratio, 3),
+            "heard": heard,
+        })
 
     candidates = [(raw, spoken)]
 
@@ -309,13 +325,6 @@ def timed_speech(
         ctx.step("Rewriting the script")
 
     script = reconstruct_script(cues, target_lang, openai_key, asr_meta=meta or {})
-    (work / "dub_script.json").write_text(
-        json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-    if ctx is not None:
-        _report_script(script, cues, ctx)
-
     lines = list(script["cue_translations"])
     if len(lines) != len(cues):
         raise PipelineError(
@@ -325,6 +334,17 @@ def timed_speech(
     language_name = script.get("output_lang_name") or ""
     master = script["master_meaning"]
     slots = cue_slots(cues, video_seconds)
+    lines, scores = refit_script_pace(lines, slots, openai_key)
+    script["cue_translations"] = lines
+    script["pace"] = scores
+    (work / "dub_script.json").write_text(
+        json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    if ctx is not None:
+        _report_script(script, cues, ctx)
+        _report_pace(scores, ctx, "script")
+
     spoken_indices = [i for i, line in enumerate(lines) if (line or "").strip()]
     if not spoken_indices:
         raise PipelineError("There is nothing to say", code="internal")
@@ -362,9 +382,20 @@ def timed_speech(
         def speak_this(text, path, _cue=cue):
             return speak(text, path, _cue)
 
-        fitted = fit_cue(line, slot, work, index, speak_this, rewrite, ctx)
+        heard = {}
+        fitted = fit_cue(line, slot, work, index, speak_this, rewrite, ctx, heard)
+        if index < len(scores):
+            scores[index]["heard"] = heard.get("heard")
+            scores[index]["spoken_s"] = heard.get("spoken")
+            scores[index]["spoken_ratio"] = heard.get("ratio")
         clips.append((slot["start"], fitted))
 
+    script["pace"] = scores
+    (work / "dub_script.json").write_text(
+        json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    if ctx is not None:
+        _report_pace(scores, ctx, "heard")
     return place_clips(clips, video_seconds, work / "speech_timed.wav")
 
 
@@ -374,6 +405,11 @@ def _report_script(script: dict, cues: list[dict], ctx) -> None:
         ctx.log(
             f"Some lines came back in the wrong language and were redone: "
             f"{script.get('language_repair_indices')}"
+        )
+    if script.get("cue_count_aligned") or script.get("cue_count_repaired"):
+        ctx.log(
+            "The rewrite dropped some leftover Whisper fragments; "
+            "those slots were left silent"
         )
     if script.get("cues_filled"):
         ctx.log(f"Filled cues the transcript left empty: {script.get('cues_filled_indices')}")
@@ -388,3 +424,37 @@ def _report_script(script: dict, cues: list[dict], ctx) -> None:
     ctx.log(f"Script: {script['master_translation']}")
     if script.get("uncertain_spans"):
         ctx.log(f"Unsure about: {script['uncertain_spans']}")
+
+
+def _report_pace(scores: list, ctx, when: str) -> None:
+    """Log how many lines would sound rushed or dragged."""
+    key = "heard" if when == "heard" else "verdict"
+    counts = pace_counts(scores, key)
+    label = "Heard after TTS" if when == "heard" else "Pace"
+    ctx.log(
+        f"{label}: {counts['ok']} ok, {counts['too_fast']} too fast, "
+        f"{counts['too_slow']} too slow"
+    )
+    for index, score in enumerate(scores):
+        verdict = score.get(key) or ""
+        if verdict not in ("too_fast", "too_slow"):
+            continue
+        if when == "heard":
+            ctx.log(
+                f"Cue {index + 1} {verdict}: "
+                f"spoke {score.get('spoken_s')}s "
+                f"for a {score.get('slot_s')}s slot "
+                f"(ratio {score.get('spoken_ratio')})"
+            )
+            continue
+        after = score.get("after") or {}
+        note = "rewrote" if score.get("rewritten") else "kept"
+        ctx.log(
+            f"Cue {index + 1} {verdict}: "
+            f"{score['words']} words for {score['slot_s']}s "
+            f"(~{score['estimated_s']}s spoken), {note}"
+            + (
+                f" → {after.get('verdict')}"
+                if after.get("verdict") else ""
+            )
+        )

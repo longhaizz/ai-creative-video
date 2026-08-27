@@ -42,6 +42,10 @@ MIN_SPEAKER_TURN_SECONDS = 0.25
 # A brief mid-take flip (A-B-A) shorter than this is noise; real asides are longer.
 ABSORB_SPEAKER_ISLAND_SECONDS = 0.5
 RETRY_WHISPER_MODEL = "large-v3"
+# Peak at or above this is already audible. Below it, raise toward TARGET.
+QUIET_PEAK_DB = -12.0
+TARGET_PEAK_DB = -3.0
+MAX_BOOST_DB = 24.0
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?。！？])\s+")
 _SENTENCE_END = re.compile(r"[.!?。！？]")
 
@@ -80,6 +84,13 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
     mix = out / "mix.wav"
     _ffmpeg(["-y", "-loglevel", "error", "-i", str(video),
              "-vn", "-ac", "1", "-c:a", "pcm_s16le", str(mix)])
+    gain = _boost_if_quiet(mix)
+    if gain:
+        print(
+            f"Source audio was quiet, boosted {gain:.1f} dB so speech can "
+            f"be heard",
+            file=sys.stderr,
+        )
 
     vocals, no_vocals = _demucs(mix, out)
     vocals_16k = out / "vocals_16k.wav"
@@ -153,6 +164,38 @@ def _ffmpeg(args: list[str]) -> None:
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {(result.stderr or '')[-300:]}")
+
+
+def _max_volume_db(path: Path):
+    result = subprocess.run(
+        ["ffmpeg", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    text = (result.stderr or "") + (result.stdout or "")
+    match = re.search(r"max_volume:\s*([-\d.]+)\s*dB", text)
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+def _boost_if_quiet(path: Path) -> float:
+    """Raise a too-quiet mix so VAD, Whisper, and clone can hear it.
+
+    Returns the gain in dB, or 0 if the file was already loud enough.
+    """
+    peak = _max_volume_db(path)
+    if peak is None or peak >= QUIET_PEAK_DB:
+        return 0.0
+    gain = min(TARGET_PEAK_DB - peak, MAX_BOOST_DB)
+    if gain < 1.0:
+        return 0.0
+    tmp = path.with_name(path.stem + "_boost.wav")
+    _ffmpeg([
+        "-y", "-loglevel", "error", "-i", str(path),
+        "-af", f"volume={gain:.2f}dB", "-c:a", "pcm_s16le", str(tmp),
+    ])
+    tmp.replace(path)
+    return gain
 
 
 def _cut(src: Path, start: float, end: float, dest: Path) -> None:

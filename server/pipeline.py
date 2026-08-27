@@ -182,6 +182,8 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     # 7 and 8. Put the music back under the voice, then onto the picture.
     ctx.step("Mixing and putting it together")
     mixed = audio.mix_audio(speech, music, work / "final.wav", seconds=video_seconds)
+    mixed = audio.make_audible(mixed, work / "final_loud.wav")
+    ctx.log("Normalized the mix so the output is clearly audible")
     result = audio.mux_audio(picture, mixed, work / "result.mp4")
 
     # 9. Burn the new subtitles on last, so they sit on the final picture.
