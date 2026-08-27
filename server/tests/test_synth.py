@@ -18,6 +18,7 @@ from server.steps.audio import duration
 from server.steps.synth import (
     RATIO_KEEP_HI,
     RATIO_KEEP_LO,
+    RATIO_HOLE,
     SOFT_SPEEDUP,
     cue_slots,
     fit_cue,
@@ -153,6 +154,18 @@ def test_a_far_too_long_line_is_rewritten(tmp_path):
 
 
 @needs_ffmpeg
+def test_fit_cue_records_the_line_that_was_spoken(tmp_path):
+    speak = tone_maker(tmp_path, {"a long line": 4.0, "short": 2.1})
+    stats = {}
+
+    def rewrite(text, seconds, shorter):
+        return "short"
+
+    fit_cue("a long line", slot(2.0), tmp_path, 0, speak, rewrite, stats=stats)
+    assert stats["spoken_text"] == "short"
+
+
+@needs_ffmpeg
 def test_a_far_too_short_line_asks_for_a_longer_one(tmp_path):
     speak = tone_maker(tmp_path, {"hi": 1.0, "hello there friend": 1.95})
     asked = []
@@ -166,6 +179,21 @@ def test_a_far_too_short_line_asks_for_a_longer_one(tmp_path):
 
 
 @needs_ffmpeg
+def test_a_tiny_slot_is_not_rewritten(tmp_path):
+    speak = tone_maker(tmp_path, {"Water": 0.96})
+    asked = []
+
+    def rewrite(text, seconds, shorter):
+        asked.append(text)
+        return "I doubt you can handle this traffic when we get into it."
+
+    out = fit_cue("Water", slot(0.4, window=0.4), tmp_path, 0, speak, rewrite)
+    assert asked == []
+    assert speak.calls == ["Water"]
+    assert duration(out) <= 0.4 + 0.05
+
+
+@needs_ffmpeg
 def test_a_rewrite_that_fits_no_better_is_dropped(tmp_path):
     """Keep the best take, not the newest one."""
     speak = tone_maker(tmp_path, {"long": 4.0, "also long": 4.5})
@@ -176,6 +204,36 @@ def test_a_rewrite_that_fits_no_better_is_dropped(tmp_path):
     out = fit_cue("long", slot(2.0), tmp_path, 0, speak, rewrite)
     # 4.0 is nearer to 2.0 than 4.5, so the first take wins and is squeezed.
     assert duration(out) < 4.0
+
+
+@needs_ffmpeg
+def test_a_closer_rewrite_is_kept(tmp_path):
+    """0.83 → 0.98 is nearer the slot; keep the second take."""
+    speak = tone_maker(tmp_path, {"short": 1.66, "closer": 1.96})
+
+    def rewrite(text, seconds, shorter):
+        return "closer"
+
+    stats = {}
+    out = fit_cue(
+        "short", slot(2.0, window=9.0), tmp_path, 0, speak, rewrite, stats=stats,
+    )
+    assert stats["spoken_text"] == "closer"
+    assert abs(duration(out) - 1.96) < 0.08
+
+
+@needs_ffmpeg
+def test_a_b_roll_hole_is_not_rewritten(tmp_path):
+    speak = tone_maker(tmp_path, {"hi": 0.6})
+    asked = []
+
+    def rewrite(text, seconds, shorter):
+        asked.append(text)
+        return "padding that invents a new sentence"
+
+    fit_cue("hi", slot(2.0, window=9.0), tmp_path, 0, speak, rewrite)
+    assert asked == []
+    assert 0.6 / 2.0 < RATIO_HOLE
 
 
 @needs_ffmpeg

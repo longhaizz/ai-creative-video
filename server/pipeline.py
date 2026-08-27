@@ -203,12 +203,26 @@ def _dub(ctx: JobContext, models: Models) -> Path:
 
 
 def _subtitle_cues(work: Path, cues: list[dict]) -> list[dict]:
-    """The translated lines with the original timings.
+    """The lines that were actually spoken, timed to the dubbed audio.
 
-    The text comes from dub_script.json, which the rewrite step wrote, so
-    the subtitles say the same words the voice says.
+    timed_speech writes spoken_cues.json after fit_cue. That is the source
+    of truth: the script in dub_script.json can differ after a rewrite, and
+    ASR windows are often longer than the new take.
     """
     import json
+
+    spoken_path = work / "spoken_cues.json"
+    if spoken_path.is_file():
+        spoken = json.loads(spoken_path.read_text(encoding="utf-8"))
+        return [
+            {
+                "start": float(item["start"]),
+                "end": float(item["end"]),
+                "text": (item.get("text") or "").strip(),
+            }
+            for item in spoken
+            if (item.get("text") or "").strip()
+        ]
 
     script = json.loads((work / "dub_script.json").read_text(encoding="utf-8"))
     lines = script.get("cue_translations") or []

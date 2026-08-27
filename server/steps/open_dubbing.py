@@ -33,6 +33,10 @@ MIN_REF_SECONDS = 3.0
 PREFIX_CRUMB_SECONDS = 0.35
 PREFIX_CRUMB_GAP_SECONDS = 0.8
 NO_SPEECH_CRUMB = 0.9
+TINY_CUE_SECONDS = 0.6
+SHORT_CTA_SECONDS = 0.6
+SHORT_CTA_GAP_SECONDS = 0.5
+SHORT_CTA_WORDS = (2, 5)
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "open_dubbing_segment.py"
 
@@ -221,12 +225,52 @@ def is_prefix_crumb(short: dict, full: dict) -> bool:
     return -0.05 <= gap <= PREFIX_CRUMB_GAP_SECONDS
 
 
-def is_no_speech_crumb(cue: dict) -> bool:
-    if float(cue.get("no_speech_prob") or 0) < NO_SPEECH_CRUMB:
+def is_no_speech_crumb(cue: dict, prev: dict | None = None) -> bool:
+    """Drop leftover noise: 'Water' 0.28s on the previous cut, or 1–2 words
+    on a Whisper no-speech blob. Keep real asides ('Help me.', 'Kalau')."""
+    words = len((cue.get("text") or "").split())
+    if words == 0:
+        return True
+    dur = _speech_dur(cue)
+    nsp = float(cue.get("no_speech_prob") or 0)
+    if words <= 2 and nsp >= NO_SPEECH_CRUMB:
+        return True
+    if words <= 1 and dur < TINY_CUE_SECONDS and prev is not None:
+        gap = float(cue.get("start", 0)) - float(prev.get("end", 0))
+        if gap <= 0.05:
+            return True
+    return False
+
+
+def is_short_cta(cue: dict, nxt: dict | None) -> bool:
+    """A 2–5 word aside too short to speak, sitting on the next line.
+
+    'Coba sekarang' 0.37s then 'sebelum semua orang tahu' should be one cue.
+    One-word crumbs ('Water', 'Kalau') are handled elsewhere.
+    """
+    if nxt is None:
         return False
-    if _speech_dur(cue) > 0.5:
+    if (cue.get("speaker_id") or "SPEAKER_00") != (
+            nxt.get("speaker_id") or "SPEAKER_00"):
         return False
-    return len((cue.get("text") or "").split()) <= 2
+    words = len((cue.get("text") or "").split())
+    lo, hi = SHORT_CTA_WORDS
+    if not (lo <= words <= hi):
+        return False
+    if _speech_dur(cue) >= SHORT_CTA_SECONDS:
+        return False
+    gap = float(nxt.get("start", 0)) - float(cue.get("end", 0))
+    return 0 <= gap < SHORT_CTA_GAP_SECONDS
+
+
+def _join_cue_text(left: str, right: str) -> str:
+    a = (left or "").strip()
+    b = (right or "").strip()
+    if not a:
+        return b
+    if not b:
+        return a
+    return f"{a} {b}"
 
 
 def _merge_crumb_into(crumb: dict, full: dict) -> dict:
@@ -260,7 +304,26 @@ def glue_prefix_crumbs(cues: list[dict]) -> list[dict]:
                 index -= 1
             continue
         index += 1
-    return [cue for cue in items if not is_no_speech_crumb(cue)]
+    kept = []
+    for cue in items:
+        if is_no_speech_crumb(cue, kept[-1] if kept else None):
+            continue
+        kept.append(cue)
+    merged = []
+    index = 0
+    while index < len(kept):
+        if index < len(kept) - 1 and is_short_cta(kept[index], kept[index + 1]):
+            nxt = _merge_crumb_into(kept[index], kept[index + 1])
+            nxt["text"] = _join_cue_text(
+                kept[index].get("text") or "",
+                kept[index + 1].get("text") or "",
+            )
+            merged.append(nxt)
+            index += 2
+            continue
+        merged.append(kept[index])
+        index += 1
+    return merged
 
 
 def reference_for_spans(
