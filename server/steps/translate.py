@@ -646,6 +646,62 @@ def _crumb_indices(segs) -> list:
     return out
 
 
+def _latin_wordset(text: str) -> set:
+    return {w.casefold() for w in re.findall(r"[A-Za-z]{3,}", text or "")}
+
+
+def _align_overlap_score(lines, segs) -> int:
+    """How many non-empty lines share Latin words with their ASR cue."""
+    score = 0
+    for line, seg in zip(lines, segs or []):
+        if not str(line or "").strip():
+            continue
+        left = _latin_wordset(line)
+        right = _latin_wordset(seg.get("text") or "")
+        if left and right and len(left & right) / max(len(left), 1) >= 0.4:
+            score += 1
+    return score
+
+
+def _insert_blank_cues(raw_cues, n: int, insert_at: set):
+    aligned = []
+    src = 0
+    for i in range(n):
+        if i in insert_at:
+            aligned.append("")
+            continue
+        if src >= len(raw_cues):
+            return None
+        aligned.append(raw_cues[src])
+        src += 1
+    if src != len(raw_cues):
+        return None
+    return aligned
+
+
+def _align_by_overlap(raw_cues, segs, n: int, need: int):
+    """Try every place to insert `need` empties; keep the best ASR overlap.
+
+    Language-learning clips (ID line + English echo) get merged by the
+    rewrite model. Word overlap puts \"\" on the dropped echo, not a
+    random later cue.
+    """
+    if need < 1 or need > 3 or n > 80:
+        return None
+    from itertools import combinations
+    best = None
+    best_score = 0
+    for combo in combinations(range(n), need):
+        aligned = _insert_blank_cues(raw_cues, n, set(combo))
+        if aligned is None:
+            continue
+        score = _align_overlap_score(aligned, segs)
+        if score > best_score:
+            best_score = score
+            best = aligned
+    return best if best_score > 0 else None
+
+
 def _align_cue_count(raw_cues, segs, n: int):
     """Insert \"\" on dropped prefix crumbs so length matches ASR.
 
@@ -664,22 +720,11 @@ def _align_cue_count(raw_cues, segs, n: int):
         return None
     need = n - len(raw_cues)
     crumbs = _crumb_indices(segs)
-    if need > len(crumbs):
-        return None
-    insert_at = set(crumbs[:need])
-    aligned = []
-    src = 0
-    for i in range(n):
-        if i in insert_at:
-            aligned.append("")
-            continue
-        if src >= len(raw_cues):
-            return None
-        aligned.append(raw_cues[src])
-        src += 1
-    if src != len(raw_cues):
-        return None
-    return aligned
+    if need <= len(crumbs):
+        aligned = _insert_blank_cues(raw_cues, n, set(crumbs[:need]))
+        if aligned is not None:
+            return aligned
+    return _align_by_overlap(raw_cues, segs, n, need)
 
 
 def _repair_cue_count(data: dict, segs, n: int, api_key: str,
@@ -716,6 +761,9 @@ def _repair_cue_count(data: dict, segs, n: int, api_key: str,
             f"the following full phrase, put \"\" on the leftover index and "
             f"keep the full phrase on its original index. "
             f"Split any merged line back onto the ASR indices it came from. "
+            f"A language-learning echo (source line, then the same line in "
+            f"another language) is TWO cues: keep both indices and put \"\" "
+            f"on the echo instead of merging them. "
             f"Use \"\" only when that cue has no speech to dub. "
             f"Return ONLY valid JSON: "
             f"{{\"cue_translations\": [exactly {n} strings]}}."
@@ -725,12 +773,9 @@ def _repair_cue_count(data: dict, segs, n: int, api_key: str,
     )
     parsed = _extract_json(out)
     fixed = parsed.get("cue_translations")
-    if not isinstance(fixed, list) or len(fixed) != n:
-        raise OpenAIError(
-            f"cue_translations phải có đúng {n} phần tử, "
-            f"nhận {len(fixed) if isinstance(fixed, list) else type(fixed)}")
     repaired = dict(data)
-    repaired["cue_translations"] = fixed
+    if isinstance(fixed, list):
+        repaired["cue_translations"] = fixed
     return repaired
 
 
@@ -745,7 +790,19 @@ def _ensure_cue_count(data: dict, segs, n: int, api_key: str,
         out = dict(data)
         out["cue_translations"] = aligned
         return out, "aligned"
-    return _repair_cue_count(data, segs, n, api_key, model), "repaired"
+    repaired = _repair_cue_count(data, segs, n, api_key, model)
+    fixed = repaired.get("cue_translations")
+    if isinstance(fixed, list) and len(fixed) == n:
+        return repaired, "repaired"
+    aligned = _align_cue_count(
+        fixed if isinstance(fixed, list) else raw, segs, n)
+    if aligned is not None:
+        out = dict(repaired)
+        out["cue_translations"] = aligned
+        return out, "aligned"
+    got = len(fixed) if isinstance(fixed, list) else type(fixed)
+    raise OpenAIError(
+        f"cue_translations phải có đúng {n} phần tử, nhận {got}")
 
 
 def _normalize_dub_script(data: dict, n_asr: int) -> dict:
@@ -886,6 +943,9 @@ def _reconstruct_system_prompt(*, n: int, lang_name: str, expected_code: str,
         f"{lang_name} translation across those two indices — the short slot "
         f"gets a short clause, not the whole sentence. Do not merge two ASR "
         f"cues into one cue_translations slot and shift later lines. "
+        f"A language-learning echo (source line, then the same line in "
+        f"another language) is TWO ASR cues — keep both indices; put \"\" "
+        f"on the echo if you would otherwise merge them. "
         f"CRITICAL: TTS keeps each ASR cue's original pause timing, so you "
         f"MUST allocate spoken lines into cue_translations — an array of "
         f"exactly {n} strings, index-aligned with ASR cues [0..{n - 1}]. "
@@ -1479,6 +1539,7 @@ def _selfcheck():
     assert "do not merge two asr" in recon_p.lower()
     assert "leftover crumb" in recon_p.lower()
     assert "second-speaker" in recon_p.lower()
+    assert "language-learning echo" in recon_p.lower()
     assert "adjacent segments may form one sentence" not in recon_p.lower()
     # Model merged 'I' + 'I gotta go' → pad the leftover index
     segs_crumb = [
@@ -1498,6 +1559,32 @@ def _selfcheck():
     same = _align_cue_count(["a", "b", "c", "d", "e"], segs_crumb, 5)
     assert same == ["a", "b", "c", "d", "e"]
     assert _align_cue_count(["only", "two"], segs_crumb, 5) is None
+    # Language-learning drill: ID line + English echo merged into one slot
+    segs_drill = [
+        {"start": 54.5, "end": 55.84, "speech_start": 54.5, "speech_end": 55.84,
+         "speaker_id": "SPEAKER_00", "text": "Sekali lagi, tolong.",
+         "no_speech_prob": 0.47},
+        {"start": 56.12, "end": 57.18, "speech_start": 56.12, "speech_end": 57.18,
+         "speaker_id": "SPEAKER_00", "text": "One more time, please.",
+         "no_speech_prob": 0.47},
+        {"start": 57.46, "end": 58.12, "speech_start": 57.46, "speech_end": 58.12,
+         "speaker_id": "SPEAKER_00", "text": "Ikutin aku.",
+         "no_speech_prob": 0.47},
+        {"start": 58.41, "end": 59.74, "speech_start": 58.41, "speech_end": 59.74,
+         "speaker_id": "SPEAKER_00", "text": "One more time, please.",
+         "no_speech_prob": 0.83},
+    ]
+    drill_raw = [
+        "One more time, please.", "Follow me.", "One more time, please.",
+    ]
+    drill = _align_cue_count(drill_raw, segs_drill, 4)
+    assert drill == [
+        "", "One more time, please.", "Follow me.", "One more time, please.",
+    ]
+    data_drill, note_drill = _ensure_cue_count(
+        {"cue_translations": drill_raw}, segs_drill, 4, "k", "m")
+    assert note_drill == "aligned"
+    assert data_drill["cue_translations"][0] == ""
     data_ok, note = _ensure_cue_count(
         {"cue_translations": ["Hi.", "I gotta go.", "Bye."]},
         segs_crumb, 5, "k", "m")
