@@ -274,3 +274,28 @@ def test_burning_keeps_the_video_whole(tmp_path):
     assert out.stat().st_size > 0
     assert abs(duration_of(out) - duration_of(source)) < 0.1
     assert audio_codec_of(out) == "aac", "the audio must be copied, not re-encoded"
+
+
+def test_subtitles_follow_the_spoken_take_not_the_asr_window(tmp_path):
+    import json
+
+    from server.pipeline import _subtitle_cues
+
+    (tmp_path / "spoken_cues.json").write_text(
+        json.dumps([{"start": 1.9, "end": 4.0, "text": "I bet you cannot."}]),
+        encoding="utf-8",
+    )
+    (tmp_path / "dub_script.json").write_text(
+        json.dumps({
+            "cue_translations": [
+                "I bet you won't be able to handle this traffic when we get into the situation.",
+            ],
+        }),
+        encoding="utf-8",
+    )
+    asr = [{
+        "start": 1.9, "end": 4.4,
+        "speech_start": 1.9, "speech_end": 4.4, "text": "ar",
+    }]
+    out = _subtitle_cues(tmp_path, asr)
+    assert out == [{"start": 1.9, "end": 4.0, "text": "I bet you cannot."}]

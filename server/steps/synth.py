@@ -35,8 +35,8 @@ from server.steps.translate import (
     CANNOT_FIT,
     pace_counts,
     reconstruct_script,
-    refit_script_pace,
     rephrase_for_duration,
+    score_pace,
 )
 
 # How far the spoken length may sit from the slot before we act.
@@ -44,6 +44,8 @@ RATIO_KEEP_LO = 0.92   # close enough, leave it
 RATIO_KEEP_HI = 1.08
 RATIO_SOFT_LO = 0.85   # a bit short or long, change the speed
 RATIO_SOFT_HI = 1.15   # past these, ask for a different line
+# A take this short vs the slot is B-roll, not a line that needs padding.
+RATIO_HOLE = 0.35
 
 # One rewrite only. A second one drifts away from the meaning without
 # fitting any better.
@@ -193,16 +195,7 @@ def fit_cue(
             "heard": heard,
         })
 
-    candidates = [(raw, spoken)]
-
-    def predicted(length: float) -> float:
-        """How long this take would be after the speed change."""
-        if length <= 0 or cap <= 0:
-            return length
-        if RATIO_KEEP_LO <= length / cap <= RATIO_KEEP_HI:
-            return length
-        tempo = min(max(length / cap, SOFT_SLOWDOWN), SOFT_SPEEDUP)
-        return length / tempo
+    candidates = [(raw, spoken, line)]
 
     def stretch(path: Path, length: float, why: str) -> Path:
         share = length / cap if cap > 0 else 1.0
@@ -240,28 +233,41 @@ def fit_cue(
 
     def best(why: str) -> Path:
         def score(candidate):
-            _path, length = candidate
-            after = predicted(length)
-            over = max(0.0, after - window)
-            return (over > 0.02, abs(after - cap), over)
+            _path, length, _text = candidate
+            over = max(0.0, length - window)
+            return (over > 0.02, abs(length - cap), over)
 
-        path, length = min(candidates, key=score)
+        path, length, text = min(candidates, key=score)
+        if stats is not None:
+            stats["spoken_text"] = text
         out = stretch(path, length, why)
         final = duration(out)
         if final < target * 0.92:
             log(f"still short: {final:.2f}s of {target:.2f}s, silence follows")
         return out
 
+    def finish(path: Path, text: str) -> Path:
+        if stats is not None:
+            stats.setdefault("spoken_text", text)
+        return path
+
     # Close enough already.
     if RATIO_KEEP_LO <= ratio <= RATIO_KEEP_HI:
-        return stretch(raw, spoken, "clamp") if spoken > window * 1.001 else raw
+        out = stretch(raw, spoken, "clamp") if spoken > window * 1.001 else raw
+        return finish(out, line)
 
     # A bit off: the speed change alone is enough.
     if RATIO_SOFT_LO <= ratio <= RATIO_SOFT_HI:
-        return stretch(raw, spoken, "small fix")
+        return finish(stretch(raw, spoken, "small fix"), line)
 
     # Far off, and nobody can rewrite it for us.
-    if rewrite is None or MAX_REWRITES < 1:
+    # Tiny slots: the LLM replaces "Water" with a stolen full sentence.
+    # A huge hole is B-roll: stretch the take, leave silence, don't invent.
+    if rewrite is None or MAX_REWRITES < 1 or target < 0.8 or ratio < RATIO_HOLE:
+        if target < 0.8 and rewrite is not None and MAX_REWRITES >= 1:
+            log("slot too short to rewrite, changing the speed instead")
+        elif ratio < RATIO_HOLE:
+            log("slot much longer than the take, leaving silence after")
         return best("clamp")
 
     shorter = ratio > RATIO_SOFT_HI
@@ -276,26 +282,20 @@ def fit_cue(
     second_length = duration(second)
     second_ratio = second_length / target if target > 0 else 1.0
     log(f"spoke {second_length:.2f}s (ratio {second_ratio:.2f})")
-    candidates.append((second, second_length))
 
-    # Asking for something shorter can overshoot into far too short.
-    overshoot = shorter and second_ratio < RATIO_SOFT_LO
-    improved = (
-        abs(predicted(second_length) - cap) < abs(predicted(spoken) - cap) - 1e-6
-    )
-    if overshoot:
-        log(f"the rewrite went too far ({ratio:.2f} to {second_ratio:.2f})")
-        return best("overshoot")
-    if not improved:
+    closer = abs(second_length - cap) < abs(spoken - cap) - 1e-6
+    if not closer:
         log(f"the rewrite fits no better ({ratio:.2f} to {second_ratio:.2f})")
-        return best("no better")
+        return best("clamp")
+
+    candidates.append((second, second_length, new_line))
 
     if RATIO_KEEP_LO <= second_ratio <= RATIO_KEEP_HI:
         if second_length > window * 1.001:
-            return stretch(second, second_length, "clamp")
-        return second
+            return finish(stretch(second, second_length, "clamp"), new_line)
+        return finish(second, new_line)
     if RATIO_SOFT_LO <= second_ratio <= RATIO_SOFT_HI:
-        return stretch(second, second_length, "after rewrite")
+        return finish(stretch(second, second_length, "after rewrite"), new_line)
     return best("final")
 
 
@@ -334,7 +334,12 @@ def timed_speech(
     language_name = script.get("output_lang_name") or ""
     master = script["master_meaning"]
     slots = cue_slots(cues, video_seconds)
-    lines, scores = refit_script_pace(lines, slots, openai_key)
+    # Word-count "too fast" is not VoxCPM's real duration. Do not rewrite
+    # here; fit_cue measures the take and rewrites if the audio is off.
+    scores = [
+        score_pace(line, float(slots[i]["target"]))
+        for i, line in enumerate(lines)
+    ]
     script["cue_translations"] = lines
     script["pace"] = scores
     (work / "dub_script.json").write_text(
@@ -353,6 +358,7 @@ def timed_speech(
         ctx.step(f"Making the voice ({len(spoken_indices)} lines)")
 
     clips: list[tuple[float, Path]] = []
+    spoken_cues: list[dict] = []
     for position, index in enumerate(spoken_indices):
         if ctx is not None:
             ctx.check_cancel()
@@ -389,6 +395,20 @@ def timed_speech(
             scores[index]["spoken_s"] = heard.get("spoken")
             scores[index]["spoken_ratio"] = heard.get("ratio")
         clips.append((slot["start"], fitted))
+        spoken_end = slot["start"] + duration(fitted)
+        spoken_cues.append({
+            "start": round(slot["start"], 3),
+            "end": round(max(spoken_end, slot["start"] + 0.05), 3),
+            "text": heard.get("spoken_text") or line,
+        })
+
+    for index, sub in enumerate(spoken_cues[:-1]):
+        nxt = spoken_cues[index + 1]["start"]
+        if sub["end"] > nxt:
+            sub["end"] = nxt
+    (work / "spoken_cues.json").write_text(
+        json.dumps(spoken_cues, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     script["pace"] = scores
     (work / "dub_script.json").write_text(
@@ -430,7 +450,7 @@ def _report_pace(scores: list, ctx, when: str) -> None:
     """Log how many lines would sound rushed or dragged."""
     key = "heard" if when == "heard" else "verdict"
     counts = pace_counts(scores, key)
-    label = "Heard after TTS" if when == "heard" else "Pace"
+    label = "Heard after TTS" if when == "heard" else "Word-count estimate"
     ctx.log(
         f"{label}: {counts['ok']} ok, {counts['too_fast']} too fast, "
         f"{counts['too_slow']} too slow"

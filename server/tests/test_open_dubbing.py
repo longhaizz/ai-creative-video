@@ -461,6 +461,24 @@ def test_pieces_from_words_carry_speech_bounds():
     assert pieces[0]["text"] == "Hello there."
 
 
+def test_a_one_word_vad_blob_is_clamped_to_speech():
+    """Whisper stamped 'रखूं।' across 22s of B-roll. Slot the word, not the blob."""
+    mod = _od_script()
+    words = [{
+        "word": "रखूं।",
+        "start": 14.602,
+        "end": 37.366,
+        "avg_logprob": -0.04,
+        "no_speech_prob": 0.003,
+    }]
+    pieces = mod._pieces_from_words(words, 14.602, 37.366)
+    assert len(pieces) == 1
+    assert pieces[0]["speech_start"] == 14.602
+    assert pieces[0]["speech_end"] <= 14.602 + 1.5
+    assert pieces[0]["speech_end"] - pieces[0]["speech_start"] <= 1.5
+    assert "रखूं" in pieces[0]["text"]
+
+
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg is not on PATH",
@@ -581,6 +599,84 @@ def test_prefix_crumbs_are_glued_into_the_next_cue():
     glued = next(c for c in out if c["text"] == "You're very kind.")
     assert glued["speech_start"] == 36.16
     assert glued["speech_end"] == 37.36
+
+
+def test_tiny_tail_word_is_dropped():
+    """Arabic leftover 'Water' 0.28s must not be dubbed."""
+    from server.steps.open_dubbing import glue_prefix_crumbs
+
+    cues = [
+        _cue(start=4.7, end=10.7, speech_start=4.7, speech_end=10.7,
+             text="this traffic is for you"),
+        _cue(start=10.7, end=10.98, speech_start=10.7, speech_end=10.98,
+             text="الماء", no_speech_prob=0.13),
+    ]
+    out = glue_prefix_crumbs(cues)
+    assert [c["text"] for c in out] == ["this traffic is for you"]
+
+
+def test_one_word_no_speech_blob_is_dropped():
+    """Hindi 'पूरी' sitting on a 13s empty VAD window."""
+    from server.steps.open_dubbing import glue_prefix_crumbs
+
+    cues = [
+        _cue(start=14.86, end=19.44, speech_start=14.86, speech_end=19.44,
+             text="You will instantly process your fingerprint for results"),
+        _cue(start=19.56, end=33.08, speech_start=19.56, speech_end=33.08,
+             text="पूरी", no_speech_prob=0.97),
+        _cue(start=34.08, end=37.49, speech_start=34.08, speech_end=37.49,
+             text="download and try it free"),
+    ]
+    out = glue_prefix_crumbs(cues)
+    assert [c["text"] for c in out] == [
+        "You will instantly process your fingerprint for results",
+        "download and try it free",
+    ]
+
+
+def test_short_spoken_aside_is_kept():
+    from server.steps.open_dubbing import glue_prefix_crumbs
+
+    cues = [
+        _cue(start=1.44, end=2.08, speech_start=1.44, speech_end=2.08,
+             text="Help me."),
+    ]
+    assert glue_prefix_crumbs(cues)[0]["text"] == "Help me."
+
+
+def test_short_cta_merges_into_the_next_cue():
+    from server.steps.open_dubbing import glue_prefix_crumbs
+
+    cues = [
+        _cue(start=8.26, end=8.63, speech_start=8.26, speech_end=8.63,
+             text="Coba sekarang"),
+        _cue(start=8.906, end=9.814, speech_start=8.906, speech_end=9.814,
+             text="sebelum semua orang tahu."),
+    ]
+    out = glue_prefix_crumbs(cues)
+    assert len(out) == 1
+    assert out[0]["text"] == "Coba sekarang sebelum semua orang tahu."
+    assert out[0]["speech_start"] == 8.26
+    assert out[0]["speech_end"] == 9.814
+
+
+def test_arabic_medium_is_retried_on_large_v3():
+    mod = _od_script()
+    cues = [{"text": "ok line", "avg_logprob": -0.2, "no_speech_prob": 0.1}]
+    quality = mod._asr_quality(cues, 1.0, "ar")
+    assert quality["ok"] is False
+    assert any("ar" in r for r in quality["reasons"])
+
+
+def test_high_no_speech_segment_is_retried():
+    mod = _od_script()
+    cues = [
+        {"text": "hello there friends", "avg_logprob": -0.2, "no_speech_prob": 0.1},
+        {"text": "world today now", "avg_logprob": -0.2, "no_speech_prob": 0.97},
+    ]
+    quality = mod._asr_quality(cues, 1.0, "en")
+    assert quality["ok"] is False
+    assert any("high_no_speech" in r for r in quality["reasons"])
 
 
 def test_prefix_crumbs_do_not_merge_across_speakers():
