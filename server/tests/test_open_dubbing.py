@@ -4,6 +4,8 @@ The child venv is a black box. These tests cover the command line, the JSON
 the child must print, and that original-voice clone uses each cue's ref wav.
 """
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -459,6 +461,45 @@ def test_pieces_from_words_carry_speech_bounds():
     assert pieces[0]["text"] == "Hello there."
 
 
+needs_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg is not on PATH",
+)
+
+
+def _sine(path: Path, db: str, seconds: float = 0.4):
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+            "-af", f"volume={db}", "-c:a", "pcm_s16le", str(path),
+        ],
+        check=True, capture_output=True,
+    )
+
+
+@needs_ffmpeg
+def test_quiet_mix_is_boosted_so_speech_can_be_heard(tmp_path):
+    mod = _od_script()
+    quiet = tmp_path / "quiet.wav"
+    _sine(quiet, "-12dB")
+    before = mod._max_volume_db(quiet)
+    assert before is not None and before < mod.QUIET_PEAK_DB
+    gain = mod._boost_if_quiet(quiet)
+    assert gain >= 1.0
+    after = mod._max_volume_db(quiet)
+    assert after is not None and after > before + 5
+
+
+@needs_ffmpeg
+def test_already_loud_mix_is_left_alone(tmp_path):
+    mod = _od_script()
+    loud = tmp_path / "loud.wav"
+    _sine(loud, "16dB")
+    gain = mod._boost_if_quiet(loud)
+    assert gain == 0.0
+
+
 def test_cues_from_payload_use_speech_bounds(monkeypatch, tmp_path):
     vocals = tmp_path / "vocals.wav"
     music = tmp_path / "no_vocals.wav"
@@ -490,6 +531,104 @@ def test_cues_from_payload_use_speech_bounds(monkeypatch, tmp_path):
     assert cue["speech_end"] == 2.8
     assert cue["avg_logprob"] == -0.4
     assert cue["no_speech_prob"] == 0.05
+
+
+def _cue(**kwargs):
+    item = {
+        "start": 0.0,
+        "end": 1.0,
+        "speech_start": 0.0,
+        "speech_end": 1.0,
+        "speaker_id": "SPEAKER_00",
+        "text": "hi",
+        "avg_logprob": -0.2,
+        "no_speech_prob": 0.05,
+    }
+    item.update(kwargs)
+    return item
+
+
+def test_prefix_crumbs_are_glued_into_the_next_cue():
+    from server.steps.open_dubbing import glue_prefix_crumbs
+
+    cues = [
+        _cue(start=28.04, end=28.82, speech_start=28.04, speech_end=28.82,
+             text="I gotta go."),
+        _cue(start=29.14, end=29.8, speech_start=29.14, speech_end=29.8,
+             text="Ikutin aku."),
+        _cue(start=30.0, end=30.166, speech_start=30.0, speech_end=30.166,
+             text="I"),
+        _cue(start=30.346, end=31.02, speech_start=30.346, speech_end=31.02,
+             text="I gotta go."),
+        _cue(start=36.16, end=36.214, speech_start=36.16, speech_end=36.214,
+             text="You're"),
+        _cue(start=36.362, end=37.36, speech_start=36.362, speech_end=37.36,
+             text="You're very kind."),
+        _cue(start=64.33, end=65.42, speech_start=64.33, speech_end=65.42,
+             text="Today is very cold."),
+        _cue(start=65.42, end=65.718, speech_start=65.42, speech_end=65.718,
+             text="Ikitin", no_speech_prob=0.998),
+    ]
+    out = glue_prefix_crumbs(cues)
+    texts = [c["text"] for c in out]
+    assert texts == [
+        "I gotta go.",
+        "Ikutin aku.",
+        "I gotta go.",
+        "You're very kind.",
+        "Today is very cold.",
+    ]
+    glued = next(c for c in out if c["text"] == "You're very kind.")
+    assert glued["speech_start"] == 36.16
+    assert glued["speech_end"] == 37.36
+
+
+def test_prefix_crumbs_do_not_merge_across_speakers():
+    from server.steps.open_dubbing import glue_prefix_crumbs
+
+    cues = [
+        _cue(start=2.28, end=2.55, speech_start=2.28, speech_end=2.55,
+             speaker_id="SPEAKER_01", text="Kalau"),
+        _cue(start=2.634, end=3.42, speech_start=2.634, speech_end=3.42,
+             speaker_id="SPEAKER_02", text="Kalau kasih tahu saya?"),
+    ]
+    out = glue_prefix_crumbs(cues)
+    assert [c["text"] for c in out] == ["Kalau", "Kalau kasih tahu saya?"]
+
+
+def test_cues_from_payload_glues_prefix_crumbs(monkeypatch, tmp_path):
+    vocals = tmp_path / "vocals.wav"
+    music = tmp_path / "no_vocals.wav"
+    vocals.write_bytes(b"v")
+    music.write_bytes(b"m")
+    monkeypatch.setattr(
+        "server.steps.open_dubbing.pad_reference",
+        lambda src, start, end, dest: Path(dest),
+    )
+    result = cues_from_payload(
+        {
+            "vocals": str(vocals),
+            "no_vocals": str(music),
+            "utterances": [
+                {
+                    "start": 30.0, "end": 30.166,
+                    "speech_start": 30.0, "speech_end": 30.166,
+                    "speaker_id": "SPEAKER_00", "text": "I",
+                    "avg_logprob": -0.2, "no_speech_prob": 0.05,
+                },
+                {
+                    "start": 30.346, "end": 31.02,
+                    "speech_start": 30.346, "speech_end": 31.02,
+                    "speaker_id": "SPEAKER_00", "text": "I gotta go.",
+                    "avg_logprob": -0.2, "no_speech_prob": 0.05,
+                },
+            ],
+        },
+        tmp_path,
+    )
+    assert len(result["cues"]) == 1
+    assert result["cues"][0]["text"] == "I gotta go."
+    assert result["cues"][0]["speech_start"] == 30.0
 
 
 def test_word_timestamps_keep_the_gaps_between_sentences():
@@ -663,6 +802,10 @@ def test_dub_runs_vsr_then_od_then_lipsync(monkeypatch, tmp_path):
     monkeypatch.setattr("server.pipeline.audio.suppress_vocal_bleed", fake_bleed)
     monkeypatch.setattr("server.steps.synth.timed_speech", fake_timed)
     monkeypatch.setattr("server.pipeline.audio.mix_audio", fake_mix)
+    monkeypatch.setattr(
+        "server.pipeline.audio.make_audible",
+        lambda src, dest: Path(dest).write_bytes(Path(src).read_bytes()) or Path(dest),
+    )
     monkeypatch.setattr("server.pipeline.audio.mux_audio", fake_mux)
 
     result = _dub(Ctx(), Models(voice=Voice(), lipsync=Lipsync()))
@@ -742,6 +885,10 @@ def test_uploaded_reference_wins_over_cue_ref(monkeypatch, tmp_path):
         return Path(dest)
 
     monkeypatch.setattr("server.pipeline.audio.mix_audio", fake_mix)
+    monkeypatch.setattr(
+        "server.pipeline.audio.make_audible",
+        lambda src, dest: Path(dest).write_bytes(Path(src).read_bytes()) or Path(dest),
+    )
     monkeypatch.setattr("server.pipeline.audio.mux_audio", fake_mux)
 
     _dub(Ctx(), Models(voice=Voice(), lipsync=None))

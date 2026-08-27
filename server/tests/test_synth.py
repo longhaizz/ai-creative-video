@@ -253,3 +253,53 @@ def test_the_keep_band_is_the_one_the_code_uses(tmp_path):
 
 def test_the_bands_make_sense():
     assert RATIO_KEEP_LO < 1.0 < RATIO_KEEP_HI
+
+
+def test_refit_script_pace_rewrites_a_packed_line(monkeypatch):
+    from server.steps.translate import refit_script_pace, score_pace
+
+    packed = " ".join(["word"] * 20)
+    assert score_pace(packed, 2.0)["verdict"] == "too_fast"
+
+    monkeypatch.setattr(
+        "server.steps.translate.fit_length",
+        lambda text, tw, key, model="x": "one two three four five",
+    )
+    out, scores = refit_script_pace(
+        [packed, "one two three four five"],
+        [{"target": 2.0}, {"target": 2.0}],
+        "k",
+    )
+    assert out[0] == "one two three four five"
+    assert scores[0]["rewritten"] is True
+    assert scores[0]["after"]["verdict"] == "ok"
+    assert out[1] == "one two three four five"
+    assert scores[1]["rewritten"] is False
+
+
+def _mean_volume_db(path):
+    result = subprocess.run(
+        ["ffmpeg", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    import re
+    match = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", result.stderr or "")
+    assert match, result.stderr[-200:]
+    return float(match.group(1))
+
+
+@needs_ffmpeg
+def test_make_audible_raises_a_quiet_mix(tmp_path):
+    from server.steps.audio import make_audible
+
+    quiet = tmp_path / "quiet.wav"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+            "-af", "volume=-24dB", "-c:a", "pcm_s16le", str(quiet),
+        ],
+        check=True, capture_output=True,
+    )
+    out = make_audible(quiet, tmp_path / "loud.wav")
+    assert _mean_volume_db(out) > _mean_volume_db(quiet) + 8
