@@ -650,6 +650,43 @@ def _latin_wordset(text: str) -> set:
     return {w.casefold() for w in re.findall(r"[A-Za-z]{3,}", text or "")}
 
 
+_EN_HINTS = {
+    "the", "you", "your", "me", "my", "and", "now", "please", "help", "time",
+    "more", "very", "gotta", "let", "see", "what", "mean", "today", "cold",
+    "easy", "kind", "trust", "tell", "only", "english", "have", "ever",
+    "heard", "from", "talking", "like", "native", "one", "peasy",
+}
+
+
+def _looks_english(text: str) -> bool:
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    if len(words) < 1:
+        return False
+    hits = sum(1 for w in words if w in _EN_HINTS)
+    return hits >= 1 and hits / len(words) >= 0.25
+
+
+def _is_bilingual_echo(index: int, segs, cues) -> bool:
+    """Empty slot whose ASR is the other-language repeat of a neighbour."""
+    segs = list(segs or [])
+    cues = list(cues or [])
+    if index < 0 or index >= len(segs):
+        return False
+    asr_w = _latin_wordset(segs[index].get("text") or "")
+    if not asr_w:
+        return False
+    for j in (index - 1, index + 1):
+        if j < 0 or j >= len(cues):
+            continue
+        neighbor = (cues[j] or "").strip()
+        if not neighbor:
+            continue
+        other = _latin_wordset(neighbor)
+        if other and len(asr_w & other) / max(len(asr_w), 1) >= 0.4:
+            return True
+    return False
+
+
 def _align_overlap_score(lines, segs) -> int:
     """How many non-empty lines share Latin words with their ASR cue."""
     score = 0
@@ -1208,7 +1245,9 @@ def _fill_empty_cues(script: dict, segs, empty_idxs: list, lang_name: str,
 
     silent_idxs = []
     fill_idxs = []
+    filled_idxs = []
     crumb_idxs = set(_crumb_indices(segs))
+    copy_english = (lang_name or "").lower().startswith("english")
     for i in empty_idxs:
         asr = (segs[i].get("text") or "").replace("\n", " ").strip()
         prev = segs[i - 1] if i else None
@@ -1216,16 +1255,19 @@ def _fill_empty_cues(script: dict, segs, empty_idxs: list, lang_name: str,
             i in crumb_idxs
             or _asr_is_one_word_continuation(segs[i], prev)
             or _asr_empty_should_stay_silent(asr, master_t)
+            or _is_bilingual_echo(i, segs, merged)
         ):
             silent_idxs.append(i)
             merged[i] = ""
             for tag in (f"garbled_asr[{i}]", f"empty_cue[{i}]"):
                 if tag not in unc:
                     unc.append(tag)
+        elif copy_english and _looks_english(asr):
+            merged[i] = asr
+            filled_idxs.append(i)
         else:
             fill_idxs.append(i)
 
-    filled_idxs = []
     if fill_idxs:
         asr_bits = []
         for i in fill_idxs:
@@ -1260,23 +1302,31 @@ def _fill_empty_cues(script: dict, segs, empty_idxs: list, lang_name: str,
         data = _extract_json(raw)
         fixed = data.get("cue_translations")
         if not isinstance(fixed, list) or len(fixed) != n:
-            raise OpenAIError(
-                f"empty-cue fill trả cue_translations sai độ dài (cần {n})")
-        for i in fill_idxs:
-            new_t = (
-                fixed[i] if isinstance(fixed[i], str) else str(fixed[i] or "")
-            ).strip()
-            if new_t:
-                merged[i] = new_t
-                filled_idxs.append(i)
-            else:
-                merged[i] = ""
+            aligned = _align_cue_count(
+                fixed if isinstance(fixed, list) else [], segs, n)
+            fixed = aligned if aligned is not None else None
+        if isinstance(fixed, list) and len(fixed) == n:
+            for i in fill_idxs:
+                new_t = (
+                    fixed[i] if isinstance(fixed[i], str)
+                    else str(fixed[i] or "")
+                ).strip()
+                if new_t:
+                    merged[i] = new_t
+                    filled_idxs.append(i)
+                else:
+                    merged[i] = ""
+                    tag = f"empty_cue[{i}]"
+                    if tag not in unc:
+                        unc.append(tag)
+            for u in data.get("uncertain_spans") or []:
+                if u not in unc:
+                    unc.append(u)
+        else:
+            for i in fill_idxs:
                 tag = f"empty_cue[{i}]"
                 if tag not in unc:
                     unc.append(tag)
-        for u in data.get("uncertain_spans") or []:
-            if u not in unc:
-                unc.append(u)
 
     # Post-guard: index silent/garbled không được có text
     for i in silent_idxs:
@@ -1625,6 +1675,82 @@ def _selfcheck():
     finally:
         globals()["_chat"] = real_chat
     assert filled["cue_translations"][1] == ""
+    assert _looks_english("Help me.")
+    assert _looks_english("I gotta go.")
+    assert not _looks_english("Ikutin aku.")
+    segs_echo = [
+        {"start": 0, "end": 1.3, "speech_start": 0, "speech_end": 1.3,
+         "speaker_id": "SPEAKER_01", "text": "Tolong saya.",
+         "no_speech_prob": 0.05},
+        {"start": 1.6, "end": 2.6, "speech_start": 1.6, "speech_end": 2.6,
+         "speaker_id": "SPEAKER_03", "text": "Help me.",
+         "no_speech_prob": 0.05},
+    ]
+    script_echo = {
+        "cue_translations": ["Help me.", ""],
+        "master_translation": "Help me.",
+        "master_meaning": "drill",
+        "uncertain_spans": [],
+    }
+    globals()["_chat"] = _no_fill
+    try:
+        filled_echo = _fill_empty_cues(
+            script_echo, segs_echo, [1], "English", "k")
+    finally:
+        globals()["_chat"] = real_chat
+    assert filled_echo["cue_translations"] == ["Help me.", ""]
+    segs_copy = [
+        {"start": 0, "end": 1, "speech_start": 0, "speech_end": 1,
+         "speaker_id": "SPEAKER_03", "text": "Help me.",
+         "no_speech_prob": 0.05},
+        {"start": 2, "end": 3, "speech_start": 2, "speech_end": 3,
+         "speaker_id": "SPEAKER_00", "text": "Ikutin aku.",
+         "no_speech_prob": 0.05},
+    ]
+    script_copy = {
+        "cue_translations": ["", "Follow me."],
+        "master_translation": "Help me. Follow me.",
+        "master_meaning": "drill",
+        "uncertain_spans": [],
+    }
+    globals()["_chat"] = _no_fill
+    try:
+        filled_copy = _fill_empty_cues(
+            script_copy, segs_copy, [0], "English", "k")
+    finally:
+        globals()["_chat"] = real_chat
+    assert filled_copy["cue_translations"][0] == "Help me."
+    segs_short = [
+        {"start": 0, "end": 2, "speech_start": 0, "speech_end": 2,
+         "speaker_id": "SPEAKER_00",
+         "text": "Butuh pinjaman tapi takut bunganya besar?",
+         "no_speech_prob": 0.05},
+        {"start": 2, "end": 4, "speech_start": 2, "speech_end": 4,
+         "speaker_id": "SPEAKER_00",
+         "text": "Pakai aplikasi ini untuk menghitung bunga.",
+         "no_speech_prob": 0.05},
+        {"start": 4, "end": 5, "speech_start": 4, "speech_end": 5,
+         "speaker_id": "SPEAKER_00", "text": "Klik tombol sekarang.",
+         "no_speech_prob": 0.05},
+    ]
+    script_short = {
+        "cue_translations": ["Need a loan?", "", "Click now."],
+        "master_translation": "Need a loan? Use the app. Click now.",
+        "master_meaning": "loan app",
+        "uncertain_spans": [],
+    }
+    def _short_fill(*_a, **_k):
+        return (
+            '{"cue_translations": ["Need a loan?", "Use the app."], '
+            '"uncertain_spans": []}'
+        )
+    globals()["_chat"] = _short_fill
+    try:
+        filled_short = _fill_empty_cues(
+            script_short, segs_short, [1], "English", "k")
+    finally:
+        globals()["_chat"] = real_chat
+    assert len(filled_short["cue_translations"]) == 3
     assert _asr_empty_should_stay_silent(
         "Sing Jemah kanil, tapi cepetan selamat tinggi.")
     assert not _asr_empty_should_stay_silent(
