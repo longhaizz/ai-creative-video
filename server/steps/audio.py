@@ -14,6 +14,9 @@ from pathlib import Path
 from server import config
 from server.jobs import PipelineError
 
+# Social/mobile ads: clearly audible without clipping.
+OUTPUT_LUFS = -14.0
+
 
 def run_ffmpeg(command: list[str]) -> str:
     result = subprocess.run(command, capture_output=True, text=True)
@@ -116,6 +119,23 @@ def mix_audio(voice, music, out_wav, music_gain: float = 1.0, seconds=None) -> P
             "-map", "[a]", "-c:a", "pcm_s16le", str(out_wav),
         ])
     return out_wav
+
+
+def make_audible(src, dest) -> Path:
+    """Raise the mix to a loud, even level so the output is easy to hear.
+
+    EBU R128 at -14 LUFS matches phone / social-video playback. Always run:
+    a quiet clone or a quiet music bed would otherwise leave the mp4 thin.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    run_ffmpeg([
+        config.FFMPEG_BIN, "-y", "-loglevel", "error",
+        "-i", str(src),
+        "-af", f"loudnorm=I={OUTPUT_LUFS}:TP=-1.5:LRA=11",
+        "-c:a", "pcm_s16le", str(dest),
+    ])
+    return dest
 
 
 def mux_audio(video, audio, out_mp4) -> Path:

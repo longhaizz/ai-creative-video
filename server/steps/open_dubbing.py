@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -25,6 +26,13 @@ from server.steps import audio
 LOG_EVERY_SECONDS = 2.0
 TAIL_LINES = 25
 MIN_REF_SECONDS = 3.0
+# Whisper often leaves a 50–300ms first-word crumb ("I", "You're", "Easy")
+# on the previous VAD cut, then the full phrase in the next window. TTS
+# cannot speak those, and the rewrite model merges them and returns the
+# wrong cue_translations length.
+PREFIX_CRUMB_SECONDS = 0.35
+PREFIX_CRUMB_GAP_SECONDS = 0.8
+NO_SPEECH_CRUMB = 0.9
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "open_dubbing_segment.py"
 
@@ -158,6 +166,10 @@ def cues_from_payload(payload: dict, out_dir: Path) -> dict:
             ),
         })
 
+    cues = glue_prefix_crumbs(cues)
+    if not cues:
+        raise PipelineError("No speech was found in the video", code="invalid_input")
+
     refs = {}
     for speaker in dict.fromkeys(cue["speaker_id"] for cue in cues):
         spans = [(c["start"], c["end"]) for c in cues if c["speaker_id"] == speaker]
@@ -174,6 +186,81 @@ def cues_from_payload(payload: dict, out_dir: Path) -> dict:
         "whisper_model": payload.get("whisper_model") or "",
     }
     return {"cues": cues, "meta": meta, "vocals": vocals, "music": music}
+
+
+def _plain_cue_text(text: str) -> str:
+    return re.sub(r"[^\w]+", "", (text or ""), flags=re.UNICODE).casefold()
+
+
+def _speech_dur(cue: dict) -> float:
+    start = float(cue.get("speech_start", cue["start"]))
+    end = float(cue.get("speech_end", cue["end"]))
+    return max(end - start, 0.0)
+
+
+def is_prefix_crumb(short: dict, full: dict) -> bool:
+    """True when `short` is a leftover first-word of `full` (same speaker)."""
+    if (short.get("speaker_id") or "SPEAKER_00") != (
+            full.get("speaker_id") or "SPEAKER_00"):
+        return False
+    if _speech_dur(short) > PREFIX_CRUMB_SECONDS:
+        return False
+    short_text = (short.get("text") or "").strip()
+    full_text = (full.get("text") or "").strip()
+    if not short_text or not full_text:
+        return False
+    if len(short_text.split()) > 2:
+        return False
+    plain_short = _plain_cue_text(short_text)
+    plain_full = _plain_cue_text(full_text)
+    if not plain_short or plain_short == plain_full:
+        return False
+    if not plain_full.startswith(plain_short):
+        return False
+    gap = float(full.get("start", 0)) - float(short.get("end", 0))
+    return -0.05 <= gap <= PREFIX_CRUMB_GAP_SECONDS
+
+
+def is_no_speech_crumb(cue: dict) -> bool:
+    if float(cue.get("no_speech_prob") or 0) < NO_SPEECH_CRUMB:
+        return False
+    if _speech_dur(cue) > 0.5:
+        return False
+    return len((cue.get("text") or "").split()) <= 2
+
+
+def _merge_crumb_into(crumb: dict, full: dict) -> dict:
+    out = dict(full)
+    out["start"] = min(float(crumb["start"]), float(full["start"]))
+    out["end"] = max(float(crumb["end"]), float(full["end"]))
+    out["speech_start"] = min(
+        float(crumb.get("speech_start", crumb["start"])),
+        float(full.get("speech_start", full["start"])),
+    )
+    out["speech_end"] = max(
+        float(crumb.get("speech_end", crumb["end"])),
+        float(full.get("speech_end", full["end"])),
+    )
+    out["no_speech_prob"] = min(
+        float(crumb.get("no_speech_prob") or 1.0),
+        float(full.get("no_speech_prob") or 1.0),
+    )
+    return out
+
+
+def glue_prefix_crumbs(cues: list[dict]) -> list[dict]:
+    """Fold Whisper leftover prefixes into the following full phrase."""
+    items = [dict(cue) for cue in cues]
+    index = 0
+    while index < len(items) - 1:
+        if is_prefix_crumb(items[index], items[index + 1]):
+            items[index + 1] = _merge_crumb_into(items[index], items[index + 1])
+            del items[index]
+            if index:
+                index -= 1
+            continue
+        index += 1
+    return [cue for cue in items if not is_no_speech_crumb(cue)]
 
 
 def reference_for_spans(

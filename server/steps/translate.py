@@ -84,6 +84,72 @@ def _in_band(n: int, target: int) -> bool:
     return lo <= n <= hi
 
 
+def score_pace(text: str, seconds: float) -> dict:
+    """Will this line sound rushed or dragged in a slot of `seconds`?
+
+    too_fast = too many words (TTS will be sped up).
+    too_slow = too few words in a real slot (TTS will be stretched / gap).
+    Short asides (<1s) are never too_slow: 'Help me.' in 0.6s is correct.
+    """
+    text = (text or "").strip()
+    slot = max(float(seconds or 0), 0.0)
+    words = word_count(text)
+    estimated = words / WORDS_PER_SECOND if words else 0.0
+    if not text:
+        return {
+            "verdict": "silent",
+            "words": 0,
+            "slot_s": round(slot, 3),
+            "estimated_s": 0.0,
+            "ratio": 0.0,
+        }
+    ratio = estimated / slot if slot > 0 else 1.0
+    if ratio > 1 + WORD_BAND and (slot >= 1.0 or words >= 8):
+        verdict = "too_fast"
+    elif slot >= 1.0 and ratio < 1 - WORD_BAND:
+        verdict = "too_slow"
+    else:
+        verdict = "ok"
+    return {
+        "verdict": verdict,
+        "words": words,
+        "slot_s": round(slot, 3),
+        "estimated_s": round(estimated, 3),
+        "ratio": round(ratio, 3),
+    }
+
+
+def refit_script_pace(lines, slots, api_key: str,
+                      model: str = DEFAULT_MODEL) -> tuple:
+    """Rewrite out-of-band cue_translations once. Returns (lines, scores)."""
+    out = list(lines)
+    scores = []
+    for i, line in enumerate(out):
+        seconds = float(slots[i]["target"]) if i < len(slots) else 0.0
+        score = score_pace(line, seconds)
+        if score["verdict"] in ("too_fast", "too_slow") and (line or "").strip():
+            tw = max(int(seconds * WORDS_PER_SECOND), 1)
+            new = fit_length(line, tw, api_key, model)
+            score["rewritten"] = new != line
+            score["after"] = score_pace(new, seconds)
+            out[i] = new
+        else:
+            score["rewritten"] = False
+        scores.append(score)
+    return out, scores
+
+
+def pace_counts(scores, key: str = "verdict") -> dict:
+    counts = {"ok": 0, "too_fast": 0, "too_slow": 0, "silent": 0}
+    for score in scores or []:
+        verdict = score.get(key) or score.get("verdict") or "ok"
+        if verdict in counts:
+            counts[verdict] += 1
+        else:
+            counts["ok"] += 1
+    return counts
+
+
 def _chat(system: str, user: str, api_key: str, model: str) -> str:
     key = (api_key or "").strip()
     if not key:
@@ -519,6 +585,159 @@ def _cue_translations_from_groups(groups, n_asr: int) -> list:
     return cues
 
 
+def _plain_asr_text(text: str) -> str:
+    return re.sub(r"[^\w]+", "", (text or ""), flags=re.UNICODE).casefold()
+
+
+def _asr_speech_dur(seg: dict) -> float:
+    start = float(seg.get("speech_start", seg.get("start", 0)))
+    end = float(seg.get("speech_end", seg.get("end", start)))
+    return max(end - start, 0.0)
+
+
+def _asr_is_prefix_crumb(short: dict, full: dict) -> bool:
+    if (short.get("speaker_id") or "SPEAKER_00") != (
+            full.get("speaker_id") or "SPEAKER_00"):
+        return False
+    if _asr_speech_dur(short) > 0.35:
+        return False
+    short_text = (short.get("text") or "").strip()
+    full_text = (full.get("text") or "").strip()
+    if not short_text or not full_text or len(short_text.split()) > 2:
+        return False
+    plain_short = _plain_asr_text(short_text)
+    plain_full = _plain_asr_text(full_text)
+    if not plain_short or plain_short == plain_full:
+        return False
+    if not plain_full.startswith(plain_short):
+        return False
+    gap = float(full.get("start", 0)) - float(short.get("end", 0))
+    return -0.05 <= gap <= 0.8
+
+
+def _asr_is_no_speech_crumb(seg: dict) -> bool:
+    if float(seg.get("no_speech_prob") or 0) < 0.9:
+        return False
+    if _asr_speech_dur(seg) > 0.5:
+        return False
+    return len((seg.get("text") or "").split()) <= 2
+
+
+def _crumb_indices(segs) -> list:
+    """ASR slots the rewrite model usually drops (prefix / no-speech crumbs)."""
+    out = []
+    segs = list(segs or [])
+    for i, seg in enumerate(segs):
+        nxt = segs[i + 1] if i + 1 < len(segs) else None
+        if nxt is not None and _asr_is_prefix_crumb(seg, nxt):
+            out.append(i)
+        elif _asr_is_no_speech_crumb(seg):
+            out.append(i)
+    return out
+
+
+def _align_cue_count(raw_cues, segs, n: int):
+    """Insert \"\" on dropped prefix crumbs so length matches ASR.
+
+    The rewrite model often merges 'I' + 'I gotta go' and returns n-k
+    strings. If the shortfall equals those crumbs, restore index lock
+    without another LLM call. None if we cannot do it safely.
+    """
+    if not isinstance(raw_cues, list) or n <= 0:
+        return None
+    if len(raw_cues) == n:
+        return list(raw_cues)
+    if len(raw_cues) > n:
+        extra = raw_cues[n:]
+        if extra and all(not str(t or "").strip() for t in extra):
+            return list(raw_cues[:n])
+        return None
+    need = n - len(raw_cues)
+    crumbs = _crumb_indices(segs)
+    if need > len(crumbs):
+        return None
+    insert_at = set(crumbs[:need])
+    aligned = []
+    src = 0
+    for i in range(n):
+        if i in insert_at:
+            aligned.append("")
+            continue
+        if src >= len(raw_cues):
+            return None
+        aligned.append(raw_cues[src])
+        src += 1
+    if src != len(raw_cues):
+        return None
+    return aligned
+
+
+def _repair_cue_count(data: dict, segs, n: int, api_key: str,
+                      model: str) -> dict:
+    """1 lần: tách lại cue_translations đúng n index."""
+    import json
+    raw = data.get("cue_translations")
+    asr_bits = []
+    for i, seg in enumerate(segs):
+        ss = float(seg.get("speech_start", seg["start"]))
+        se = float(seg.get("speech_end", seg["end"]))
+        asr_bits.append({
+            "index": i,
+            "start": round(ss, 2),
+            "end": round(se, 2),
+            "speaker": seg.get("speaker_id") or "SPEAKER_00",
+            "text": (seg.get("text") or "").replace("\n", " ").strip(),
+        })
+    payload = {
+        "needed": n,
+        "got": len(raw) if isinstance(raw, list) else None,
+        "asr_cues": asr_bits,
+        "cue_translations": raw,
+        "semantic_groups": data.get("semantic_groups") or [],
+        "master_translation": data.get("master_translation") or "",
+    }
+    got = len(raw) if isinstance(raw, list) else "invalid"
+    out = _chat(
+        (
+            f"You returned cue_translations of length {got}; we need EXACTLY "
+            f"{n} strings, index-aligned with ASR cues [0..{n - 1}]. "
+            f"INDEX LOCK: do not merge two ASR cues into one slot. "
+            f"If you merged a short leftover ('I', 'You're', 'Easy') into "
+            f"the following full phrase, put \"\" on the leftover index and "
+            f"keep the full phrase on its original index. "
+            f"Split any merged line back onto the ASR indices it came from. "
+            f"Use \"\" only when that cue has no speech to dub. "
+            f"Return ONLY valid JSON: "
+            f"{{\"cue_translations\": [exactly {n} strings]}}."
+        ),
+        json.dumps(payload, ensure_ascii=False),
+        api_key, model,
+    )
+    parsed = _extract_json(out)
+    fixed = parsed.get("cue_translations")
+    if not isinstance(fixed, list) or len(fixed) != n:
+        raise OpenAIError(
+            f"cue_translations phải có đúng {n} phần tử, "
+            f"nhận {len(fixed) if isinstance(fixed, list) else type(fixed)}")
+    repaired = dict(data)
+    repaired["cue_translations"] = fixed
+    return repaired
+
+
+def _ensure_cue_count(data: dict, segs, n: int, api_key: str,
+                      model: str) -> tuple:
+    """Make cue_translations length == n. Returns (data, 'aligned'|'repaired'|'')."""
+    raw = data.get("cue_translations")
+    if not isinstance(raw, list) or len(raw) == n:
+        return data, ""
+    aligned = _align_cue_count(raw, segs, n)
+    if aligned is not None:
+        out = dict(data)
+        out["cue_translations"] = aligned
+        return out, "aligned"
+    return _repair_cue_count(data, segs, n, api_key, model), "repaired"
+
+
 def _normalize_dub_script(data: dict, n_asr: int) -> dict:
     """Chuẩn hoá + validate reconstruct_script output."""
     groups_in = data.get("semantic_groups") or data.get("segments") or []
@@ -727,7 +946,10 @@ def reconstruct_script(segs, target_lang: str, api_key: str,
         body, api_key, model,
     )
     data = _extract_json(raw)
+    data, count_note = _ensure_cue_count(data, segs, n, api_key, model)
     script = _normalize_dub_script(data, n)
+    script["cue_count_aligned"] = count_note == "aligned"
+    script["cue_count_repaired"] = count_note == "repaired"
     if not script["master_meaning"]:
         script["master_meaning"] = script["master_translation"][:240]
     if not script["master_translation"]:
@@ -1125,6 +1347,15 @@ def _selfcheck():
             raise AssertionError(f"lệch số dòng phải ném: {raw!r}")
     assert target_words(10) == 24 and word_count("a b c") == 3
     assert _in_band(24, 24) and not _in_band(5, 24)
+    packed = " ".join(["word"] * 20)
+    assert score_pace(packed, 2.0)["verdict"] == "too_fast"
+    assert score_pace("Hi there.", 4.0)["verdict"] == "too_slow"
+    assert score_pace("Help me.", 0.6)["verdict"] == "ok"
+    assert score_pace("", 2.0)["verdict"] == "silent"
+    assert score_pace("one two three four five", 2.0)["verdict"] == "ok"
+    assert pace_counts([
+        {"verdict": "too_fast"}, {"verdict": "ok"}, {"heard": "too_slow"},
+    ], "verdict")["too_fast"] == 1
     rule = _length_rule(30)
     assert "30" in rule and "dubbing" in rule.lower()
     assert "supporting detail" not in rule.lower()
@@ -1230,6 +1461,29 @@ def _selfcheck():
     assert "do not merge two asr" in recon_p.lower()
     assert "second-speaker" in recon_p.lower()
     assert "adjacent segments may form one sentence" not in recon_p.lower()
+    # Model merged 'I' + 'I gotta go' → pad the leftover index
+    segs_crumb = [
+        {"start": 1.0, "end": 2.0, "speech_start": 1.0, "speech_end": 2.0,
+         "speaker_id": "SPEAKER_00", "text": "Hello.", "no_speech_prob": 0.01},
+        {"start": 2.1, "end": 2.2, "speech_start": 2.1, "speech_end": 2.2,
+         "speaker_id": "SPEAKER_00", "text": "I", "no_speech_prob": 0.05},
+        {"start": 2.35, "end": 3.2, "speech_start": 2.35, "speech_end": 3.2,
+         "speaker_id": "SPEAKER_00", "text": "I gotta go.", "no_speech_prob": 0.05},
+        {"start": 3.4, "end": 4.0, "speech_start": 3.4, "speech_end": 4.0,
+         "speaker_id": "SPEAKER_00", "text": "Bye.", "no_speech_prob": 0.01},
+        {"start": 4.1, "end": 4.3, "speech_start": 4.1, "speech_end": 4.3,
+         "speaker_id": "SPEAKER_00", "text": "Ikitin", "no_speech_prob": 0.99},
+    ]
+    padded = _align_cue_count(["Hi.", "I gotta go.", "Bye."], segs_crumb, 5)
+    assert padded == ["Hi.", "", "I gotta go.", "Bye.", ""]
+    same = _align_cue_count(["a", "b", "c", "d", "e"], segs_crumb, 5)
+    assert same == ["a", "b", "c", "d", "e"]
+    assert _align_cue_count(["only", "two"], segs_crumb, 5) is None
+    data_ok, note = _ensure_cue_count(
+        {"cue_translations": ["Hi.", "I gotta go.", "Bye."]},
+        segs_crumb, 5, "k", "m")
+    assert note == "aligned"
+    assert data_ok["cue_translations"][1] == ""
     # Empty ASR cue helper + garbled → silence
     segs_e = [
         {"text": "hello there friends"},
