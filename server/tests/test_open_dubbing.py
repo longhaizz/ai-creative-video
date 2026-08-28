@@ -382,6 +382,8 @@ def test_language_is_detected_once_and_locked_on_every_cue():
     assert "_detect_language" in src
     assert "mix_16k" in src
     assert "_orphan_word_windows" in src
+    assert "_transcribe_gaps" in src
+    assert "_fill_word_gaps" in inspect.getsource(mod._transcribe_full)
 
 
 def test_merge_intervals_unions_mix_and_vocals_vad():
@@ -431,6 +433,43 @@ def test_orphan_windows_skip_b_roll_stamps_and_no_speech():
         {"word": "there", "start": 20.2, "end": 20.5, "no_speech_prob": 0.97},
     ]
     assert mod._orphan_word_windows(words, windows) == []
+
+
+def test_quiet_multi_word_hole_still_becomes_a_window():
+    """Hindi medium pass marks middle VO as no-speech; it is still speech."""
+    mod = _od_script()
+    windows = [(0.0, 8.2), (30.0, 37.1)]
+    words = [
+        {"word": "उंगली", "start": 12.5, "end": 12.9, "no_speech_prob": 0.91},
+        {"word": "रखें", "start": 12.9, "end": 13.3, "no_speech_prob": 0.91},
+        {"word": "स्क्रीन", "start": 13.3, "end": 13.8, "no_speech_prob": 0.91},
+        {"word": "पर।", "start": 13.8, "end": 14.1, "no_speech_prob": 0.91},
+    ]
+    extra = mod._orphan_word_windows(words, windows)
+    assert extra == [(12.5, 14.1)]
+
+
+def test_fill_word_gaps_keeps_medium_words_large_v3_dropped():
+    mod = _od_script()
+    retry = [
+        {"word": "Start", "start": 0.2, "end": 0.6, "no_speech_prob": 0.04},
+        {"word": "End", "start": 30.2, "end": 30.6, "no_speech_prob": 0.04},
+    ]
+    first = retry + [
+        {"word": "Use", "start": 12.5, "end": 12.8, "no_speech_prob": 0.88},
+        {"word": " this", "start": 12.8, "end": 13.1, "no_speech_prob": 0.88},
+        {"word": " app.", "start": 13.1, "end": 13.5, "no_speech_prob": 0.88},
+        {"word": "रखूं।", "start": 20.0, "end": 37.0, "no_speech_prob": 0.003},
+    ]
+    merged = mod._fill_word_gaps(retry, first)
+    texts = [item["word"].strip() for item in merged]
+    assert texts == ["Start", "Use", "this", "app.", "End"]
+
+
+def test_timeline_gaps_are_the_silent_middle():
+    mod = _od_script()
+    gaps = mod._timeline_gaps(37.8, [(0.0, 9.4), (30.0, 37.0)])
+    assert gaps == [(9.4, 30.0)]
 
 
 def test_transcribe_kwargs_lock_language_and_beam():

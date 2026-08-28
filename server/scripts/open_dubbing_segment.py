@@ -124,8 +124,6 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
 
     turns = _diarize(vocals_16k, token)
 
-    from faster_whisper import WhisperModel
-
     model = _load_whisper(whisper_size)
     # Mix, not vocals: Demucs often parks quiet VO in accompaniment, and
     # Hindi B-roll then looks like silence so the middle of the ad is dropped.
@@ -133,6 +131,15 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
     model, segments, all_words, language_probability, whisper_used = _transcribe_full(
         model, mix_16k, language, language_probability, whisper_size,
     )
+    gaps = _timeline_gaps(_wav_seconds(mix_16k), _word_spans(all_words))
+    if gaps:
+        print(
+            f"Re-reading {len(gaps)} quiet gap(s) without a language lock",
+            file=sys.stderr,
+        )
+        extra = _transcribe_gaps(model, mix_16k, gaps)
+        if extra:
+            all_words = sorted(all_words + extra, key=lambda w: w["start"])
     orphan = _orphan_word_windows(all_words, vad_windows)
     if orphan:
         print(
@@ -388,6 +395,7 @@ def _transcribe_full(model, wav: Path, language: str, language_probability: floa
             f"retrying with {RETRY_WHISPER_MODEL}",
             file=sys.stderr,
         )
+        first_words = _flatten_words(segments)
         model = _load_whisper(RETRY_WHISPER_MODEL)
         segments, info = _run_transcribe(model, wav, language)
         language_probability = float(
@@ -395,6 +403,15 @@ def _transcribe_full(model, wav: Path, language: str, language_probability: floa
             or language_probability
         )
         used = RETRY_WHISPER_MODEL
+        words = _fill_word_gaps(_flatten_words(segments), first_words)
+        kept = len(words) - len(_flatten_words(segments))
+        if kept > 0:
+            print(
+                f"Kept {kept} first-pass word(s) in gaps "
+                f"{RETRY_WHISPER_MODEL} skipped",
+                file=sys.stderr,
+            )
+        return model, segments, words, language_probability, used
 
     return model, segments, _flatten_words(segments), language_probability, used
 
@@ -438,19 +455,22 @@ def _orphan_word_windows(words, windows) -> list[tuple[float, float]]:
     """Whisper word clusters that VAD never marked as speech.
 
     Demucs/VAD miss quiet middle VO; Whisper on the mix still timestamps it.
-    Skip high no-speech and one-token B-roll stamps (Hindi 'रखूं।' × 22s).
+    Skip one-token B-roll stamps (Hindi 'रखूं।' × 22s). Quiet real VO can
+    have high no_speech; keep those if the cluster is a real phrase.
     """
     orphans = []
     for word in words or []:
-        if float(word.get("no_speech_prob") or 0) > 0.65:
-            continue
         start = float(word["start"])
         end = _clamp_word_end(start, float(word["end"]))
         if end - start < 0.04:
             continue
         if _overlaps_any(start, end, windows):
             continue
-        orphans.append({"start": start, "end": end})
+        orphans.append({
+            "start": start,
+            "end": end,
+            "nsp": float(word.get("no_speech_prob") or 0),
+        })
     if not orphans:
         return []
     clusters = [[orphans[0]]]
@@ -463,11 +483,101 @@ def _orphan_word_windows(words, windows) -> list[tuple[float, float]]:
     for group in clusters:
         if len(group) < 2:
             continue
+        avg_nsp = sum(item["nsp"] for item in group) / len(group)
+        if avg_nsp > 0.65 and len(group) < 3:
+            continue
         start, end = group[0]["start"], group[-1]["end"]
         if end - start < 0.3:
             continue
         out.append((start, end))
     return out
+
+
+def _wav_seconds(path: Path) -> float:
+    import wave
+    with wave.open(str(path), "rb") as handle:
+        rate = handle.getframerate() or 1
+        return handle.getnframes() / float(rate)
+
+
+def _word_spans(words, join_gap: float = 0.6) -> list[tuple[float, float]]:
+    pairs = []
+    for word in words or []:
+        start = float(word["start"])
+        end = _clamp_word_end(start, float(word["end"]))
+        if end > start:
+            pairs.append((start, end))
+    return _merge_intervals([pairs], join_gap=join_gap)
+
+
+def _timeline_gaps(total: float, spans, min_seconds: float = 1.5):
+    """Holes on the timeline with no Whisper words."""
+    covered = _merge_intervals([list(spans or [])], join_gap=0.0)
+    gaps = []
+    cursor = 0.0
+    for start, end in covered:
+        if start - cursor >= min_seconds:
+            gaps.append((cursor, float(start)))
+        cursor = max(cursor, float(end))
+    if float(total) - cursor >= min_seconds:
+        gaps.append((cursor, float(total)))
+    return gaps
+
+
+def _fill_word_gaps(primary, fallback):
+    """Keep first-pass words that the retry left in a hole.
+
+    Hindi large-v3 drops quiet middle VO as no-speech; medium still timed it.
+    """
+    spans = _word_spans(primary)
+    extra = []
+    for word in fallback or []:
+        start = float(word["start"])
+        end = _clamp_word_end(start, float(word["end"]))
+        if end - start < 0.04:
+            continue
+        if _overlaps_any(start, end, spans):
+            continue
+        item = dict(word)
+        item["start"] = start
+        item["end"] = end
+        extra.append(item)
+    if not extra:
+        return list(primary or [])
+    clusters = [[extra[0]]]
+    for word in extra[1:]:
+        if word["start"] - clusters[-1][-1]["end"] <= 0.6:
+            clusters[-1].append(word)
+        else:
+            clusters.append([word])
+    kept = []
+    for group in clusters:
+        if len(group) < 2:
+            continue
+        kept.extend(group)
+    if not kept:
+        return list(primary or [])
+    return sorted(list(primary or []) + kept, key=lambda item: item["start"])
+
+
+def _transcribe_gaps(model, wav: Path, gaps) -> list[dict]:
+    """Unlocked Whisper on timeline holes (English demo VO inside a Hindi ad)."""
+    extra = []
+    parent = Path(wav).parent
+    for index, (start, end) in enumerate(gaps or []):
+        if end - start < 1.5:
+            continue
+        cut = parent / f"gap_{index:02d}.wav"
+        _cut(wav, start, end, cut)
+        segments, _info = _run_transcribe(model, cut, "")
+        for word in _flatten_words(segments):
+            token_start = float(word["start"]) + start
+            token_end = float(word["end"]) + start
+            item = dict(word)
+            item["start"] = token_start
+            item["end"] = _clamp_word_end(token_start, token_end)
+            extra.append(item)
+    return _fill_word_gaps([], extra)
 
 
 def _assign_words_to_windows(
