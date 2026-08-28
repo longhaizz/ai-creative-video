@@ -657,6 +657,13 @@ _EN_HINTS = {
     "heard", "from", "talking", "like", "native", "one", "peasy",
 }
 
+_ID_HINTS = {
+    "aku", "kamu", "saya", "yang", "dan", "ini", "itu", "tidak", "bisa",
+    "dengan", "untuk", "kalau", "tolong", "lalu", "bulan", "bahasa",
+    "ingin", "bukan", "sudah", "masih", "juga", "dari", "pada", "ada",
+    "ikutin", "coba", "sekarang", "sebelum", "nggak", "gak", "nya",
+}
+
 
 def _looks_english(text: str) -> bool:
     words = re.findall(r"[a-z']+", (text or "").lower())
@@ -664,6 +671,14 @@ def _looks_english(text: str) -> bool:
         return False
     hits = sum(1 for w in words if w in _EN_HINTS)
     return hits >= 1 and hits / len(words) >= 0.25
+
+
+def _is_english_only_line(text: str) -> bool:
+    """True when the ASR cue is an English teaching line, not mixed ID+EN."""
+    if not _looks_english(text):
+        return False
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    return bool(words) and not any(word in _ID_HINTS for word in words)
 
 
 def _is_bilingual_echo(index: int, segs, cues) -> bool:
@@ -981,16 +996,21 @@ def _reconstruct_system_prompt(*, n: int, lang_name: str, expected_code: str,
         f"gets a short clause, not the whole sentence. Do not merge two ASR "
         f"cues into one cue_translations slot and shift later lines. "
         f"A language-learning echo (source line, then the same line in "
-        f"another language) is TWO ASR cues — keep both indices; put \"\" "
-        f"on the echo if you would otherwise merge them. "
+        f"another language) is TWO ASR cues — keep both indices. If the "
+        f"echo is already English and output is English, copy that "
+        f"wording. Put \"\" on the echo only to avoid merging indices. "
         f"CRITICAL: TTS keeps each ASR cue's original pause timing, so you "
         f"MUST allocate spoken lines into cue_translations — an array of "
         f"exactly {n} strings, index-aligned with ASR cues [0..{n - 1}]. "
         f"Each string is what should be spoken in that cue's speech window; "
         f"use \"\" only if that cue has no speech to dub. "
-        f"DURATION-AWARE: match how much is said to each cue's "
-        f"[speech_start–speech_end] length — do NOT pack most of the "
-        f"script into an early cue when later cues still have time. "
+        f"DURATION-AWARE: each cue header has (~N spoken words). Match that "
+        f"count so a talking-head slot is not left half-silent. Do NOT pack "
+        f"most of the script into an early cue when later cues still have "
+        f"time. "
+        f"If the output language is English and an ASR cue is already "
+        f"English (a language-learning echo like 'Help me.' / 'I gotta go.'), "
+        f"copy that wording — do not paraphrase it. "
         f"cue_translations must only redistribute master_translation — "
         f"no new facts. "
         f"master_translation MUST be the FULL spoken script (every idea "
@@ -1027,8 +1047,17 @@ def reconstruct_script(segs, target_lang: str, api_key: str,
         se = float(s.get("speech_end", s["end"]))
         t = (s.get("text") or "").replace("\n", " ").strip()
         speaker = s.get("speaker_id") or "SPEAKER_00"
-        blocks.append(f"[{i}] [{ss:.2f}-{se:.2f}] {speaker}\n{t}")
+        tw = target_words(max(se - ss, 0.0))
+        blocks.append(
+            f"[{i}] [{ss:.2f}-{se:.2f}] {speaker} (~{tw} spoken words)\n{t}"
+        )
     body = "\n\n".join(blocks)
+    if (asr_meta.get("language") or "").lower() in ("id", "indonesian"):
+        body = (
+            "ASR note: Indonesian 'detik' (seconds) is often heard as "
+            "'dekit' or 'dek' — never translate that as minutes.\n\n"
+            + body
+        )
     lang_det = asr_meta.get("language") or "unknown"
     lang_p = float(asr_meta.get("language_probability") or 0.0)
     conf = asr_meta.get("asr_confidence") or (
@@ -1094,6 +1123,8 @@ def reconstruct_script(segs, target_lang: str, api_key: str,
                 + " | ".join(
                     f"[{i}] {script['cue_translations'][i][:80]}"
                     for i in still))
+
+    script = _restore_english_source_cues(script, segs, lang_name)
 
     script.setdefault("cues_filled", False)
     script.setdefault("cues_filled_indices", [])
@@ -1218,6 +1249,28 @@ def _asr_empty_should_stay_silent(asr_text: str, master_translation: str = "") -
     return False
 
 
+def _restore_english_source_cues(script: dict, segs, lang_name: str) -> dict:
+    """Keep English teaching lines as Whisper heard them, not paraphrased."""
+    if not (lang_name or "").lower().startswith("english"):
+        return script
+    cues = list(script.get("cue_translations") or [])
+    changed = False
+    for i, seg in enumerate(segs or []):
+        if i >= len(cues):
+            break
+        asr = (seg.get("text") or "").replace("\n", " ").strip()
+        if looks_garbled(asr) or not _is_english_only_line(asr):
+            continue
+        if cues[i] != asr:
+            cues[i] = asr
+            changed = True
+    if not changed:
+        return script
+    out = dict(script)
+    out["cue_translations"] = cues
+    return out
+
+
 def _empty_asr_cue_indices(segs, cue_translations) -> list:
     """ASR còn text nhưng cue_translations[i] rỗng."""
     out = []
@@ -1255,16 +1308,21 @@ def _fill_empty_cues(script: dict, segs, empty_idxs: list, lang_name: str,
             i in crumb_idxs
             or _asr_is_one_word_continuation(segs[i], prev)
             or _asr_empty_should_stay_silent(asr, master_t)
-            or _is_bilingual_echo(i, segs, merged)
         ):
             silent_idxs.append(i)
             merged[i] = ""
             for tag in (f"garbled_asr[{i}]", f"empty_cue[{i}]"):
                 if tag not in unc:
                     unc.append(tag)
-        elif copy_english and _looks_english(asr):
+        elif copy_english and _is_english_only_line(asr):
             merged[i] = asr
             filled_idxs.append(i)
+        elif _is_bilingual_echo(i, segs, merged):
+            silent_idxs.append(i)
+            merged[i] = ""
+            for tag in (f"garbled_asr[{i}]", f"empty_cue[{i}]"):
+                if tag not in unc:
+                    unc.append(tag)
         else:
             fill_idxs.append(i)
 
@@ -1698,7 +1756,7 @@ def _selfcheck():
             script_echo, segs_echo, [1], "English", "k")
     finally:
         globals()["_chat"] = real_chat
-    assert filled_echo["cue_translations"] == ["Help me.", ""]
+    assert filled_echo["cue_translations"] == ["Help me.", "Help me."]
     segs_copy = [
         {"start": 0, "end": 1, "speech_start": 0, "speech_end": 1,
          "speaker_id": "SPEAKER_03", "text": "Help me.",
@@ -1720,6 +1778,21 @@ def _selfcheck():
     finally:
         globals()["_chat"] = real_chat
     assert filled_copy["cue_translations"][0] == "Help me."
+    assert _is_english_only_line("Help me.")
+    assert _is_english_only_line("I gotta go.")
+    assert _is_english_only_line("Easy peasy.")
+    assert not _is_english_only_line("Ikutin aku.")
+    assert not _is_english_only_line(
+        "3 bulan lalu, only English I have ever heard was from TV.")
+    restored = _restore_english_source_cues(
+        {"cue_translations": ["Could you assist me?", "Come along with me."]},
+        [
+            {"text": "Help me."},
+            {"text": "Ikutin aku."},
+        ],
+        "English",
+    )
+    assert restored["cue_translations"] == ["Help me.", "Come along with me."]
     segs_short = [
         {"start": 0, "end": 2, "speech_start": 0, "speech_end": 2,
          "speaker_id": "SPEAKER_00",

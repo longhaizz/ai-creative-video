@@ -120,7 +120,13 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
         )
     vad_windows = _merge_intervals([vad_vocals, vad_mix])
     if not vad_windows:
-        raise RuntimeError("No speech was found in the video")
+        print(
+            "VAD heard no speech; retrying with a lower threshold",
+            file=sys.stderr,
+        )
+        vad_vocals = _vad_windows(vocals_16k, threshold=0.3)
+        vad_mix = _vad_windows(mix_16k, threshold=0.3)
+        vad_windows = _merge_intervals([vad_vocals, vad_mix])
 
     turns = _diarize(vocals_16k, token)
 
@@ -147,6 +153,16 @@ def segment(video: Path, out: Path, whisper_size: str, token: str) -> dict:
             file=sys.stderr,
         )
         vad_windows = _merge_intervals([vad_windows, orphan])
+    if not vad_windows:
+        spans = _word_spans(all_words)
+        if spans:
+            print(
+                "VAD heard no speech; using Whisper word times",
+                file=sys.stderr,
+            )
+            vad_windows = spans
+        else:
+            raise RuntimeError("No speech was found in the video")
     # One VAD blob can hold two people ("Tolong…? Help me."). Cut on turns.
     windows = _windows_with_speakers(vad_windows, turns)
 
@@ -976,7 +992,7 @@ def _pieces_from_segments(segments, origin: float, window_end: float):
     return out
 
 
-def _vad_windows(wav: Path) -> list[tuple[float, float]]:
+def _vad_windows(wav: Path, threshold: float = 0.5) -> list[tuple[float, float]]:
     from faster_whisper.audio import decode_audio
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
@@ -986,6 +1002,7 @@ def _vad_windows(wav: Path) -> list[tuple[float, float]]:
         VadOptions(
             min_silence_duration_ms=MIN_SILENCE_MS,
             speech_pad_ms=SPEECH_PAD_MS,
+            threshold=threshold,
         ),
     )
     windows = []
