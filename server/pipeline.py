@@ -5,8 +5,8 @@ The whole job, in order:
     remove the burned-in subtitles   (optional, its own venv)
     split voice from music           (Demucs)
     read speech                      (Whisper, in-process)
-    rewrite and translate            (OpenAI)
-    say every line                   (VoxCPM, one cue at a time)
+    rewrite and translate            (OpenAI, one line per block)
+    say every block                  (VoxCPM, best of a few takes)
     move the mouth                   (LatentSync, optional)
     mix the new voice with the music
     put the sound back on the picture
@@ -26,7 +26,7 @@ from pathlib import Path
 from server import config
 from server.jobs import JobContext, PipelineError
 from server.steps import audio, open_dubbing, separate, subtitle, transcribe, vsr
-from server.steps.lipsync import NoFaceError
+from server.steps.lipsync import NoFaceError, detect_scenes
 from server.steps.synth import with_voice_instruction
 
 
@@ -132,12 +132,25 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             out_wav, params.cfg_value, params.inference_timesteps,
         )
 
+    def listen(wav, lang):
+        """Hear a take back, to judge it and to time its sentences."""
+        if models.whisper is None:
+            return None
+        return transcribe.listen(
+            models.whisper, wav, lang, params.whisper_model)
+
+    # Scene cuts are anchors: the dub is never allowed to drift across
+    # one, because a cut is the moment a viewer checks lips against sound.
+    scenes = detect_scenes(video)
+    ctx.log(f"{len(scenes)} scene cuts")
+
     # Imported here so the module still loads without an OpenAI key present.
     from server.steps.synth import timed_speech
 
     speech = timed_speech(
         cues, work, video_seconds, speak,
         config.OPENAI_API_KEY, params.target_lang, meta=meta, ctx=ctx,
+        listen=listen, scenes=scenes,
     )
     ctx.log(f"Voice track: {audio.duration(speech):.1f}s of {video_seconds:.1f}s")
     ctx.check_cancel()
@@ -209,35 +222,20 @@ def _dub(ctx: JobContext, models: Models) -> Path:
 def _subtitle_cues(work: Path, cues: list[dict]) -> list[dict]:
     """The lines that were actually spoken, timed to the dubbed audio.
 
-    timed_speech writes spoken_cues.json after fit_cue. That is the source
-    of truth: the script in dub_script.json can differ after a rewrite, and
-    ASR windows are often longer than the new take.
+    timed_speech writes spoken_cues.json from the take it used, sentence by
+    sentence. That is the only source of truth: the script can change after
+    a rewrite, and the ASR window is the old speaker's timing, not ours.
     """
     import json
 
-    spoken_path = work / "spoken_cues.json"
-    if spoken_path.is_file():
-        spoken = json.loads(spoken_path.read_text(encoding="utf-8"))
-        return [
-            {
-                "start": float(item["start"]),
-                "end": float(item["end"]),
-                "text": (item.get("text") or "").strip(),
-            }
-            for item in spoken
-            if (item.get("text") or "").strip()
-        ]
-
-    script = json.loads((work / "dub_script.json").read_text(encoding="utf-8"))
-    lines = script.get("cue_translations") or []
-    out = []
-    for index, cue in enumerate(cues):
-        text = (lines[index] if index < len(lines) else "").strip()
-        if not text:
-            continue
-        out.append({
-            "start": float(cue.get("speech_start", cue["start"])),
-            "end": float(cue.get("speech_end", cue["end"])),
-            "text": text,
-        })
-    return out
+    spoken = json.loads(
+        (work / "spoken_cues.json").read_text(encoding="utf-8"))
+    return [
+        {
+            "start": float(item["start"]),
+            "end": float(item["end"]),
+            "text": (item.get("text") or "").strip(),
+        }
+        for item in spoken
+        if (item.get("text") or "").strip()
+    ]

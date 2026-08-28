@@ -285,14 +285,6 @@ def test_subtitles_follow_the_spoken_take_not_the_asr_window(tmp_path):
         json.dumps([{"start": 1.9, "end": 4.0, "text": "I bet you cannot."}]),
         encoding="utf-8",
     )
-    (tmp_path / "dub_script.json").write_text(
-        json.dumps({
-            "cue_translations": [
-                "I bet you won't be able to handle this traffic when we get into the situation.",
-            ],
-        }),
-        encoding="utf-8",
-    )
     asr = [{
         "start": 1.9, "end": 4.4,
         "speech_start": 1.9, "speech_end": 4.4, "text": "ar",

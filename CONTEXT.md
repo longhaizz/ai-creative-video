@@ -30,3 +30,25 @@ _Avoid_: accompaniment, no_vocals as a domain term in new code
 The word-timestamp span inside a Cue used to fit TTS. Tighter than start
 and end, which Whisper often pads.
 _Avoid_: using start/end as the TTS slot
+
+**Block**:
+The speech between two Anchors. One TTS take says a whole Block, so the
+voice keeps one intonation across its sentences.
+_Avoid_: speaking one Cue at a time
+
+**Anchor**:
+The end of a sentence followed by a pause of 0.15s or more, any pause of
+0.8s or more, or a scene cut. Where the dub is put back on the original
+clock. Ads are spoken without real breaks, so the sentence rule is the one
+that fires.
+_Avoid_: treating every Cue boundary as an anchor; expecting long silences
+
+**Drift**:
+How late a Block starts compared to the original. Capped, and never carried
+past the next Anchor. A scene cut allows none.
+_Avoid_: letting drift add up over the video
+
+**Take**:
+One TTS attempt at a Block. Judged by listening to it back with Whisper:
+the words must match, and the length must be possible for those words.
+_Avoid_: keeping the first take unheard

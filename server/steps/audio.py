@@ -138,6 +138,50 @@ def make_audible(src, dest) -> Path:
     return dest
 
 
+# Every take is brought to this level before it is placed, so one block is
+# never louder than the next. The final mix is normalised again later.
+TAKE_LUFS = -18.0
+# Fade at both ends of a take. Long enough to kill the click of a hard cut,
+# short enough that no one hears a fade.
+EDGE_FADE = 0.02
+
+
+def clean_take(src, dest) -> Path:
+    """Make one take ready to sit next to another one.
+
+    Three things, in one pass. The silence the model leaves before and after
+    the words is removed, so the block starts speaking on the beat it was
+    given. The level is evened out. Both edges get a very short fade, so
+    joining two takes makes no click.
+
+    The fades are done with areverse rather than afade=t=out, because
+    fade-out needs the length of the audio and that is only known after the
+    silence has been trimmed.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    trim = ("silenceremove=start_periods=1:start_silence=0.05:"
+            "start_threshold=-45dB:detection=peak")
+    fade = f"afade=t=in:st=0:d={EDGE_FADE}"
+    run_ffmpeg([
+        config.FFMPEG_BIN, "-y", "-loglevel", "error", "-i", str(src),
+        "-af", ",".join([
+            trim,           # silence before the first word
+            "areverse",
+            trim,           # silence after the last word
+            fade,           # which is the fade-out, we are reversed
+            "areverse",
+            fade,           # the fade-in
+            f"loudnorm=I={TAKE_LUFS}:TP=-2:LRA=11",
+            # loudnorm hands back 192kHz. Come straight back to the rate the
+            # mix runs at, so nothing downstream carries four times the data.
+            "aresample=44100",
+        ]),
+        "-c:a", "pcm_s16le", str(dest),
+    ])
+    return dest
+
+
 def mux_audio(video, audio, out_mp4) -> Path:
     """Replace the sound track: picture from input 0, sound from input 1."""
     out_mp4 = Path(out_mp4)

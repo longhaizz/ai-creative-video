@@ -74,6 +74,37 @@ def transcribe(models: WhisperModels, audio: Path, size: str, ctx=None):
     return cues, meta
 
 
+def listen(models: WhisperModels, wav, language: str = "",
+           size: str = "medium") -> dict:
+    """Hear a TTS take back: the words, and when each one was said.
+
+    This is how a take is judged. The model does not know what it was asked
+    to say, so a take that babbles or swallows half the line shows up as
+    text that does not match. The word times then place each sentence.
+    """
+    model = models.get(size)
+    code = (language or "").strip().lower()
+    segments, _info = model.transcribe(
+        str(wav),
+        language=code if len(code) == 2 and code.isalpha() else None,
+        vad_filter=False,
+        word_timestamps=True,
+    )
+    parts = []
+    words = []
+    for segment in segments:
+        text = (segment.text or "").strip()
+        if text:
+            parts.append(text)
+        for word in segment.words or []:
+            words.append({
+                "text": (word.word or "").strip(),
+                "start": float(word.start),
+                "end": float(word.end),
+            })
+    return {"text": " ".join(parts).strip(), "words": words}
+
+
 def _confidence(quality: dict, language_probability: float) -> str:
     if not quality["ok"]:
         return "low"
