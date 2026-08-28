@@ -237,6 +237,21 @@ def test_a_b_roll_hole_is_not_rewritten(tmp_path):
 
 
 @needs_ffmpeg
+def test_a_rushed_sentence_is_lengthened_not_treated_as_b_roll(tmp_path):
+    """TTS 0.3x a real line is a talking-head hole, not B-roll."""
+    line = "You don't need a network to use this translator."
+    speak = tone_maker(tmp_path, {line: 0.6, "a much longer spoken line here": 1.9})
+    asked = []
+
+    def rewrite(text, seconds, shorter):
+        asked.append(shorter)
+        return "a much longer spoken line here"
+
+    fit_cue(line, slot(2.0, window=9.0), tmp_path, 0, speak, rewrite)
+    assert asked == [False]
+
+
+@needs_ffmpeg
 def test_a_line_that_still_overruns_is_cut(tmp_path):
     """A line that still overruns after speed-up is cut to the window.
 

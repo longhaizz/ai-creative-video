@@ -424,6 +424,22 @@ def test_orphan_words_in_the_vad_hole_become_a_window():
     assert extra[0][1] == 13.9
 
 
+def test_whisper_word_times_cover_when_vad_is_empty():
+    """Quiet VO that Silero never marks still becomes windows from Whisper."""
+    mod = _od_script()
+    words = [
+        {"word": "Use", "start": 0.5, "end": 0.8, "no_speech_prob": 0.2},
+        {"word": " this", "start": 0.8, "end": 1.1, "no_speech_prob": 0.2},
+        {"word": " app.", "start": 1.1, "end": 1.5, "no_speech_prob": 0.2},
+    ]
+    extra = mod._orphan_word_windows(words, [])
+    assert extra == [(0.5, 1.5)]
+    spans = mod._word_spans(words)
+    assert spans
+    assert spans[0][0] == 0.5
+    assert spans[0][1] == 1.5
+
+
 def test_orphan_windows_skip_b_roll_stamps_and_no_speech():
     mod = _od_script()
     windows = [(0.0, 5.0)]

@@ -37,6 +37,7 @@ from server.steps.translate import (
     reconstruct_script,
     rephrase_for_duration,
     score_pace,
+    word_count,
 )
 
 # How far the spoken length may sit from the slot before we act.
@@ -262,11 +263,15 @@ def fit_cue(
 
     # Far off, and nobody can rewrite it for us.
     # Tiny slots: the LLM replaces "Water" with a stolen full sentence.
-    # A huge hole is B-roll: stretch the take, leave silence, don't invent.
-    if rewrite is None or MAX_REWRITES < 1 or target < 0.8 or ratio < RATIO_HOLE:
+    # A huge hole with almost no words is B-roll: stretch, leave silence.
+    # A real sentence that TTS rushed (ratio 0.34, 7+ words) still needs
+    # a longer line — that is a talking-head, not B-roll.
+    thin = word_count(line) <= 4
+    if rewrite is None or MAX_REWRITES < 1 or target < 0.8 or (
+            ratio < RATIO_HOLE and thin):
         if target < 0.8 and rewrite is not None and MAX_REWRITES >= 1:
             log("slot too short to rewrite, changing the speed instead")
-        elif ratio < RATIO_HOLE:
+        elif ratio < RATIO_HOLE and thin:
             log("slot much longer than the take, leaving silence after")
         return best("clamp")
 
