@@ -54,6 +54,17 @@ def test_as_list_keeps_lipsync_when_set():
     assert [m.name for m in models.as_list()] == ["voxcpm", "latentsync"]
 
 
+def test_as_list_includes_whisper():
+    from server.pipeline import Models
+
+    models = Models(
+        voice=FakeModel("voxcpm"),
+        lipsync=FakeModel("latentsync"),
+        whisper=FakeModel("whisper"),
+    )
+    assert [m.name for m in models.as_list()] == ["voxcpm", "whisper", "latentsync"]
+
+
 def test_no_models_is_fine(build):
     with build([]) as client:
         assert client.get("/health", headers=AUTH).json()["models_loaded"] == []

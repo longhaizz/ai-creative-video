@@ -13,7 +13,7 @@ services:
       # too big, and they change on their own schedule. Download them with
       # ./download_models.sh before the first run.
       - ./LatentSync/checkpoints:/app/LatentSync/checkpoints:ro
-      # Everything pulled from Hugging Face on first use: VoxCPM, Pyannote,
+      # Everything pulled from Hugging Face on first use: VoxCPM, Whisper,
       # the VAE, demucs. Keep it in a volume or every restart re-downloads
       # several gigabytes.
       - models:/models

@@ -11,8 +11,8 @@ from typing import Literal
 from fastapi import UploadFile
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-# Bigger models are slower but read speech better. The server retries with
-# large-v3 by itself when the first pass looks bad, so this is only a start.
+# Bigger models are slower but read speech better. The job uses this size
+# as-is; there is no automatic large-v3 retry.
 WhisperModel = Literal["tiny", "base", "small", "medium", "large-v3"]
 
 # "original" clones the voice from the video. The rest are voice presets.

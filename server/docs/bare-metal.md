@@ -12,7 +12,7 @@ Mọi lệnh chạy từ **gốc repo**.
 
 - Ubuntu 22.04, GPU NVIDIA, driver đủ cho CUDA 12.1
 - **48GB VRAM** là giả định của thiết kế. Card nhỏ hơn thì phải bỏ preload — xem mục *Card nhỏ hơn* ở cuối
-- Ổ đĩa: ~25GB cho ba venv, ~5GB cho model weight
+- Ổ đĩa: ~20GB cho hai venv, ~5GB cho model weight
 
 ```bash
 nvidia-smi                    # phải thấy card
@@ -98,23 +98,6 @@ Kiểm:
 
 numpy ở đây phải là **2.2.5**, khác hẳn venv chính. Hai con số khác nhau chính là lý do có hai venv.
 
-## 3b. Venv Open Dubbing (tách lời)
-
-Không cài pyannote vào venv chính. Demucs + Whisper + Pyannote chạy interpreter riêng:
-
-```bash
-python3.10 -m venv /opt/venv-od
-/opt/venv-od/bin/pip install --upgrade pip
-/opt/venv-od/bin/pip install -r server/requirements-open-dubbing.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu121
-```
-
-Vào Hugging Face, chấp nhận điều khoản `pyannote/speaker-diarization-3.1`, rồi đặt `HF_TOKEN` trong `.env`.
-
-```bash
-/opt/venv-od/bin/python -c "import demucs, faster_whisper, pyannote.audio; print('od ok')"
-```
-
 ## 4. Tải model weight
 
 ```bash
@@ -133,7 +116,7 @@ export HF_HOME=/models/huggingface
 
 ```bash
 cp .env.example .env
-$EDITOR .env          # điền API_KEY, OPENAI_API_KEY, HF_TOKEN
+$EDITOR .env          # điền API_KEY, OPENAI_API_KEY
 ```
 
 Sinh khoá:
@@ -147,7 +130,6 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```bash
 set -a && source .env && set +a
 export VSR_PYTHON=/opt/venv-vsr/bin/python
-export OPEN_DUBBING_PYTHON=/opt/venv-od/bin/python
 
 /opt/venv-main/bin/uvicorn server.app:app --host 0.0.0.0 --port 8000
 ```
@@ -161,7 +143,7 @@ curl -H "Authorization: Bearer $API_KEY" localhost:8000/health
 Mong đợi:
 
 ```json
-{"status":"ok","models_loaded":["voxcpm","latentsync"],"gpu":"NVIDIA ..."}
+{"status":"ok","models_loaded":["voxcpm","whisper","latentsync"],"gpu":"NVIDIA ..."}
 ```
 
 `models_loaded` rỗng nghĩa là `LOAD_MODELS=0` còn sót trong môi trường.
@@ -173,7 +155,6 @@ Trước khi dựng systemd, chạy tay để chắc chắn cả chuỗi hoạt 
 ```bash
 set -a && source .env && set +a
 export VSR_PYTHON=/opt/venv-vsr/bin/python
-export OPEN_DUBBING_PYTHON=/opt/venv-od/bin/python
 
 /opt/venv-main/bin/python -m server.tests.smoke_run_dub clip.mp4 \
     --lipsync --remove-subtitle --burn-subtitle --lang vi
@@ -197,7 +178,6 @@ User=dub
 WorkingDirectory=/srv/dub
 EnvironmentFile=/srv/dub/.env
 Environment=VSR_PYTHON=/opt/venv-vsr/bin/python
-Environment=OPEN_DUBBING_PYTHON=/opt/venv-od/bin/python
 Environment=HF_HOME=/models/huggingface
 ExecStart=/opt/venv-main/bin/uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 1
 Restart=on-failure
@@ -245,8 +225,6 @@ Thiết kế giả định nạp sẵn **mọi** model. Thường trú ~12–16G
 
 | Triệu chứng | Nguyên nhân |
 |---|---|
-| Job fail `HF_TOKEN is required` | Chưa điền `HF_TOKEN`, hoặc chưa chấp nhận điều khoản Pyannote |
-| Job fail `OPEN_DUBBING_PYTHON is not a file` | Thiếu venv `/opt/venv-od` — xem mục 3b |
 | `numpy.dtype size changed` | numpy sai bản. Kiểm lại mục 2 và 3 — mỗi venv một con số riêng |
 | Job fail `error_code: internal`, log nhắc paddle | Sai `VSR_PYTHON`, hoặc quên bước `paddlex --install hpi-gpu` |
 | Job fail `error_code: no_face` | Không phải lỗi. Video không có mặt người; bỏ tick Lipsync |

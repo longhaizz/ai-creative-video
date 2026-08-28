@@ -3,7 +3,8 @@
 The whole job, in order:
 
     remove the burned-in subtitles   (optional, its own venv)
-    split, diarize, read speech      (Open Dubbing venv)
+    split voice from music           (Demucs)
+    read speech                      (Whisper, in-process)
     rewrite and translate            (OpenAI)
     say every line                   (VoxCPM, one cue at a time)
     move the mouth                   (LatentSync, optional)
@@ -24,7 +25,7 @@ from pathlib import Path
 
 from server import config
 from server.jobs import JobContext, PipelineError
-from server.steps import audio, open_dubbing, subtitle, transcribe, vsr
+from server.steps import audio, open_dubbing, separate, subtitle, transcribe, vsr
 from server.steps.lipsync import NoFaceError
 from server.steps.synth import with_voice_instruction
 
@@ -32,12 +33,15 @@ from server.steps.synth import with_voice_instruction
 class Models:
     """Everything that is loaded once and used by every job."""
 
-    def __init__(self, voice, lipsync):
+    def __init__(self, voice, lipsync, whisper=None):
         self.voice = voice
         self.lipsync = lipsync
+        self.whisper = whisper
 
     def as_list(self):
         models = [self.voice]
+        if self.whisper is not None:
+            models.append(self.whisper)
         if self.lipsync is not None:
             models.append(self.lipsync)
         return models
@@ -83,14 +87,14 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     width, height = audio.video_size(video)
     ctx.log(f"{video_seconds:.1f}s, {width}x{height}")
 
-    # 2. Split, diarize and read speech in the Open Dubbing venv.
-    segmented = open_dubbing.segment(
-        video, work, params.whisper_model, ctx=ctx
+    # 2. Split voice from music, then read the mix with Whisper.
+    mix = audio.extract_audio(video, work / "mix.wav")
+    vocals, music = separate.separate(mix, work, ctx=ctx)
+    ctx.check_cancel()
+    cues, meta = transcribe.transcribe(
+        models.whisper, mix, params.whisper_model, ctx=ctx
     )
-    cues = segmented["cues"]
-    meta = segmented["meta"]
-    vocals = segmented["vocals"]
-    music = segmented["music"]
+    cues = open_dubbing.attach_refs(cues, vocals, work / "od")
     ctx.check_cancel()
 
     ctx.step("Cleaning the music track")
