@@ -1,5 +1,6 @@
 """Cue glue, clone refs, and the in-process Demucs+Whisper pipeline."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -341,7 +342,11 @@ def test_transcribe_does_not_retry_large_v3(tmp_path):
                         _Word("hello", 0.0, 0.5),
                         _Word(" there.", 0.5, 1.2),
                     ], no_speech_prob=0.97)
-                    info = type("Info", (), {"language": "hi", "language_probability": 0.99})()
+                    info = type("Info", (), {
+                        "language": "hi",
+                        "language_probability": 0.99,
+                        "duration": 1.2,
+                    })()
                     return [seg], info
 
             return Model()
@@ -351,6 +356,23 @@ def test_transcribe_does_not_retry_large_v3(tmp_path):
     assert meta["whisper_model"] == "medium"
     assert cues[0]["speaker_id"] == SPEAKER_00
     assert cues[0]["text"] == "hello there."
+    payload = json.loads((tmp_path / "transcript.json").read_text(encoding="utf-8"))
+    assert payload["language"] == "hi"
+    assert payload["model"] == "medium"
+    assert payload["segments"] == [{
+        "id": 0, "start": 0.0, "end": 1.2, "text": "hello there.",
+    }]
+    logs = []
+
+    class Ctx:
+        def log(self, message):
+            logs.append(message)
+
+        def step(self, name):
+            return None
+
+    transcribe(FakeModels(), wav, "medium", ctx=Ctx())
+    assert any(line.startswith("0.00-1.20  hello there.") for line in logs)
 
 
 def test_a_short_line_is_not_split():

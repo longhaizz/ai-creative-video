@@ -328,6 +328,49 @@ def test_the_bands_make_sense():
     assert RATIO_KEEP_LO < 1.0 < RATIO_KEEP_HI
 
 
+def test_report_script_logs_heard_and_script():
+    from server.steps.synth import _report_script
+
+    logs = []
+
+    class Ctx:
+        def log(self, message):
+            logs.append(message)
+
+    _report_script(
+        {
+            "master_meaning": "pregnancy test ad",
+            "master_translation": "Put your finger on the screen.",
+            "cue_translations": ["Đặt ngón tay lên màn hình.", "Tải miễn phí."],
+        },
+        [
+            {"text": "बस अपनी उंगली को स्क्रीन पर रखें"},
+            {"text": "डाउलोट करें और आजमायें"},
+        ],
+        Ctx(),
+    )
+    assert "Cue 1 heard: बस अपनी उंगली को स्क्रीन पर रखें" in logs
+    assert "Cue 1 script: Đặt ngón tay lên màn hình." in logs
+    assert "Cue 2 heard: डाउलोट करें और आजमायें" in logs
+    assert "Cue 2 script: Tải miễn phí." in logs
+
+
+def test_cue_trace_has_heard_script_spoken():
+    from server.steps.synth import _cue_trace
+
+    rows = _cue_trace(
+        [{"start": 0.0, "end": 2.0, "text": "hello"},
+         {"start": 2.0, "end": 4.0, "text": "bye"}],
+        ["xin chào", "tạm biệt"],
+        {0: "xin chào nhé"},
+    )
+    assert rows[0] == {
+        "id": 0, "start": 0.0, "end": 2.0,
+        "heard": "hello", "script": "xin chào", "spoken": "xin chào nhé",
+    }
+    assert rows[1]["spoken"] == ""
+
+
 def test_refit_script_pace_rewrites_a_packed_line(monkeypatch):
     from server.steps.translate import refit_script_pace, score_pace
 
