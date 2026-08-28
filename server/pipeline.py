@@ -5,7 +5,7 @@ The whole job, in order:
     remove the burned-in subtitles   (optional, its own venv)
     split voice from music           (Demucs)
     read speech                      (Whisper, in-process)
-    rewrite and translate            (OpenAI, one line per block)
+    rewrite and translate            (OpenAI, three lengths a block)
     say every block                  (VoxCPM, best of a few takes)
     move the mouth                   (LatentSync, optional)
     mix the new voice with the music
@@ -131,6 +131,10 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             with_voice_instruction(text, params.voice_mode),
             out_wav, params.cfg_value, params.inference_timesteps,
         )
+
+    if models.whisper is None:
+        ctx.log("No Whisper model: takes cannot be listened to, "
+                "so the first one is kept whatever it says")
 
     def listen(wav, lang):
         """Hear a take back, to judge it and to time its sentences."""

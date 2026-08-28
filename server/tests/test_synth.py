@@ -15,6 +15,7 @@ import subprocess
 
 import pytest
 
+from server import config
 from server.jobs import PipelineError
 from server.steps import synth
 from server.steps.audio import duration
@@ -24,8 +25,8 @@ from server.steps.synth import (
     MAX_HESITATION,
     MIN_GAP,
     SOFT_TEMPO,
-    Pace,
     build_blocks,
+    pick_variant,
     ends_sentence,
     longest_pause,
     split_to_cap,
@@ -105,24 +106,6 @@ def test_silent_cues_are_left_out():
     assert blocks[0]["end"] == 2.0
 
 
-# -- the measured word rate -------------------------------------------------
-
-
-def test_the_pace_walks_towards_the_real_voice():
-    """The old code used one constant for every language. It was wrong."""
-    pace = Pace(2.4)
-    for _ in range(10):
-        pace.observe(10, 2.0)  # the voice really says 5 words a second
-    assert 4.5 < pace.value < 5.1
-    assert pace.words_for(2.0) >= 9
-
-
-def test_a_tiny_sample_does_not_move_the_pace():
-    pace = Pace(4.0)
-    pace.observe(1, 0.2)
-    assert pace.value == 4.0
-
-
 # -- judging a take ---------------------------------------------------------
 
 
@@ -173,21 +156,33 @@ def _asked_for(wav):
     return _ASKED.get(str(wav), "")
 
 
+def variants(lines):
+    """Turn plain lines into the three lengths the translator returns."""
+    out = []
+    for line in lines:
+        if isinstance(line, dict):
+            out.append(line)
+        else:
+            out.append({"short": line, "normal": line, "long": line})
+    return out
+
+
 def run_blocks(monkeypatch, tmp_path, cues, lines, lengths, scenes=(),
-               video_seconds=10.0, rewrite=None):
+               video_seconds=10.0):
     """Run timed_speech with the model and the translator replaced."""
+    entries = variants(lines)
     monkeypatch.setattr(
         synth, "translate_blocks",
         lambda blocks, lang, key, asr_meta=None: {
-            "lines": lines,
+            "lines": entries,
             "master_meaning": "meaning",
-            "master_translation": " ".join(lines),
+            "master_translation": " ".join(e["normal"] for e in entries),
             "output_lang_code": "vi",
             "output_lang_name": "Vietnamese",
         },
     )
-    if rewrite is not None:
-        monkeypatch.setattr(synth, "rephrase_for_duration", rewrite)
+    # The history file is per test, never the real one under data/.
+    monkeypatch.setattr(config, "DURATION_DATA", tmp_path / "duration.csv")
 
     speak = tone_maker(lengths)
 
@@ -238,7 +233,6 @@ def test_an_overlong_block_pushes_the_next_one_but_not_past_the_cap(
         monkeypatch, tmp_path, cues,
         lines=["câu một rất dài.", "câu hai ở đây."],
         lengths={"câu một rất dài.": 3.4, "câu hai ở đây.": 2.0},
-        rewrite=lambda *a, **k: "",  # the rewrite gives up
     )
     drift = spoken[1]["start"] - 3.0
     assert 0 < drift <= DRIFT_CAP + 0.01, drift
@@ -254,7 +248,6 @@ def test_the_next_block_returns_to_the_original_clock(monkeypatch, tmp_path):
         lines=["câu một rất dài.", "câu hai.", "câu ba ở đây."],
         lengths={"câu một rất dài.": 3.4, "câu hai.": 1.0,
                  "câu ba ở đây.": 2.0},
-        rewrite=lambda *a, **k: "",
     )
     assert spoken[1]["start"] > 3.0, "block 2 starts late"
     assert spoken[2]["start"] == pytest.approx(6.0, abs=0.05), "block 3 is on time"
@@ -269,7 +262,6 @@ def test_a_scene_cut_is_never_crossed_by_rushing_the_voice(monkeypatch, tmp_path
         lines=["câu một rất dài.", "câu hai ở đây."],
         lengths={"câu một rất dài.": 3.4, "câu hai ở đây.": 2.0},
         scenes=[2.5],
-        rewrite=lambda *a, **k: "",
     )
     spoken_length = spoken[0]["end"] - spoken[0]["start"]
     assert spoken_length >= 3.4 / SOFT_TEMPO - 0.1, "never faster than the cap"
@@ -277,26 +269,47 @@ def test_a_scene_cut_is_never_crossed_by_rushing_the_voice(monkeypatch, tmp_path
 
 
 @needs_ffmpeg
-def test_a_shorter_line_is_asked_for_before_the_speed_is_touched(
-        monkeypatch, tmp_path):
-    asked = []
-
-    def rewrite(text, seconds, api_key, **kw):
-        asked.append((text, round(seconds, 2), kw.get("target_words_n")))
-        return "câu ngắn."
-
-    cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
+def test_a_wide_room_takes_the_long_line(monkeypatch, tmp_path):
+    """This is what fills the silence the old code left over speech."""
+    cues = [cue(0.0, 1.2, "one."), cue(5.0, 6.0, "two.")]
+    entry = {"short": "ngắn.", "normal": "vừa vừa thôi bạn.",
+             "long": "dài hơn nhiều, đủ để lấp hết chỗ trống này."}
     out, spoken, speak = run_blocks(
-        monkeypatch, tmp_path, cues,
-        lines=["câu một rất dài.", "câu hai ở đây."],
-        lengths={"câu một rất dài.": 3.4, "câu ngắn.": 1.5,
-                 "câu hai ở đây.": 2.0},
-        rewrite=rewrite,
+        monkeypatch, tmp_path, cues, lines=[entry, "câu hai."],
+        lengths={entry["short"]: 0.6, entry["normal"]: 1.4,
+                 entry["long"]: 4.4, "câu hai.": 1.0},
     )
-    assert asked, "the long block must ask for a shorter line first"
-    assert asked[0][2], "the rewrite gets the measured word budget"
-    assert "câu ngắn." in speak.calls
-    assert spoken[1]["start"] == pytest.approx(3.0, abs=0.05), "no drift left"
+    assert entry["long"] in speak.calls, speak.calls
+    assert entry["short"] not in speak.calls, "only the chosen line is spoken"
+
+
+@needs_ffmpeg
+def test_a_tight_room_takes_the_short_line(monkeypatch, tmp_path):
+    cues = [cue(0.0, 0.6, "one."), cue(0.9, 3.0, "two.")]
+    entry = {"short": "ngắn.", "normal": "vừa vừa thôi bạn.",
+             "long": "dài hơn nhiều, đủ để lấp hết chỗ trống này."}
+    out, spoken, speak = run_blocks(
+        monkeypatch, tmp_path, cues, lines=[entry, "câu hai."],
+        lengths={entry["short"]: 0.6, entry["normal"]: 1.4,
+                 entry["long"]: 4.4, "câu hai.": 1.0},
+    )
+    assert entry["short"] in speak.calls, speak.calls
+    assert spoken[1]["start"] == pytest.approx(0.9, abs=0.05), "no drift"
+
+
+@needs_ffmpeg
+def test_every_take_is_written_to_the_history(monkeypatch, tmp_path):
+    """The length guess only gets better if the takes are kept."""
+    cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
+    run_blocks(
+        monkeypatch, tmp_path, cues,
+        lines=["câu một ở đây.", "câu hai ở đây."],
+        lengths={"câu một ở đây.": 2.0, "câu hai ở đây.": 2.0},
+    )
+    rows = (tmp_path / "duration.csv").read_text(encoding="utf-8").splitlines()
+    assert rows[0].startswith("lang,"), rows[0]
+    assert len(rows) == 3, "a header and one row per take"
+    assert rows[1].startswith("vi,")
 
 
 @needs_ffmpeg
@@ -387,13 +400,14 @@ def test_a_stumbling_take_loses_to_a_fluent_one(monkeypatch, tmp_path):
     monkeypatch.setattr(
         synth, "translate_blocks",
         lambda blocks, lang, key, asr_meta=None: {
-            "lines": ["câu một ở đây."],
+            "lines": variants(["câu một ở đây."]),
             "master_meaning": "m",
             "master_translation": "câu một ở đây.",
             "output_lang_code": "vi",
             "output_lang_name": "Vietnamese",
         },
     )
+    monkeypatch.setattr(config, "DURATION_DATA", tmp_path / "duration.csv")
     speak = tone_maker({"câu một ở đây.": 2.0})
     seen = []
 
@@ -429,3 +443,71 @@ def test_the_silence_a_take_is_padded_with_is_removed(tmp_path):
     )
     assert duration(raw) == pytest.approx(1.7, abs=0.05)
     assert duration(clean_take(raw, tmp_path / "clean.wav")) < 1.3
+
+
+# -- the number we judge a run by -------------------------------------------
+
+
+class Recorder:
+    """A ctx that only remembers what was logged."""
+
+    def __init__(self):
+        self.lines = []
+
+    def log(self, message):
+        self.lines.append(message)
+
+    def step(self, name):
+        self.lines.append(name)
+
+    def check_cancel(self):
+        pass
+
+    def report(self, prefix):
+        return next(m for m in self.lines if m.startswith(prefix))
+
+
+@needs_ffmpeg
+def test_silence_is_counted_only_while_the_speaker_talks(monkeypatch, tmp_path):
+    """The pause after a block, and the tail of the video, are not holes."""
+    entries = variants(["câu một ở đây."])
+    monkeypatch.setattr(
+        synth, "translate_blocks",
+        lambda blocks, lang, key, asr_meta=None: {
+            "lines": entries, "master_meaning": "m",
+            "master_translation": "m", "output_lang_code": "vi",
+            "output_lang_name": "Vietnamese",
+        },
+    )
+    monkeypatch.setattr(config, "DURATION_DATA", tmp_path / "duration.csv")
+    ctx = Recorder()
+    synth.timed_speech(
+        [cue(0.0, 2.0, "one.")], tmp_path, 30.0,
+        tone_maker({"câu một ở đây.": 2.0}), "key", "vi",
+        meta={"language": "en"}, ctx=ctx, listen=listener(), scenes=[],
+    )
+    filling = ctx.report("Filling:")
+    assert "0.0s silent" in filling, filling
+    assert "0 holes" in filling, filling
+
+
+@needs_ffmpeg
+def test_a_block_left_half_silent_is_reported(monkeypatch, tmp_path):
+    entries = variants(["ngắn."])
+    monkeypatch.setattr(
+        synth, "translate_blocks",
+        lambda blocks, lang, key, asr_meta=None: {
+            "lines": entries, "master_meaning": "m",
+            "master_translation": "m", "output_lang_code": "vi",
+            "output_lang_name": "Vietnamese",
+        },
+    )
+    monkeypatch.setattr(config, "DURATION_DATA", tmp_path / "duration.csv")
+    ctx = Recorder()
+    synth.timed_speech(
+        [cue(0.0, 4.0, "one.")], tmp_path, 10.0,
+        tone_maker({"ngắn.": 1.0}), "key", "vi",
+        meta={"language": "en"}, ctx=ctx, listen=listener(), scenes=[],
+    )
+    filling = ctx.report("Filling:")
+    assert "1 holes" in filling, filling

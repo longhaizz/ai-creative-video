@@ -19,6 +19,10 @@ JOBS_DIR = Path(os.getenv("JOBS_DIR", "jobs"))
 # When a job is older than this, delete both its state and its files. 1 hour.
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "3600"))
 
+# What every take measured, kept between jobs so the length guess gets
+# better. Deliberately NOT under JOBS_DIR: that folder is wiped at boot.
+DURATION_DATA = Path(os.getenv("DURATION_DATA", "data/duration.csv"))
+
 MAX_VIDEO_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(200 * 1024 * 1024)))
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))
 

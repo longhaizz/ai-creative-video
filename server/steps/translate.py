@@ -54,9 +54,9 @@ LANG_NAMES = {
     "ZH": "Chinese",
 }
 
-# Tốc độ đọc voice-over tự nhiên → ước số từ; sai số còn lại do fit_length + atempo.
-WORDS_PER_SECOND = 2.4
-# Band chấp nhận sau rewrite; ngoài band → 1 lần fit_length.
+# The three lengths every block comes back in. The caller picks the one
+# that fits the room it has; there is no asking again for a shorter line.
+VARIANTS = ("short", "normal", "long")
 
 
 class OpenAIError(PipelineError):
@@ -101,8 +101,6 @@ def _chat(system: str, user: str, api_key: str, model: str) -> str:
         raise OpenAIError("OpenAI trả text rỗng")
     return out
 
-
-CANNOT_FIT = "CANNOT_FIT"
 
 # Chữ có dấu thanh Việt (heuristic phát hiện drift VI ↔ Latin khác).
 _VI_MARKS = set(
@@ -194,7 +192,7 @@ def _extract_json(raw: str) -> dict:
 
 def _blocks_system_prompt(*, n: int, lang_name: str, expected_code: str,
                           lang_det: str, lang_p: float, task: str) -> str:
-    """Prompt for block translation — one line per block, no reshuffling."""
+    """Prompt for block translation: three lengths, one line per block."""
     return (
         f"You write spoken dubbing lines in {lang_name} (code={expected_code}). "
         f"The input is an ASR transcript cut into {n} blocks. A block is one "
@@ -205,29 +203,41 @@ def _blocks_system_prompt(*, n: int, lang_name: str, expected_code: str,
         f"languages. First infer the intended message from the WHOLE "
         f"transcript, then write each block. "
         f"{task} "
-        f"HARD RULE: return exactly {n} lines, one per block, in order. "
-        f"lines[i] is spoken while block i plays. Never merge two blocks "
-        f"into one line, never move a line to another index, never drop one. "
-        f"Use \"\" only when a block truly has nothing to dub. "
-        f"Each block header says how long it is and how many words fit in "
-        f"that time. Stay near that word count: a line far over it has to be "
-        f"rushed, a line far under it leaves the speaker silent on screen. "
-        f"Everything must be in {lang_name} only — never mix languages. "
-        f"Do not invent products, prices or claims that are not in the "
-        f"transcript. "
+        f"HARD RULE: return exactly {n} entries, one per block, in order. "
+        f"Entry i is spoken while block i plays. Never merge two blocks into "
+        f"one entry, never move an entry to another index, never drop one. "
+        f"EVERY block was built from real speech, so EVERY block must have "
+        f"words. An empty string is never a valid answer: when the ASR of a "
+        f"block is unclear, write what the speaker must have been saying "
+        f"there, from the surrounding blocks. "
+        f"THREE LENGTHS: each entry has \"short\", \"normal\" and \"long\". "
+        f"All three say the same thing for that block; only the wording is "
+        f"tighter or fuller. The block header gives a word count for "
+        f"\"normal\": aim about 60% of it for \"short\" and about 130% for "
+        f"\"long\". \"long\" fills the extra room by restating, adding a "
+        f"natural connector, or naming again what is being talked about — "
+        f"and it may lean on something ALREADY SAID in an EARLIER block. "
+        f"It must never use an idea from a LATER block, and never repeat an "
+        f"earlier line word for word. "
+        f"Do not invent products, prices, numbers, names or calls to action "
+        f"that are not in the transcript — not even in \"long\". "
+        f"Everything must be in {lang_name} only, never mixed. "
         f"Return ONLY valid JSON (no markdown) with keys: master_meaning "
         f"(one sentence, in English), master_translation (the full spoken "
-        f"script in {lang_name}), lines (array of exactly {n} strings)."
+        f"script in {lang_name}, using the \"normal\" lines), lines (array "
+        f"of exactly {n} objects with keys short, normal, long)."
     )
 
 
 def translate_blocks(blocks, target_lang: str, api_key: str,
                      asr_meta=None, model: str = DEFAULT_MODEL) -> dict:
-    """Translate whole blocks of speech, one line per block.
+    """Translate whole blocks, three lengths each, one line per block.
 
-    Blocks are built from word timestamps by the caller, so the mapping from
-    text to time is decided by code, not by the model. The model only has to
-    keep the order and the count, and both are checked here.
+    Blocks are built from word timestamps by the caller, so the mapping
+    from text to time is decided by code, not by the model. The model keeps
+    the order and the count, and both are checked here. It offers three
+    lengths; the caller picks the one that fits the room it has, which is
+    what replaces asking again for a shorter line.
     """
     blocks = list(blocks or [])
     if not blocks:
@@ -262,13 +272,13 @@ def translate_blocks(blocks, target_lang: str, api_key: str,
         body, api_key, model,
     )
     data = _extract_json(raw)
-    lines = _block_lines(data, n, body, api_key, model)
+    lines = _block_variants(data, n, body, api_key, model)
     lines = _repair_block_languages(
         lines, expected_code, lang_name, api_key, model)
 
     master = (data.get("master_translation") or "").strip()
     if not master:
-        master = " ".join(line for line in lines if line)
+        master = " ".join(entry["normal"] for entry in lines if entry["normal"])
     meaning = (data.get("master_meaning") or "").strip() or master[:240]
     return {
         "lines": lines,
@@ -279,151 +289,117 @@ def translate_blocks(blocks, target_lang: str, api_key: str,
     }
 
 
-def _block_lines(data: dict, n: int, body: str, api_key: str,
-                 model: str) -> list:
-    """Exactly n lines, or one repair call, or a loud failure.
+def _one_entry(item) -> dict | None:
+    """Normalise one entry to three non-empty lengths, or None.
+
+    A model that answers with a bare string is not wrong about the words,
+    only about the shape, so that is accepted and the one line is used at
+    all three lengths.
+    """
+    if isinstance(item, str):
+        text = item.strip()
+        return {"short": text, "normal": text, "long": text} if text else None
+    if not isinstance(item, dict):
+        return None
+    out = {}
+    for key in VARIANTS:
+        value = str(item.get(key) or "").strip()
+        out[key] = value
+    if not out["normal"]:
+        out["normal"] = out["long"] or out["short"]
+    if not out["normal"]:
+        return None
+    for key in ("short", "long"):
+        if not out[key]:
+            out[key] = out["normal"]
+    return out
+
+
+def _block_variants(data: dict, n: int, body: str, api_key: str,
+                    model: str) -> list:
+    """Exactly n entries of three lengths, or one repair call, or a failure.
 
     There is no guessing here on purpose. The old code padded a short list
     with empty strings at a place it picked by word overlap, which silently
     shifted every later line by one block.
     """
-    lines = data.get("lines")
-    if isinstance(lines, list) and len(lines) == n:
-        return [str(line or "").strip() for line in lines]
+    entries = _entries_or_none(data.get("lines"), n)
+    if entries is not None:
+        return entries
 
-    got = len(lines) if isinstance(lines, list) else type(lines).__name__
+    given = data.get("lines")
+    got = len(given) if isinstance(given, list) else type(given).__name__
     out = _chat(
         (
-            f"You returned {got} lines; exactly {n} are needed, one per "
-            f"block, in the same order. Split any line you merged back onto "
-            f"the blocks it came from, and use \"\" for a block with nothing "
-            f"to dub. Return ONLY JSON: {{\"lines\": [exactly {n} strings]}}."
+            f"You returned {got} usable entries; exactly {n} are needed, one "
+            f"per block, in the same order, and none of them may be empty. "
+            f"Split any entry you merged back onto the blocks it came from. "
+            f"Every block has speech, so write words for every one, using "
+            f"the neighbouring blocks when the transcript is unclear. "
+            f"Return ONLY JSON: {{\"lines\": [exactly {n} objects with keys "
+            f"short, normal, long]}}."
         ),
-        body + "\n\nYour lines:\n" + json.dumps(lines, ensure_ascii=False),
+        body + "\n\nYour lines:\n" + json.dumps(given, ensure_ascii=False),
         api_key, model,
     )
-    fixed = _extract_json(out).get("lines")
-    if not isinstance(fixed, list) or len(fixed) != n:
+    entries = _entries_or_none(_extract_json(out).get("lines"), n)
+    if entries is None:
         raise OpenAIError(
-            f"Ban dich phai co dung {n} dong cho {n} block, nhan "
-            f"{len(fixed) if isinstance(fixed, list) else type(fixed)}")
-    return [str(line or "").strip() for line in fixed]
+            f"Ban dich phai co dung {n} dong day du cho {n} block")
+    return entries
+
+
+def _entries_or_none(raw, n: int) -> list | None:
+    if not isinstance(raw, list) or len(raw) != n:
+        return None
+    entries = [_one_entry(item) for item in raw]
+    return None if any(entry is None for entry in entries) else entries
 
 
 def _repair_block_languages(lines, expected_code: str, lang_name: str,
                             api_key: str, model: str) -> list:
-    """Redo the lines that came back in the wrong language. One call."""
-    wrong = _lines_wrong_language(lines, expected_code)
+    """Redo the variants that came back in the wrong language. One call."""
+    wrong = _wrong_language_keys(lines, expected_code)
     if not wrong:
         return lines
     out = _chat(
         (
             f"Rewrite each line into {lang_name} only, keeping its meaning "
             f"and roughly its length. Return ONLY JSON: "
-            f"{{\"lines\": {{\"<index>\": \"<line>\"}}}}."
+            f"{{\"lines\": {{\"<index>.<short|normal|long>\": \"<line>\"}}}}."
         ),
-        json.dumps({str(i): lines[i] for i in wrong}, ensure_ascii=False),
+        json.dumps({f"{i}.{key}": lines[i][key] for i, key in wrong},
+                   ensure_ascii=False),
         api_key, model,
     )
     fixed = _extract_json(out).get("lines") or {}
-    repaired = list(lines)
-    for key, value in fixed.items():
+    repaired = [dict(entry) for entry in lines]
+    for tag, value in fixed.items():
+        index, _, key = str(tag).partition(".")
+        text = str(value or "").strip()
         try:
-            index = int(key)
+            index = int(index)
         except (TypeError, ValueError):
             continue
-        if 0 <= index < len(repaired) and str(value or "").strip():
-            repaired[index] = str(value).strip()
-    still = _lines_wrong_language(repaired, expected_code)
+        if key in VARIANTS and 0 <= index < len(repaired) and text:
+            repaired[index][key] = text
+    still = _wrong_language_keys(repaired, expected_code)
     if still:
         raise OpenAIError(
             f"Van con dong sai ngon ngu sau khi sua (mong {expected_code}): "
-            + " | ".join(f"[{i}] {repaired[i][:80]}" for i in still))
+            + " | ".join(f"[{i}.{key}] {repaired[i][key][:60]}"
+                         for i, key in still))
     return repaired
 
 
-def rephrase_for_duration(text: str, seconds: float, api_key: str, *,
-                          master_meaning: str, prev_text: str = "",
-                          next_text: str = "", shorter: bool = True,
-                          target_lang: str = "", lang_name: str = "",
-                          target_words_n: int,
-                          model: str = DEFAULT_MODEL) -> str:
-    """Chỉ đổi phrasing để vừa ~seconds. Khóa intent dòng — có thể CANNOT_FIT."""
-    text = (text or "").strip()
-    if not text:
-        raise OpenAIError("Không có text để rephrase")
-    sec = max(float(seconds), 0.4)
-    # The word budget is measured from the real voice by the caller. There is
-    # no constant here on purpose: the old one was tuned for English and made
-    # every Vietnamese rewrite come out half as long as the slot.
-    tw = max(int(target_words_n), 2)
-    system = _rephrase_system_prompt(
-        seconds=sec, target_words_n=tw, shorter=shorter,
-        master_meaning=master_meaning, prev_text=prev_text,
-        next_text=next_text, lang_name=lang_name)
-    out = _chat(system, text, api_key, model)
-    cleaned = (out or "").strip().strip('"').strip("'")
-    compact = re.sub(r"[\s_]+", "", cleaned.upper())
-    if compact == "CANNOTFIT" or compact.startswith("CANNOTFIT"):
-        return CANNOT_FIT
-    return cleaned
-
-
-def _rephrase_system_prompt(*, seconds: float, target_words_n: int,
-                            shorter: bool, master_meaning: str,
-                            prev_text: str, next_text: str,
-                            lang_name: str) -> str:
-    """Prompt rephrase — tách ra để self-check substring rules."""
-    direction = "slightly SHORTER" if shorter else "slightly LONGER"
-    if lang_name:
-        lang_rule = (
-            f"Keep the output entirely in {lang_name} "
-            f"(same language as the input line)."
-        )
-    else:
-        lang_rule = "Keep the SAME language as the input line."
-    intent_hard = (
-        "HARD: Keep the SAME speech-act / same intent as the INPUT line "
-        "(question stays a question; CTA stays a CTA; app pitch stays an "
-        "app pitch). Do not borrow ideas from master_meaning, previous, or "
-        "next to replace this line's topic. Context lines are only to avoid "
-        "repeating or stealing their info — not to import their content."
-    )
-    if shorter:
-        length_rules = (
-            f"{lang_rule} {intent_hard} "
-            "Aggressive condense ONLY this line to its core speech-act "
-            "(especially CTAs: 'click the button below now' → "
-            "'click below' / 'click the button'). "
-            "Drop adverbs and filler; do not substitute a different sentence "
-            "from the ad. Do not add padding. "
-            f"Stay near the ~{seconds:.1f}s target band — do NOT overshoot "
-            f"into a line that would be far too short. "
-            f"Return exactly {CANNOT_FIT} only if even an ultra-short form "
-            f"cannot keep the same speech-act in ~{seconds:.1f}s."
-        )
-    else:
-        length_rules = (
-            f"{lang_rule} {intent_hard} "
-            "Allow light expansion of ONLY this line: natural synonyms and "
-            "at most 1–2 short relative clauses that keep the same topic. "
-            f"Aim close to ~{seconds:.1f}s spoken (~{target_words_n} words). "
-            "Do not import ideas from master/prev/next. "
-            "Do not add empty filler particles. "
-            f"Return exactly {CANNOT_FIT} only if you truly cannot lengthen "
-            f"without changing the topic in ~{seconds:.1f}s."
-        )
-    return (
-        f"You rephrase ONE dubbing line for timing only. "
-        f"Target ~{seconds:.1f}s spoken (~{target_words_n} words), "
-        f"make it {direction}. "
-        f"MASTER MEANING (context only — do not borrow to change this "
-        f"line's intent):\n{master_meaning}\n\n"
-        f"Previous line (do not repeat its info): {prev_text or '(none)'}\n"
-        f"Next line (do not steal its info): {next_text or '(none)'}\n\n"
-        f"Rules: {length_rules} "
-        f"Otherwise return only the rephrased line."
-    )
+def _wrong_language_keys(lines, expected_code: str) -> list:
+    """(index, variant) pairs whose text is not in the output language."""
+    out = []
+    for index, entry in enumerate(lines):
+        for key in VARIANTS:
+            if _lines_wrong_language([entry[key]], expected_code):
+                out.append((index, key))
+    return out
 
 
 def _selfcheck():
@@ -440,53 +416,63 @@ def _selfcheck():
             {"start": 0.0, "end": 2.0, "text": "hello there", "words": 9},
             {"start": 3.0, "end": 5.0, "text": "buy it now", "words": 9},
         ]
+
+        def entry(text):
+            return {"short": text, "normal": text, "long": text + " nhé"}
+
         replies.append(json.dumps({
             "master_meaning": "an ad",
             "master_translation": "xin chào. mua ngay.",
-            "lines": ["xin chào các bạn nhé", "mua ngay hôm nay đi"],
+            "lines": [entry("xin chào các bạn nhé"), entry("mua ngay hôm nay đi")],
         }))
         out = translate_blocks(blocks, "vi", "key")
-        assert out["lines"] == ["xin chào các bạn nhé", "mua ngay hôm nay đi"], out
+        assert out["lines"][0]["normal"] == "xin chào các bạn nhé", out
+        assert out["lines"][1]["long"].endswith("nhé"), out
         assert out["output_lang_code"] == "vi"
 
-        # A short list is repaired by asking again, never padded by guessing.
-        replies.append(json.dumps({"lines": ["một dòng duy nhất thôi"]}))
-        replies.append(json.dumps({"lines": ["dòng một ở đây", "dòng hai ở đây"]}))
+        # An entry with an empty length is filled from the one that is there.
+        replies.append(json.dumps({
+            "lines": [
+                {"short": "", "normal": "một dòng đầy đủ đây", "long": ""},
+                entry("mua ngay hôm nay đi"),
+            ],
+        }))
         out = translate_blocks(blocks, "vi", "key")
-        assert out["lines"] == ["dòng một ở đây", "dòng hai ở đây"], out
+        assert out["lines"][0]["short"] == "một dòng đầy đủ đây", out
 
-        # Still the wrong count after the repair: fail loudly.
-        replies.append(json.dumps({"lines": ["a"]}))
-        replies.append(json.dumps({"lines": ["a"]}))
+        # A short list is repaired by asking again, never padded by guessing.
+        replies.append(json.dumps({"lines": [entry("chỉ một dòng thôi bạn")]}))
+        replies.append(json.dumps({
+            "lines": [entry("dòng một ở đây"), entry("dòng hai ở đây")]}))
+        out = translate_blocks(blocks, "vi", "key")
+        assert [e["normal"] for e in out["lines"]] == [
+            "dòng một ở đây", "dòng hai ở đây"], out
+
+        # A block left empty is a failure, not something to paper over.
+        replies.append(json.dumps({"lines": [entry("dòng một ở đây"), ""]}))
+        replies.append(json.dumps({"lines": [entry("dòng một ở đây"), ""]}))
         try:
             translate_blocks(blocks, "vi", "key")
         except OpenAIError:
             pass
         else:
-            raise AssertionError("sai so dong phai bao loi")
+            raise AssertionError("block rong phai bao loi")
 
-        # A line that came back in English is sent back once.
+        # A variant that came back in English is sent back once.
         replies.append(json.dumps({
             "master_translation": "x",
-            "lines": ["xin chào các bạn nhé", "buy it now today please"],
+            "lines": [
+                entry("xin chào các bạn nhé"),
+                {"short": "mua ngay đi bạn ơi", "normal": "mua ngay hôm nay đi",
+                 "long": "buy it now today please my friend"},
+            ],
         }))
-        replies.append(json.dumps({"lines": {"1": "mua ngay hôm nay đi"}}))
+        replies.append(json.dumps(
+            {"lines": {"1.long": "mua ngay hôm nay đi bạn ơi"}}))
         out = translate_blocks(blocks, "vi", "key")
-        assert out["lines"][1] == "mua ngay hôm nay đi", out
-
-        # rephrase passes the measured budget through to the prompt.
-        replies.append("câu ngắn hơn nhiều")
-        text = rephrase_for_duration(
-            "một câu rất dài", 2.0, "key",
-            master_meaning="", target_words_n=9, lang_name="Vietnamese")
-        assert text == "câu ngắn hơn nhiều", text
+        assert out["lines"][1]["long"] == "mua ngay hôm nay đi bạn ơi", out
     finally:
         _chat = real_chat
-
-    prompt = _rephrase_system_prompt(
-        seconds=2.0, target_words_n=9, shorter=True, master_meaning="m",
-        prev_text="", next_text="", lang_name="Vietnamese")
-    assert "9" in prompt, "the word budget must reach the model"
 
     assert word_count("một hai ba") == 3
     assert _resolve_output_lang("vi", {})[0] == "vi"
