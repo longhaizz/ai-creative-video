@@ -20,14 +20,11 @@ import re
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from server import config
 from server.jobs import PipelineError
+from server.steps import duration as duration_model
 from server.steps.audio import clean_take, duration, match_tempo, place_clips
-from server.steps.translate import (
-    CANNOT_FIT,
-    rephrase_for_duration,
-    translate_blocks,
-    word_count,
-)
+from server.steps.translate import VARIANTS, translate_blocks
 
 # A pause this long at the end of a sentence ends a block. Ads are spoken
 # without real breaks — the sample clip never pauses longer than 0.22s — so a
@@ -63,14 +60,10 @@ HESITATION_PENALTY = 0.3
 # long line. Cue 22 of the MRI clip spoke 23.68s for a 1.8s slot.
 BABBLE_FACTOR = 3.0
 
-# Where the words-per-second estimate starts before the first take is
-# measured. Every language is then corrected from the real voice.
-SEED_WORDS_PER_SECOND = {
-    "vi": 4.8,
-    "en": 2.6,
-    "id": 3.2,
-}
-DEFAULT_WORDS_PER_SECOND = 3.0
+# Silence this long while the speaker is on screen is a hole a viewer
+# notices. Nothing is re-spoken for it; it is logged so the variant ratios
+# in translate.py can be raised if it keeps happening.
+HOLE_SECONDS = 1.2
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
 _SENTENCE_END = re.compile(r"[.!?…。！？][\"'”’)\]]*$")
@@ -244,38 +237,6 @@ def _cut_between(cuts: list[float], left: float, right: float) -> bool:
     return any(left <= t <= right for t in cuts)
 
 
-class Pace:
-    """How many words this voice really says per second.
-
-    The seed is only a starting point. Every take corrects it, so the same
-    code works for Vietnamese, Indonesian or a slow elderly preset without
-    a table anyone has to keep up to date.
-    """
-
-    def __init__(self, seed: float):
-        self.value = float(seed) if seed and seed > 0 else DEFAULT_WORDS_PER_SECOND
-        self.samples = 0
-
-    def observe(self, words: int, seconds: float) -> None:
-        if words < 3 or seconds <= 0.3:
-            return  # too small to say anything about the rate
-        measured = words / seconds
-        self.samples += 1
-        weight = 1.0 / min(self.samples + 1, 8)
-        self.value += (measured - self.value) * weight
-
-    def words_for(self, seconds: float) -> int:
-        return max(int(float(seconds) * self.value), 2)
-
-    def seconds_for(self, words: int) -> float:
-        return max(float(words) / self.value, 0.4)
-
-
-def seed_pace(lang_code: str) -> float:
-    return SEED_WORDS_PER_SECOND.get(
-        (lang_code or "").lower(), DEFAULT_WORDS_PER_SECOND)
-
-
 # -- takes ------------------------------------------------------------------
 
 
@@ -292,7 +253,7 @@ def text_error(asked: str, heard: str) -> float:
 
 
 def best_take(line: str, work: Path, name: str, speak, listen, lang: str,
-              pace: Pace, log, cue=None) -> dict:
+              expected: float, log, cue=None) -> dict:
     """Speak the line a few times and keep the best take.
 
     Best means: says the words (checked by listening to it), and is not
@@ -300,7 +261,6 @@ def best_take(line: str, work: Path, name: str, speak, listen, lang: str,
     babbles for 20 seconds scores badly on length even when the first words
     are right.
     """
-    expected = pace.seconds_for(word_count(line))
     takes: list[dict] = []
     for number in range(TAKES):
         takes.append(_one_take(line, work, f"{name}_t{number}", speak,
@@ -402,31 +362,38 @@ def timed_speech(
     if ctx is not None:
         ctx.step(f"Rewriting the script ({len(blocks)} blocks)")
 
-    seed = seed_pace(_seed_lang(target_lang, meta))
-    pace = Pace(seed)
+    # How long a line takes is learned from every take this server has ever
+    # made; how fast this one cloned voice runs is measured as we go.
+    model = duration_model.load(config.DURATION_DATA)
+    speed = duration_model.Speed()
+    lang_code = _seed_lang(target_lang, meta)
+
     script = translate_blocks(
         [
             {
                 "start": block["start"],
                 "end": block["end"],
                 "text": block["text"],
-                "words": pace.words_for(
-                    (block["next_start"] - block["start"]) * ROOM_AIM),
+                "words": model.words_for(
+                    (block["next_start"] - block["start"]) * ROOM_AIM,
+                    lang_code),
             }
             for block in blocks
         ],
         target_lang, openai_key, asr_meta=meta or {},
     )
     lines = list(script["lines"])
-    lang_code = script.get("output_lang_code") or ""
-    pace = Pace(seed_pace(lang_code) or seed)
+    lang_code = script.get("output_lang_code") or lang_code
 
     if ctx is not None:
         ctx.log(f"Meaning: {script['master_meaning']}")
         ctx.log(f"Script: {script['master_translation']}")
+        fit_note = (f"fitted on {len(model.rows)} takes" if model.fitted
+                    else "default weights, not enough history yet")
+        ctx.log(f"Duration model: {fit_note}")
         for index, block in enumerate(blocks):
             ctx.log(f"Block {index + 1} heard: {block['text']}")
-            ctx.log(f"Block {index + 1} script: {lines[index]}")
+            ctx.log(f"Block {index + 1} script: {lines[index]['normal']}")
 
     if ctx is not None:
         ctx.step(f"Making the voice ({len(blocks)} blocks)")
@@ -435,16 +402,14 @@ def timed_speech(
     spoken: list[dict] = []
     report = {"stretched": 0, "max_tempo": 1.0, "max_drift": 0.0,
               "errors": [], "overruns": 0, "takes": 0, "stumbles": 0,
-              "longest_block": 0.0}
+              "longest_block": 0.0, "silence": 0.0, "holes": 0,
+              "guess_error": [], "variants": {key: 0 for key in VARIANTS}}
     delay = 0.0
 
     for index, block in enumerate(blocks):
         if ctx is not None:
             ctx.check_cancel()
-        line = (lines[index] or "").strip()
-        if not line:
-            delay = 0.0
-            continue
+        entry = lines[index]
 
         def log(message: str, _index=index):
             if ctx is not None:
@@ -455,18 +420,22 @@ def timed_speech(
         room = max(block["next_start"] - start - MIN_GAP, 0.4)
         limit = room + cap
 
+        line, variant, guess = pick_variant(
+            entry, room, limit, model, speed, lang_code)
+        report["variants"][variant] += 1
+        log(f"{variant} line, {guess:.1f}s guessed for {room:.1f}s of room")
+
         take = best_take(line, work, f"blk_{index:03d}", speak, listen,
-                         lang_code, pace, log, block["ref_cue"])
+                         lang_code, guess, log, block["ref_cue"])
         log(f"{take['length']:.1f}s of {room:.1f}s, {take['takes']} take(s), "
             f"error {take['error']:.2f}, longest pause "
             f"{take['hesitation']:.2f}s")
-        pace.observe(word_count(take["text"]), take["length"])
 
-        if take["length"] > limit and openai_key:
-            take = _shorten(take, line, room * ROOM_AIM, work, index, speak,
-                            listen, lang_code, pace, openai_key, target_lang,
-                            script, log, block["ref_cue"])
-            pace.observe(word_count(take["text"]), take["length"])
+        # Every take teaches the model, and tells us how fast this voice is.
+        model.record(lang_code, take["text"], take["length"])
+        speed.observe(model.seconds(take["text"], lang_code), take["length"])
+        report["guess_error"].append(
+            abs(guess - take["length"]) / max(take["length"], 0.2))
 
         path, tempo = _squeeze(take, limit, block["hard"], work, index, log)
         length = duration(path)
@@ -479,6 +448,15 @@ def timed_speech(
         if take["hesitation"] > MAX_HESITATION:
             report["stumbles"] += 1
 
+        # Silence that matters is silence while the mouth is moving: the
+        # block's own speech span, not the pause after it and not the tail
+        # of the video.
+        silence = max(0.0, (block["end"] - block["start"]) - length)
+        report["silence"] += silence
+        if silence >= HOLE_SECONDS:
+            report["holes"] += 1
+            log(f"{silence:.1f}s of silence left while the speaker is talking")
+
         overrun = max(0.0, start + length + MIN_GAP - block["next_start"])
         if overrun > cap + 0.01:
             report["overruns"] += 1
@@ -489,12 +467,15 @@ def timed_speech(
         clips.append((start, path))
         spoken.extend(_sentence_cues(take, start, length, tempo))
 
+    model.refit()
+
     if not clips:
         raise PipelineError("There is nothing to say", code="internal")
 
     (work / "spoken_cues.json").write_text(
         json.dumps(spoken, ensure_ascii=False, indent=2), encoding="utf-8")
-    script["pace_words_per_second"] = round(pace.value, 2)
+    script["voice_speed"] = round(speed.value, 3)
+    script["duration_coef"] = [round(value, 4) for value in model.coef]
     (work / "dub_script.json").write_text(
         json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -506,8 +487,16 @@ def timed_speech(
             f"max drift {report['max_drift'] * 1000:.0f}ms, "
             f"{report['overruns']} overruns, "
             f"{report['stumbles']} blocks with a long pause inside, "
-            f"listen-back error {mean_error:.2f}, "
-            f"pace {pace.value:.1f} words/s"
+            f"listen-back error {mean_error:.2f}"
+        )
+        guess_error = (sum(report["guess_error"])
+                       / max(len(report["guess_error"]), 1))
+        mix = " ".join(f"{key} {report['variants'][key]}" for key in VARIANTS)
+        ctx.log(
+            f"Filling: {report['silence']:.1f}s silent while the speaker "
+            f"talks, {report['holes']} holes over {HOLE_SECONDS:.1f}s, "
+            f"lines chosen {mix}, length guess off by "
+            f"{guess_error * 100:.0f}%, voice speed {speed.value:.2f}x"
         )
         ctx.log(
             f"Blocks: {len(clips)} spoken, {report['takes']} takes, "
@@ -524,32 +513,28 @@ def _seed_lang(target_lang: str, meta: dict | None) -> str:
     return code
 
 
-def _shorten(take, line, room, work, index, speak, listen, lang, pace,
-             api_key, target_lang, script, log, cue=None):
-    """Ask for a shorter line, and keep it only if it really is shorter."""
-    log(f"too long for {room:.2f}s; asking for a shorter line")
-    try:
-        new_line = rephrase_for_duration(
-            line, room, api_key,
-            master_meaning=script.get("master_meaning") or "",
-            shorter=True,
-            target_lang=target_lang,
-            lang_name=script.get("output_lang_name") or "",
-            target_words_n=pace.words_for(room),
-        )
-    except PipelineError as error:
-        log(f"could not shorten it ({error}), changing the speed instead")
-        return take
-    if new_line == CANNOT_FIT or not new_line.strip():
-        log("no shorter wording exists, changing the speed instead")
-        return take
-    log(f"new line: {new_line}")
-    second = best_take(new_line, work, f"blk_{index:03d}_r", speak, listen,
-                       lang, pace, log, cue)
-    if second["length"] >= take["length"] or second["error"] > EXTRA_TAKE_ERROR:
-        log("the shorter line was no better, keeping the first one")
-        return take
-    return second
+def pick_variant(entry: dict, room: float, limit: float, model, speed,
+                 lang: str):
+    """Choose the length that fits the room, before anything is spoken.
+
+    This is what used to be a second call to the translator and a second
+    take: the three wordings already exist, so fitting is a choice, not a
+    retry. Anything guessed to overrun is only taken when all three do.
+    """
+    aim = room * ROOM_AIM
+    best = None
+    for key in VARIANTS:
+        text = (entry.get(key) or "").strip()
+        if not text:
+            continue
+        guess = model.seconds(text, lang) * speed.value
+        score = (guess > limit, abs(guess - aim))
+        if best is None or score < best[0]:
+            best = (score, key, text, guess)
+    if best is None:
+        raise PipelineError("A block came back with no line at all",
+                            code="internal")
+    return best[2], best[1], best[3]
 
 
 def _squeeze(take, limit, hard, work, index, log):
@@ -625,7 +610,7 @@ def _word_spans(sentences: list[str], words: list[dict],
 
 
 def _selfcheck():
-    """Block building and pacing, without ffmpeg or a GPU."""
+    """Block building and variant choice, without ffmpeg or a GPU."""
     def cue(start, end, text="hello there"):
         return {"start": start, "end": end, "speech_start": start,
                 "speech_end": end, "text": text}
@@ -649,12 +634,24 @@ def _selfcheck():
     assert len(blocks) > 1, "16s of speech must not be one take"
     assert all(b["end"] - b["start"] <= MAX_BLOCK_SECONDS + 2 for b in blocks)
 
-    # Pace walks towards what the voice really does.
-    pace = Pace(2.4)
-    for _ in range(10):
-        pace.observe(10, 2.0)  # 5 words per second
-    assert 4.5 < pace.value < 5.1, pace.value
-    assert pace.words_for(2.0) >= 9
+    # The widest room takes the long line, the tightest takes the short one.
+    model = duration_model.Model()
+    speed = duration_model.Speed()
+    entry = {
+        "short": "mua ngay đi",
+        "normal": "hãy mua ngay hôm nay",
+        "long": "hãy mua ngay hôm nay để không bỏ lỡ điều gì cả",
+    }
+    _, variant, _ = pick_variant(entry, 5.0, 5.4, model, speed, "vi")
+    assert variant == "long", variant
+    _, variant, _ = pick_variant(entry, 1.0, 1.4, model, speed, "vi")
+    assert variant == "short", variant
+
+    # A line guessed to overrun is only taken when all three would.
+    tight = {"short": "a b c d e f g h", "normal": "a b c d e f g h i j k l",
+             "long": "a b c d e f g h i j k l m n o p"}
+    _, variant, _ = pick_variant(tight, 0.5, 0.5, model, speed, "vi")
+    assert variant == "short", variant
 
     # Listening back tells a good take from a wrong one.
     assert text_error("xin chào các bạn", "xin chào các bạn") < 0.01

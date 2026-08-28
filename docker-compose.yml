@@ -20,6 +20,9 @@ services:
       # Job folders. A named volume, not a bind mount: they are temporary,
       # they are deleted on a TTL, and they should not litter the repo.
       - jobs:/app/jobs
+      # What every take measured. Small, but it is the whole duration model:
+      # inside the image it would be thrown away on the next rebuild.
+      - data:/app/data
     deploy:
       resources:
         reservations:
@@ -40,3 +43,4 @@ services:
 volumes:
   models:
   jobs:
+  data:

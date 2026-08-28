@@ -33,3 +33,6 @@ __pycache__/
 jobs/
 
 myenv311/
+
+# What every take measured, used to fit the duration model.
+data/

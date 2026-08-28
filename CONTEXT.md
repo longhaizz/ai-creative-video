@@ -52,3 +52,16 @@ _Avoid_: letting drift add up over the video
 One TTS attempt at a Block. Judged by listening to it back with Whisper:
 the words must match, and the length must be possible for those words.
 _Avoid_: keeping the first take unheard
+
+**Variant**:
+One of the three wordings the translator returns for a Block — short,
+normal, long. The Duration model picks the one that fits the room, which is
+what replaces asking the model again for a shorter line.
+_Avoid_: rewrite, retry, second pass
+
+**Duration model**:
+The fitted line that says how long a piece of text will take to speak,
+before it is spoken. Learned from every Take this server has made. It knows
+the shape of speech, not the voice; how fast one cloned voice runs is a
+single multiplier measured during the job.
+_Avoid_: words per second as a constant
