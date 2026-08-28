@@ -15,6 +15,7 @@ The comments below are still the original Vietnamese.
 
 from __future__ import annotations
 
+import json
 import re
 
 import requests
@@ -56,7 +57,6 @@ LANG_NAMES = {
 # Tốc độ đọc voice-over tự nhiên → ước số từ; sai số còn lại do fit_length + atempo.
 WORDS_PER_SECOND = 2.4
 # Band chấp nhận sau rewrite; ngoài band → 1 lần fit_length.
-WORD_BAND = 0.15
 
 
 class OpenAIError(PipelineError):
@@ -68,86 +68,6 @@ class OpenAIError(PipelineError):
 
 def word_count(text: str) -> int:
     return len((text or "").split())
-
-
-def target_words(seconds) -> int:
-    if not seconds or seconds <= 0:
-        return 3
-    return max(int(float(seconds) * WORDS_PER_SECOND), 3)
-
-
-def _in_band(n: int, target: int) -> bool:
-    if target <= 0:
-        return True
-    lo = target * (1 - WORD_BAND)
-    hi = target * (1 + WORD_BAND)
-    return lo <= n <= hi
-
-
-def score_pace(text: str, seconds: float) -> dict:
-    """Will this line sound rushed or dragged in a slot of `seconds`?
-
-    too_fast = too many words (TTS will be sped up).
-    too_slow = too few words in a real slot (TTS will be stretched / gap).
-    Short asides (<1s) are never too_slow: 'Help me.' in 0.6s is correct.
-    """
-    text = (text or "").strip()
-    slot = max(float(seconds or 0), 0.0)
-    words = word_count(text)
-    estimated = words / WORDS_PER_SECOND if words else 0.0
-    if not text:
-        return {
-            "verdict": "silent",
-            "words": 0,
-            "slot_s": round(slot, 3),
-            "estimated_s": 0.0,
-            "ratio": 0.0,
-        }
-    ratio = estimated / slot if slot > 0 else 1.0
-    if ratio > 1 + WORD_BAND and (slot >= 1.0 or words >= 8):
-        verdict = "too_fast"
-    elif slot >= 1.0 and ratio < 1 - WORD_BAND:
-        verdict = "too_slow"
-    else:
-        verdict = "ok"
-    return {
-        "verdict": verdict,
-        "words": words,
-        "slot_s": round(slot, 3),
-        "estimated_s": round(estimated, 3),
-        "ratio": round(ratio, 3),
-    }
-
-
-def refit_script_pace(lines, slots, api_key: str,
-                      model: str = DEFAULT_MODEL) -> tuple:
-    """Rewrite out-of-band cue_translations once. Returns (lines, scores)."""
-    out = list(lines)
-    scores = []
-    for i, line in enumerate(out):
-        seconds = float(slots[i]["target"]) if i < len(slots) else 0.0
-        score = score_pace(line, seconds)
-        if score["verdict"] in ("too_fast", "too_slow") and (line or "").strip():
-            tw = max(int(seconds * WORDS_PER_SECOND), 1)
-            new = fit_length(line, tw, api_key, model)
-            score["rewritten"] = new != line
-            score["after"] = score_pace(new, seconds)
-            out[i] = new
-        else:
-            score["rewritten"] = False
-        scores.append(score)
-    return out, scores
-
-
-def pace_counts(scores, key: str = "verdict") -> dict:
-    counts = {"ok": 0, "too_fast": 0, "too_slow": 0, "silent": 0}
-    for score in scores or []:
-        verdict = score.get(key) or score.get("verdict") or "ok"
-        if verdict in counts:
-            counts[verdict] += 1
-        else:
-            counts["ok"] += 1
-    return counts
 
 
 def _chat(system: str, user: str, api_key: str, model: str) -> str:
@@ -180,301 +100,6 @@ def _chat(system: str, user: str, api_key: str, model: str) -> str:
     if not out:
         raise OpenAIError("OpenAI trả text rỗng")
     return out
-
-
-def _length_rule(seconds) -> str:
-    """Duration-aware dubbing: ưu tiên câu nói vừa slot, giữ nghĩa."""
-    if not seconds or seconds <= 0:
-        return ""
-    words = target_words(seconds)
-    return (
-        f"This is for video dubbing. The spoken result must fit approximately "
-        f"{seconds:.1f} seconds (~{words} words at a natural pace). "
-        f"Preserve the meaning, but prioritize natural spoken language and timing. "
-        f"You may shorten wording, remove redundancy, or restructure the sentence. "
-        f"Do not omit important facts, numbers, product names, or the call to action. "
-        f"Do not invent new claims. Return only the spoken sentence. "
-    )
-
-
-def fit_length(text: str, target: int, api_key: str,
-               model: str = DEFAULT_MODEL) -> str:
-    """Viết lại cùng ngôn ngữ tới ~target từ — ưu tiên rút khi dài hơn slot."""
-    text = (text or "").strip()
-    if not text:
-        raise OpenAIError("Không có text để chỉnh độ dài")
-    target = max(int(target), 3)
-    cur = word_count(text)
-    if cur > target:
-        direction = (
-            "Shorten for dubbing timing: remove redundancy, use shorter synonyms, "
-            "restructure — keep meaning, facts, numbers, product names, CTA"
-        )
-    else:
-        direction = (
-            "Slightly lengthen with a few neutral connecting words only — "
-            "do NOT invent new ideas or CTAs"
-        )
-    return _chat(
-        (
-            f"You rewrite voice-over for video dubbing in the SAME language to about "
-            f"{target} words (currently ~{cur}). {direction}. "
-            f"Natural spoken language. Return only the rewritten text."
-        ),
-        text, api_key, model,
-    )
-
-
-def rewrite_for_slot(text: str, seconds: float, api_key: str,
-                     model: str = DEFAULT_MODEL, shorter: bool = True) -> str:
-    """Rewrite cùng ngôn ngữ để đọc vừa ~seconds (thường rút khi TTS quá dài)."""
-    text = (text or "").strip()
-    if not text:
-        raise OpenAIError("Không có text để rewrite")
-    sec = max(float(seconds), 0.4)
-    tw = target_words(sec)
-    bias = (
-        "Prefer a SHORTER spoken line that still preserves meaning. "
-        "You may shorten, remove redundancy, or restructure."
-        if shorter
-        else "Prefer a LONGER spoken line to fill the slot: add natural "
-        "connecting words or light on-topic phrasing — do NOT invent false "
-        "facts, prices, or new CTAs."
-    )
-    return _chat(
-        (
-            f"Rewrite this voice-over in the SAME language for video dubbing. "
-            f"It must be speakable in about {sec:.1f} seconds (~{tw} words). "
-            f"{bias} "
-            f"Do not omit important facts/numbers/product names/CTA. "
-            f"Return only the spoken sentence."
-        ),
-        text, api_key, model,
-    )
-
-
-def _refit_if_needed(text: str, seconds, api_key: str, model: str) -> str:
-    if not seconds or seconds <= 0:
-        return text
-    tw = target_words(seconds)
-    if _in_band(word_count(text), tw):
-        return text
-    return fit_length(text, tw, api_key, model)
-
-
-def looks_garbled(text: str) -> bool:
-    """Heuristic: chuỗi ASR vô nghĩa / giữ nguyên sẽ phá bước dịch."""
-    text = (text or "").strip()
-    if not text:
-        return True
-    words = [w for w in re.sub(r"[,.!?]+", " ", text).split() if w]
-    if len(words) < 2:
-        return False
-    titled = sum(1 for w in words if len(w) > 1 and w[0].isupper() and w[1:].islower())
-    if titled / len(words) >= 0.6 and not text.endswith((".", "!", "?")):
-        return True
-    # Nhiều token "tên riêng giả" dài, ít từ chức năng thường gặp
-    longish = sum(1 for w in words if len(w) >= 8)
-    if len(words) >= 3 and longish / len(words) >= 0.5:
-        return True
-    return False
-
-
-def _mostly_same_script(src: str, dst: str) -> bool:
-    """True nếu bản dịch gần như giữ nguyên chuỗi nguồn (ASR rác bị leak)."""
-    def norm(t):
-        return re.sub(r"[^a-z0-9]+", "", (t or "").lower())
-    a, b = norm(src), norm(dst)
-    if not a or not b:
-        return False
-    if a == b:
-        return True
-    if len(a) >= 12 and (a in b or b in a):
-        return True
-    # overlap token
-    aw = set(re.findall(r"[a-zA-Z]{4,}", src or ""))
-    bw = set(re.findall(r"[a-zA-Z]{4,}", dst or ""))
-    if aw and bw and len(aw & bw) / max(len(aw), 1) >= 0.6:
-        return True
-    return False
-
-
-def _asr_context_rule(lang: str) -> str:
-    return (
-        f"CRITICAL — every output line MUST be natural spoken {lang}. "
-        f"Never leave source-language text, phonetic gibberish, or ASR garbage "
-        f"unchanged. If a line is marked [ASR_UNCLEAR] or looks nonsensical / "
-        f"garbled / hallucinated ASR, do NOT copy it: infer the intended meaning "
-        f"from surrounding lines (same ad script — often a CTA, disclaimer, or "
-        f"closing), then write a fitting {lang} line for that slot. Prefer a "
-        f"plausible on-topic closing/CTA consistent with the script over "
-        f"preserving nonsense. Still do not invent false prices or product claims "
-        f"not supported by context. "
-    )
-
-
-def translate(text: str, target_lang: str, api_key: str,
-              model: str = DEFAULT_MODEL, seconds=None) -> str:
-    """Viết lại voice-over sang target_lang; khớp ~số từ theo seconds nếu có."""
-    text = (text or "").strip()
-    if not text:
-        raise OpenAIError("Không có text để dịch")
-    code = (target_lang or "").strip().upper()
-    if not code or code == "SAME":
-        raise OpenAIError(f"target_lang không hợp lệ: {target_lang!r}")
-    lang = LANG_NAMES.get(code, code)
-    unclear = " The source may be garbled ASR — infer meaning; always output " + lang + "."
-
-    out = _chat(
-        (
-            f"You write spoken dubbing lines in {lang}. "
-            f"Rewrite the user's text into natural spoken {lang}. "
-            f"Preserve meaning — not word-for-word. "
-            f"Keep domain terms, proper nouns, product names, numbers and the "
-            f"call to action accurate. "
-            f"{_asr_context_rule(lang)}"
-            f"{_length_rule(seconds)}"
-            f"{unclear if looks_garbled(text) else ''}"
-            f"Return only the spoken sentence, with no quotes or notes."
-        ),
-        text, api_key, model,
-    )
-    return _refit_if_needed(out, seconds, api_key, model)
-
-
-def _parse_numbered(raw: str, n: int) -> list:
-    """'1. abc' → ['abc', …]; ném nếu thiếu/thừa dòng so với n."""
-    found = {}
-    for ln in (raw or "").splitlines():
-        m = re.match(r"\s*(\d+)\s*[.):]\s*(.+)$", ln)
-        if m:
-            found[int(m.group(1))] = m.group(2).strip()
-    missing = [i for i in range(1, n + 1) if not found.get(i)]
-    if missing or len(found) != n:
-        raise OpenAIError(
-            f"OpenAI trả {len(found)}/{n} dòng (thiếu {missing[:5]})")
-    return [found[i] for i in range(1, n + 1)]
-
-
-def _repair_line_from_context(lines, idx: int, slot, target_lang: str,
-                              api_key: str, model: str) -> str:
-    """Một dòng ASR rác: viết lại bằng ngôn ngữ đích nhờ ngữ cảnh quanh."""
-    code = (target_lang or "").strip().upper()
-    lang = LANG_NAMES.get(code, code)
-    n = len(lines)
-    ctx = "\n".join(f"{j + 1}. {lines[j]}" for j in range(n))
-    bad = lines[idx]
-    sec = float(slot) if slot else 0
-    length = _length_rule(sec) if sec else ""
-    return _chat(
-        (
-            f"You write one video-dubbing line in {lang}. "
-            f"Line {idx + 1} of the script below is garbled ASR (nonsense / "
-            f"wrong transcription). Using the OTHER lines as context, write what "
-            f"line {idx + 1} should say in natural spoken {lang} — usually a CTA "
-            f"or closing consistent with the ad. Do not copy the garbled text. "
-            f"Do not invent false prices or product claims absent from context. "
-            f"{length}"
-            f"Return ONLY that one spoken sentence for line {idx + 1}."
-        ),
-        f"Full script (line {idx + 1} is bad):\n{ctx}\n\nBad line text:\n{bad}",
-        api_key, model,
-    )
-
-
-def translate_lines(lines, target_lang: str, api_key: str,
-                    model: str = DEFAULT_MODEL, slots=None) -> list:
-    """Viết lại từng câu, GIỮ ĐÚNG số dòng, khớp độ dài theo slots nếu có.
-
-    Dòng ASR vô nghĩa: suy từ ngữ cảnh → luôn ra ngôn ngữ đích (không giữ nguyên).
-    """
-    lines = [(t or "").strip() for t in lines]
-    if not lines or not all(lines):
-        raise OpenAIError("Có dòng rỗng trong danh sách cần dịch")
-    code = (target_lang or "").strip().upper()
-    if not code or code == "SAME":
-        raise OpenAIError(f"target_lang không hợp lệ: {target_lang!r}")
-    lang = LANG_NAMES.get(code, code)
-    slots = list(slots or [])
-    garbled = [looks_garbled(t) for t in lines]
-
-    parts = []
-    for i, t in enumerate(lines):
-        mark = "[ASR_UNCLEAR] " if garbled[i] else ""
-        if slots and len(slots) == len(lines):
-            parts.append(
-                f"{i + 1}. [{slots[i]:.1f}s ~{target_words(slots[i])}w] {mark}{t}")
-        else:
-            parts.append(f"{i + 1}. {mark}{t}")
-    body = "\n".join(parts)
-
-    if slots and len(slots) == len(lines):
-        slot_rule = (
-            f"Each line is numbered and may be prefixed with [Ts ~Nw] and "
-            f"optionally [ASR_UNCLEAR]. Rewrite into natural spoken {lang} that "
-            f"fits about T seconds. Preserve meaning when the source is clear; "
-            f"you may shorten or restructure for timing. Do not omit important "
-            f"facts/numbers/product names/CTA from clear lines. "
-            f"Do not output the [Ts ~Nw] or [ASR_UNCLEAR] markers. "
-        )
-    else:
-        slot_rule = ""
-
-    out = _chat(
-        (
-            f"You write video-dubbing lines in {lang}. "
-            f"Use the whole script as context, but rewrite each line on its own. "
-            f"{_asr_context_rule(lang)}"
-            f"{slot_rule}"
-            f"Return EXACTLY {len(lines)} lines, same order, same numbering "
-            f"('1. ', '2. ', …). Never merge, split, add, drop or reorder lines. "
-            f"No quotes, no notes, no blank lines."
-        ),
-        body, api_key, model,
-    )
-    result = _parse_numbered(out, len(lines))
-
-    # Hậu kiểm: dòng vẫn giữ ASR rác → repair bằng context
-    for i, (src, dst) in enumerate(zip(lines, result)):
-        if garbled[i] or _mostly_same_script(src, dst):
-            slot = slots[i] if slots and len(slots) == len(lines) else None
-            result[i] = _repair_line_from_context(
-                lines, i, slot, code, api_key, model)
-
-    if slots and len(slots) == len(result):
-        for i, (line, slot) in enumerate(zip(result, slots)):
-            tw = target_words(slot)
-            if not _in_band(word_count(line), tw):
-                result[i] = fit_length(line, tw, api_key, model)
-    return result
-
-
-def fit_lines(lines, slots, api_key: str, model: str = DEFAULT_MODEL) -> list:
-    """Cùng ngôn ngữ: chỉnh từng dòng tới ~target_words(slot) nếu lệch band."""
-    lines = [(t or "").strip() for t in lines]
-    slots = list(slots or [])
-    if not lines or not all(lines):
-        raise OpenAIError("Có dòng rỗng trong danh sách cần chỉnh")
-    if len(slots) != len(lines):
-        raise OpenAIError("slots phải cùng số phần tử với lines")
-    out = []
-    for line, slot in zip(lines, slots):
-        tw = target_words(slot)
-        if _in_band(word_count(line), tw):
-            out.append(line)
-        else:
-            out.append(fit_length(line, tw, api_key, model))
-    return out
-
-
-def shorten(text: str, ratio: float, api_key: str,
-            model: str = DEFAULT_MODEL) -> str:
-    """Rút text còn ~ratio độ dài, GIỮ NGUYÊN ngôn ngữ (wrapper fit_length)."""
-    text = (text or "").strip()
-    if not text:
-        raise OpenAIError("Không có text để rút gọn")
-    ratio = max(min(float(ratio), 0.95), 0.3)
-    return fit_length(text, max(int(word_count(text) * ratio), 3), api_key, model)
 
 
 CANNOT_FIT = "CANNOT_FIT"
@@ -522,7 +147,7 @@ def _resolve_output_lang(target_lang: str, asr_meta=None) -> tuple:
     return code, lang_name, False
 
 
-def _cue_lang_mismatch(cues, expected_code: str) -> list:
+def _lines_wrong_language(cues, expected_code: str) -> list:
     """Indices cue lệch ngôn ngữ so với expected (heuristic dấu Việt).
 
     - expected vi: dòng Latin dài gần như không dấu → nghi không phải VI
@@ -567,595 +192,171 @@ def _extract_json(raw: str) -> dict:
             raise OpenAIError(f"OpenAI JSON lỗi: {e}") from e
 
 
-def _cue_translations_from_groups(groups, n_asr: int) -> list:
-    """Suy cue_translations nếu mỗi group đúng 1 ASR index; else lỗi."""
-    cues = [""] * n_asr
-    filled = set()
-    for g in groups:
-        idxs = g["source_segment_indices"]
-        if len(idxs) != 1:
-            raise OpenAIError(
-                "Thiếu cue_translations và semantic_group span nhiều cue "
-                "— không được merge TTS theo group")
-        idx = idxs[0]
-        if idx in filled:
-            raise OpenAIError(f"cue {idx} bị trùng trong semantic_groups")
-        cues[idx] = g["translation"]
-        filled.add(idx)
-    return cues
-
-
-def _plain_asr_text(text: str) -> str:
-    return re.sub(r"[^\w]+", "", (text or ""), flags=re.UNICODE).casefold()
-
-
-def _asr_speech_dur(seg: dict) -> float:
-    start = float(seg.get("speech_start", seg.get("start", 0)))
-    end = float(seg.get("speech_end", seg.get("end", start)))
-    return max(end - start, 0.0)
-
-
-def _asr_is_prefix_crumb(short: dict, full: dict) -> bool:
-    if (short.get("speaker_id") or "SPEAKER_00") != (
-            full.get("speaker_id") or "SPEAKER_00"):
-        return False
-    if _asr_speech_dur(short) > 0.35:
-        return False
-    short_text = (short.get("text") or "").strip()
-    full_text = (full.get("text") or "").strip()
-    if not short_text or not full_text or len(short_text.split()) > 2:
-        return False
-    plain_short = _plain_asr_text(short_text)
-    plain_full = _plain_asr_text(full_text)
-    if not plain_short or plain_short == plain_full:
-        return False
-    if not plain_full.startswith(plain_short):
-        return False
-    gap = float(full.get("start", 0)) - float(short.get("end", 0))
-    return -0.05 <= gap <= 0.8
-
-
-def _asr_is_no_speech_crumb(seg: dict) -> bool:
-    if float(seg.get("no_speech_prob") or 0) < 0.9:
-        return False
-    if _asr_speech_dur(seg) > 0.5:
-        return False
-    return len((seg.get("text") or "").split()) <= 2
-
-
-def _asr_is_one_word_continuation(seg: dict, prev: dict | None) -> bool:
-    """A leftover 1-word token after the previous line ('रखूं।'). Don't invent."""
-    if prev is None:
-        return False
-    if (seg.get("speaker_id") or "SPEAKER_00") != (
-            prev.get("speaker_id") or "SPEAKER_00"):
-        return False
-    return len((seg.get("text") or "").split()) == 1
-
-
-def _crumb_indices(segs) -> list:
-    """ASR slots the rewrite model usually drops (prefix / no-speech crumbs)."""
-    out = []
-    segs = list(segs or [])
-    for i, seg in enumerate(segs):
-        nxt = segs[i + 1] if i + 1 < len(segs) else None
-        if nxt is not None and _asr_is_prefix_crumb(seg, nxt):
-            out.append(i)
-        elif _asr_is_no_speech_crumb(seg):
-            out.append(i)
-    return out
-
-
-def _latin_wordset(text: str) -> set:
-    return {w.casefold() for w in re.findall(r"[A-Za-z]{3,}", text or "")}
-
-
-_EN_HINTS = {
-    "the", "you", "your", "me", "my", "and", "now", "please", "help", "time",
-    "more", "very", "gotta", "let", "see", "what", "mean", "today", "cold",
-    "easy", "kind", "trust", "tell", "only", "english", "have", "ever",
-    "heard", "from", "talking", "like", "native", "one", "peasy",
-}
-
-_ID_HINTS = {
-    "aku", "kamu", "saya", "yang", "dan", "ini", "itu", "tidak", "bisa",
-    "dengan", "untuk", "kalau", "tolong", "lalu", "bulan", "bahasa",
-    "ingin", "bukan", "sudah", "masih", "juga", "dari", "pada", "ada",
-    "ikutin", "coba", "sekarang", "sebelum", "nggak", "gak", "nya",
-}
-
-
-def _looks_english(text: str) -> bool:
-    words = re.findall(r"[a-z']+", (text or "").lower())
-    if len(words) < 1:
-        return False
-    hits = sum(1 for w in words if w in _EN_HINTS)
-    return hits >= 1 and hits / len(words) >= 0.25
-
-
-def _is_english_only_line(text: str) -> bool:
-    """True when the ASR cue is an English teaching line, not mixed ID+EN."""
-    if not _looks_english(text):
-        return False
-    words = re.findall(r"[a-z']+", (text or "").lower())
-    return bool(words) and not any(word in _ID_HINTS for word in words)
-
-
-def _is_bilingual_echo(index: int, segs, cues) -> bool:
-    """Empty slot whose ASR is the other-language repeat of a neighbour."""
-    segs = list(segs or [])
-    cues = list(cues or [])
-    if index < 0 or index >= len(segs):
-        return False
-    asr_w = _latin_wordset(segs[index].get("text") or "")
-    if not asr_w:
-        return False
-    for j in (index - 1, index + 1):
-        if j < 0 or j >= len(cues):
-            continue
-        neighbor = (cues[j] or "").strip()
-        if not neighbor:
-            continue
-        other = _latin_wordset(neighbor)
-        if other and len(asr_w & other) / max(len(asr_w), 1) >= 0.4:
-            return True
-    return False
-
-
-def _align_overlap_score(lines, segs) -> int:
-    """How many non-empty lines share Latin words with their ASR cue."""
-    score = 0
-    for line, seg in zip(lines, segs or []):
-        if not str(line or "").strip():
-            continue
-        left = _latin_wordset(line)
-        right = _latin_wordset(seg.get("text") or "")
-        if left and right and len(left & right) / max(len(left), 1) >= 0.4:
-            score += 1
-    return score
-
-
-def _insert_blank_cues(raw_cues, n: int, insert_at: set):
-    aligned = []
-    src = 0
-    for i in range(n):
-        if i in insert_at:
-            aligned.append("")
-            continue
-        if src >= len(raw_cues):
-            return None
-        aligned.append(raw_cues[src])
-        src += 1
-    if src != len(raw_cues):
-        return None
-    return aligned
-
-
-def _align_by_overlap(raw_cues, segs, n: int, need: int):
-    """Try every place to insert `need` empties; keep the best ASR overlap.
-
-    Language-learning clips (ID line + English echo) get merged by the
-    rewrite model. Word overlap puts \"\" on the dropped echo, not a
-    random later cue.
-    """
-    if need < 1 or need > 3 or n > 80:
-        return None
-    from itertools import combinations
-    best = None
-    best_score = 0
-    for combo in combinations(range(n), need):
-        aligned = _insert_blank_cues(raw_cues, n, set(combo))
-        if aligned is None:
-            continue
-        score = _align_overlap_score(aligned, segs)
-        if score > best_score:
-            best_score = score
-            best = aligned
-    return best if best_score > 0 else None
-
-
-def _align_cue_count(raw_cues, segs, n: int):
-    """Insert \"\" on dropped prefix crumbs so length matches ASR.
-
-    The rewrite model often merges 'I' + 'I gotta go' and returns n-k
-    strings. If the shortfall equals those crumbs, restore index lock
-    without another LLM call. None if we cannot do it safely.
-    """
-    if not isinstance(raw_cues, list) or n <= 0:
-        return None
-    if len(raw_cues) == n:
-        return list(raw_cues)
-    if len(raw_cues) > n:
-        extra = raw_cues[n:]
-        if extra and all(not str(t or "").strip() for t in extra):
-            return list(raw_cues[:n])
-        return None
-    need = n - len(raw_cues)
-    crumbs = _crumb_indices(segs)
-    if need <= len(crumbs):
-        aligned = _insert_blank_cues(raw_cues, n, set(crumbs[:need]))
-        if aligned is not None:
-            return aligned
-    return _align_by_overlap(raw_cues, segs, n, need)
-
-
-def _repair_cue_count(data: dict, segs, n: int, api_key: str,
-                      model: str) -> dict:
-    """1 lần: tách lại cue_translations đúng n index."""
-    import json
-    raw = data.get("cue_translations")
-    asr_bits = []
-    for i, seg in enumerate(segs):
-        ss = float(seg.get("speech_start", seg["start"]))
-        se = float(seg.get("speech_end", seg["end"]))
-        asr_bits.append({
-            "index": i,
-            "start": round(ss, 2),
-            "end": round(se, 2),
-            "speaker": seg.get("speaker_id") or "SPEAKER_00",
-            "text": (seg.get("text") or "").replace("\n", " ").strip(),
-        })
-    payload = {
-        "needed": n,
-        "got": len(raw) if isinstance(raw, list) else None,
-        "asr_cues": asr_bits,
-        "cue_translations": raw,
-        "semantic_groups": data.get("semantic_groups") or [],
-        "master_translation": data.get("master_translation") or "",
-    }
-    got = len(raw) if isinstance(raw, list) else "invalid"
-    out = _chat(
-        (
-            f"You returned cue_translations of length {got}; we need EXACTLY "
-            f"{n} strings, index-aligned with ASR cues [0..{n - 1}]. "
-            f"INDEX LOCK: do not merge two ASR cues into one slot. "
-            f"If you merged a short leftover ('I', 'You're', 'Easy') into "
-            f"the following full phrase, put \"\" on the leftover index and "
-            f"keep the full phrase on its original index. "
-            f"Split any merged line back onto the ASR indices it came from. "
-            f"A language-learning echo (source line, then the same line in "
-            f"another language) is TWO cues: keep both indices and put \"\" "
-            f"on the echo instead of merging them. "
-            f"Use \"\" only when that cue has no speech to dub. "
-            f"Return ONLY valid JSON: "
-            f"{{\"cue_translations\": [exactly {n} strings]}}."
-        ),
-        json.dumps(payload, ensure_ascii=False),
-        api_key, model,
-    )
-    parsed = _extract_json(out)
-    fixed = parsed.get("cue_translations")
-    repaired = dict(data)
-    if isinstance(fixed, list):
-        repaired["cue_translations"] = fixed
-    return repaired
-
-
-def _ensure_cue_count(data: dict, segs, n: int, api_key: str,
-                      model: str) -> tuple:
-    """Make cue_translations length == n. Returns (data, 'aligned'|'repaired'|'')."""
-    raw = data.get("cue_translations")
-    if not isinstance(raw, list) or len(raw) == n:
-        return data, ""
-    aligned = _align_cue_count(raw, segs, n)
-    if aligned is not None:
-        out = dict(data)
-        out["cue_translations"] = aligned
-        return out, "aligned"
-    repaired = _repair_cue_count(data, segs, n, api_key, model)
-    fixed = repaired.get("cue_translations")
-    if isinstance(fixed, list) and len(fixed) == n:
-        return repaired, "repaired"
-    aligned = _align_cue_count(
-        fixed if isinstance(fixed, list) else raw, segs, n)
-    if aligned is not None:
-        out = dict(repaired)
-        out["cue_translations"] = aligned
-        return out, "aligned"
-    got = len(fixed) if isinstance(fixed, list) else type(fixed)
-    raise OpenAIError(
-        f"cue_translations phải có đúng {n} phần tử, nhận {got}")
-
-
-def _normalize_dub_script(data: dict, n_asr: int) -> dict:
-    """Chuẩn hoá + validate reconstruct_script output."""
-    groups_in = data.get("semantic_groups") or data.get("segments") or []
-    raw_cues = data.get("cue_translations")
-    if not groups_in and raw_cues is None:
-        raise OpenAIError(
-            "reconstruct_script thiếu cue_translations / semantic_groups")
-
-    groups = []
-    for i, g in enumerate(groups_in or []):
-        start = float(g.get("start", 0))
-        end = float(g.get("end", start + 0.4))
-        if end <= start:
-            end = start + 0.4
-        idxs = g.get("source_segment_indices")
-        if idxs is None and g.get("source_segments") is not None:
-            idxs = g.get("source_segments")
-        if not isinstance(idxs, list):
-            idxs = [i]
-        idxs = [int(x) for x in idxs]
-        for x in idxs:
-            if x < 0 or x >= n_asr:
-                raise OpenAIError(f"source_segment_indices ngoài range: {idxs}")
-        trans = (g.get("translation") or g.get("text") or "").strip()
-        src = (g.get("source_text") or g.get("source") or "").strip()
-        if not trans:
-            raise OpenAIError(f"semantic_group {i} thiếu translation")
-        groups.append({
-            "id": int(g.get("id", i + 1)),
-            "source_segment_indices": idxs,
-            "start": start,
-            "end": end,
-            "source_text": src,
-            "translation": trans,
-        })
-
-    if raw_cues is not None:
-        if not isinstance(raw_cues, list) or len(raw_cues) != n_asr:
-            raise OpenAIError(
-                f"cue_translations phải có đúng {n_asr} phần tử, "
-                f"nhận {len(raw_cues) if isinstance(raw_cues, list) else type(raw_cues)}")
-        cue_translations = [
-            (t if isinstance(t, str) else str(t or "")).strip()
-            for t in raw_cues
-        ]
-    else:
-        cue_translations = _cue_translations_from_groups(groups, n_asr)
-
-    if not any(cue_translations):
-        raise OpenAIError("cue_translations toàn rỗng")
-
-    return {
-        "source_language": (data.get("source_language") or "").strip(),
-        "asr_confidence": (data.get("asr_confidence") or "medium").strip().lower(),
-        "master_meaning": (data.get("master_meaning") or "").strip(),
-        "master_translation": (data.get("master_translation") or "").strip(),
-        "uncertain_spans": list(data.get("uncertain_spans") or []),
-        "semantic_groups": groups,
-        "cue_translations": cue_translations,
-    }
-
-
-def _repair_cue_languages(script: dict, mismatched: list, lang_name: str,
-                          api_key: str, model: str = DEFAULT_MODEL) -> dict:
-    """1 lần: viết lại đúng các cue lệch sang lang_name."""
-    import json
-    cues = list(script["cue_translations"])
-    n = len(cues)
-    payload = {
-        "mismatched_indices": mismatched,
-        "cue_translations": cues,
-        "master_translation": script.get("master_translation") or "",
-        "master_meaning": script.get("master_meaning") or "",
-    }
-    raw = _chat(
-        (
-            f"Some cue_translations are in the WRONG language. "
-            f"Rewrite ONLY the cues at indices {mismatched} into {lang_name}. "
-            f"Keep meaning aligned with master_translation / master_meaning. "
-            f"Do not invent facts. Leave all other cues unchanged. "
-            f"Return ONLY valid JSON: "
-            f"{{\"cue_translations\": [exactly {n} strings]}}."
-        ),
-        json.dumps(payload, ensure_ascii=False),
-        api_key, model,
-    )
-    data = _extract_json(raw)
-    fixed = data.get("cue_translations")
-    if not isinstance(fixed, list) or len(fixed) != n:
-        raise OpenAIError(
-            f"language repair trả cue_translations sai độ dài "
-            f"(cần {n})")
-    out = dict(script)
-    out["cue_translations"] = [
-        (t if isinstance(t, str) else str(t or "")).strip() for t in fixed
-    ]
-    # Cập nhật group translation nếu group chỉ 1 cue được sửa
-    groups = []
-    for g in out.get("semantic_groups") or []:
-        gg = dict(g)
-        idxs = gg.get("source_segment_indices") or []
-        if len(idxs) == 1 and idxs[0] in mismatched:
-            gg["translation"] = out["cue_translations"][idxs[0]]
-        groups.append(gg)
-    out["semantic_groups"] = groups
-    return out
-
-
-def _reconstruct_system_prompt(*, n: int, lang_name: str, expected_code: str,
-                               lang_det: str, lang_p: float, conf: str,
-                               task: str) -> str:
-    """Prompt reconstruct — tách ra để self-check index-lock rules."""
+def _blocks_system_prompt(*, n: int, lang_name: str, expected_code: str,
+                          lang_det: str, lang_p: float, task: str) -> str:
+    """Prompt for block translation — one line per block, no reshuffling."""
     return (
-        f"You are reconstructing an ASR transcript for video dubbing. "
-        f"The ASR may contain severe phonetic errors, mixed-language "
-        f"transcriptions, duplicated words, and incorrect segmentation. "
-        f"Detected language hint: {lang_det} (p={lang_p:.2f}), "
-        f"overall ASR confidence: {conf}. "
-        f"Output language MUST be {lang_name} (code={expected_code}). "
-        f"First infer the most likely intended message using the ENTIRE "
-        f"transcript as context. "
-        f"Do not invent product claims, prices, or information that cannot "
-        f"reasonably be inferred from context. "
+        f"You write spoken dubbing lines in {lang_name} (code={expected_code}). "
+        f"The input is an ASR transcript cut into {n} blocks. A block is one "
+        f"run of speech between two real pauses, so it is what a person says "
+        f"in one breath. Detected source language: {lang_det} "
+        f"(p={lang_p:.2f}). "
+        f"The ASR may contain phonetic errors, duplicated words and mixed "
+        f"languages. First infer the intended message from the WHOLE "
+        f"transcript, then write each block. "
         f"{task} "
-        f"HARD RULE: master_translation, every cue_translations[i], and "
-        f"every semantic_group.translation MUST be entirely in {lang_name}. "
-        f"Do not mix languages (e.g. do not insert Vietnamese into an "
-        f"Indonesian script, or vice versa). "
-        f"INDEX LOCK: cue_translations[i] MUST be the spoken line for ASR "
-        f"cue [i] only. Never put cue j's speech-act into cue_translations[i] "
-        f"when i != j. A second-speaker aside (different speaker_id, or a "
-        f"coach / in-app line) stays in its own index. "
-        f"A leftover crumb (1–2 ASR tokens under 0.5s, or a 1–2 word cue "
-        f"with no_speech) MUST be \"\" — do not invent a sentence for it. "
-        f"If Whisper split one sentence across two cues, split the "
-        f"{lang_name} translation across those two indices — the short slot "
-        f"gets a short clause, not the whole sentence. Do not merge two ASR "
-        f"cues into one cue_translations slot and shift later lines. "
-        f"A language-learning echo (source line, then the same line in "
-        f"another language) is TWO ASR cues — keep both indices. If the "
-        f"echo is already English and output is English, copy that "
-        f"wording. Put \"\" on the echo only to avoid merging indices. "
-        f"CRITICAL: TTS keeps each ASR cue's original pause timing, so you "
-        f"MUST allocate spoken lines into cue_translations — an array of "
-        f"exactly {n} strings, index-aligned with ASR cues [0..{n - 1}]. "
-        f"Each string is what should be spoken in that cue's speech window; "
-        f"use \"\" only if that cue has no speech to dub. "
-        f"DURATION-AWARE: each cue header has (~N spoken words). Match that "
-        f"count so a talking-head slot is not left half-silent. Do NOT pack "
-        f"most of the script into an early cue when later cues still have "
-        f"time. "
-        f"If the output language is English and an ASR cue is already "
-        f"English (a language-learning echo like 'Help me.' / 'I gotta go.'), "
-        f"copy that wording — do not paraphrase it. "
-        f"cue_translations must only redistribute master_translation — "
-        f"no new facts. "
-        f"master_translation MUST be the FULL spoken script (every idea "
-        f"that appears in cue_translations / groups — do not truncate). "
-        f"semantic_groups may SPAN multiple ASR indices for meaning/"
-        f"context only (not TTS units). "
-        f"Return ONLY valid JSON (no markdown) with keys: "
-        f"source_language, asr_confidence (low|medium|high), "
-        f"master_meaning, master_translation, uncertain_spans (array), "
-        f"cue_translations (array of {n} strings), "
-        f"semantic_groups (array of objects with id, source_segment_indices, "
-        f"start, end, source_text, translation). "
-        f"start/end on groups are informational only."
+        f"HARD RULE: return exactly {n} lines, one per block, in order. "
+        f"lines[i] is spoken while block i plays. Never merge two blocks "
+        f"into one line, never move a line to another index, never drop one. "
+        f"Use \"\" only when a block truly has nothing to dub. "
+        f"Each block header says how long it is and how many words fit in "
+        f"that time. Stay near that word count: a line far over it has to be "
+        f"rushed, a line far under it leaves the speaker silent on screen. "
+        f"Everything must be in {lang_name} only — never mix languages. "
+        f"Do not invent products, prices or claims that are not in the "
+        f"transcript. "
+        f"Return ONLY valid JSON (no markdown) with keys: master_meaning "
+        f"(one sentence, in English), master_translation (the full spoken "
+        f"script in {lang_name}), lines (array of exactly {n} strings)."
     )
 
 
-def reconstruct_script(segs, target_lang: str, api_key: str,
-                       asr_meta=None, model: str = DEFAULT_MODEL) -> dict:
-    """Phục hồi nghĩa TOÀN video + master translation + per-cue lines.
+def translate_blocks(blocks, target_lang: str, api_key: str,
+                     asr_meta=None, model: str = DEFAULT_MODEL) -> dict:
+    """Translate whole blocks of speech, one line per block.
 
-    Chưa đụng duration. Master meaning/translation là source of truth.
-    target_lang='same' → sửa ASR nhẹ trong ngôn ngữ nguồn (Whisper detect).
+    Blocks are built from word timestamps by the caller, so the mapping from
+    text to time is decided by code, not by the model. The model only has to
+    keep the order and the count, and both are checked here.
     """
-    segs = list(segs or [])
-    if not segs:
-        raise OpenAIError("Không có ASR segments để reconstruct")
+    blocks = list(blocks or [])
+    if not blocks:
+        raise OpenAIError("Khong co block nao de dich")
     asr_meta = asr_meta or {}
     expected_code, lang_name, same_mode = _resolve_output_lang(
         target_lang, asr_meta)
+    n = len(blocks)
 
-    blocks = []
-    for i, s in enumerate(segs):
-        ss = float(s.get("speech_start", s["start"]))
-        se = float(s.get("speech_end", s["end"]))
-        t = (s.get("text") or "").replace("\n", " ").strip()
-        speaker = s.get("speaker_id") or "SPEAKER_00"
-        tw = target_words(max(se - ss, 0.0))
-        blocks.append(
-            f"[{i}] [{ss:.2f}-{se:.2f}] {speaker} (~{tw} spoken words)\n{t}"
-        )
-    body = "\n\n".join(blocks)
-    if (asr_meta.get("language") or "").lower() in ("id", "indonesian"):
-        body = (
-            "ASR note: Indonesian 'detik' (seconds) is often heard as "
-            "'dekit' or 'dek' — never translate that as minutes.\n\n"
-            + body
-        )
-    lang_det = asr_meta.get("language") or "unknown"
-    lang_p = float(asr_meta.get("language_probability") or 0.0)
-    conf = asr_meta.get("asr_confidence") or (
-        "low" if lang_p and lang_p < 0.75 else "medium")
-
-    n = len(segs)
+    body = "\n\n".join(
+        f"[{i}] {float(b['start']):.2f}-{float(b['end']):.2f} "
+        f"({float(b['end']) - float(b['start']):.1f}s, ~{int(b['words'])} words)\n"
+        f"{(b.get('text') or '').strip()}"
+        for i, b in enumerate(blocks)
+    )
     if same_mode:
         task = (
-            f"Lightly repair ASR errors and allocate spoken lines in "
-            f"{lang_name} only. Prefer keeping the original wording when a "
-            f"cue is already clear. Do NOT creatively translate into another "
-            f"language."
+            "Lightly repair the ASR errors and keep the original wording "
+            "where a block is already clear. Do NOT translate into another "
+            "language."
         )
     else:
-        task = (
-            f"Produce a natural spoken translation into {lang_name} only."
-        )
+        task = f"Write a natural spoken translation into {lang_name}."
 
     raw = _chat(
-        _reconstruct_system_prompt(
+        _blocks_system_prompt(
             n=n, lang_name=lang_name, expected_code=expected_code,
-            lang_det=lang_det, lang_p=lang_p, conf=conf, task=task,
+            lang_det=asr_meta.get("language") or "unknown",
+            lang_p=float(asr_meta.get("language_probability") or 0.0),
+            task=task,
         ),
         body, api_key, model,
     )
     data = _extract_json(raw)
-    data, count_note = _ensure_cue_count(data, segs, n, api_key, model)
-    script = _normalize_dub_script(data, n)
-    script["cue_count_aligned"] = count_note == "aligned"
-    script["cue_count_repaired"] = count_note == "repaired"
-    if not script["master_meaning"]:
-        script["master_meaning"] = script["master_translation"][:240]
-    if not script["master_translation"]:
-        joined = " ".join(t for t in script["cue_translations"] if t)
-        if not joined:
-            joined = " ".join(
-                g["translation"] for g in script["semantic_groups"])
-        script["master_translation"] = joined
-    # Đồng bộ master nếu groups/cues dài hơn (tránh master cắt cụt)
-    script["master_translation"] = _fullest_master(
-        script["master_translation"],
-        script.get("cue_translations") or [],
-        script.get("semantic_groups") or [],
+    lines = _block_lines(data, n, body, api_key, model)
+    lines = _repair_block_languages(
+        lines, expected_code, lang_name, api_key, model)
+
+    master = (data.get("master_translation") or "").strip()
+    if not master:
+        master = " ".join(line for line in lines if line)
+    meaning = (data.get("master_meaning") or "").strip() or master[:240]
+    return {
+        "lines": lines,
+        "master_meaning": meaning,
+        "master_translation": master,
+        "output_lang_code": expected_code,
+        "output_lang_name": lang_name,
+    }
+
+
+def _block_lines(data: dict, n: int, body: str, api_key: str,
+                 model: str) -> list:
+    """Exactly n lines, or one repair call, or a loud failure.
+
+    There is no guessing here on purpose. The old code padded a short list
+    with empty strings at a place it picked by word overlap, which silently
+    shifted every later line by one block.
+    """
+    lines = data.get("lines")
+    if isinstance(lines, list) and len(lines) == n:
+        return [str(line or "").strip() for line in lines]
+
+    got = len(lines) if isinstance(lines, list) else type(lines).__name__
+    out = _chat(
+        (
+            f"You returned {got} lines; exactly {n} are needed, one per "
+            f"block, in the same order. Split any line you merged back onto "
+            f"the blocks it came from, and use \"\" for a block with nothing "
+            f"to dub. Return ONLY JSON: {{\"lines\": [exactly {n} strings]}}."
+        ),
+        body + "\n\nYour lines:\n" + json.dumps(lines, ensure_ascii=False),
+        api_key, model,
     )
+    fixed = _extract_json(out).get("lines")
+    if not isinstance(fixed, list) or len(fixed) != n:
+        raise OpenAIError(
+            f"Ban dich phai co dung {n} dong cho {n} block, nhan "
+            f"{len(fixed) if isinstance(fixed, list) else type(fixed)}")
+    return [str(line or "").strip() for line in fixed]
 
-    script["output_lang_code"] = expected_code
-    script["output_lang_name"] = lang_name
-    script["language_repaired"] = False
 
-    mismatched = _cue_lang_mismatch(script["cue_translations"], expected_code)
-    if mismatched:
-        script = _repair_cue_languages(
-            script, mismatched, lang_name, api_key, model)
-        script["output_lang_code"] = expected_code
-        script["output_lang_name"] = lang_name
-        script["language_repaired"] = True
-        script["language_repair_indices"] = mismatched
-        still = _cue_lang_mismatch(script["cue_translations"], expected_code)
-        if still:
-            raise OpenAIError(
-                f"cue_translations vẫn lệch ngôn ngữ sau repair "
-                f"(expected={expected_code}, cues={still}): "
-                + " | ".join(
-                    f"[{i}] {script['cue_translations'][i][:80]}"
-                    for i in still))
-
-    script = _restore_english_source_cues(script, segs, lang_name)
-
-    script.setdefault("cues_filled", False)
-    script.setdefault("cues_filled_indices", [])
-    script.setdefault("empty_cue_indices", [])
-    script.setdefault("garbled_silent_indices", [])
-    script.setdefault("trailing_cta_filled", False)
-    empty_idxs = _empty_asr_cue_indices(segs, script["cue_translations"])
-    if empty_idxs:
-        script = _fill_empty_cues(
-            script, segs, empty_idxs, lang_name, api_key, model)
-        script["output_lang_code"] = expected_code
-        script["output_lang_name"] = lang_name
-        still_empty = _empty_asr_cue_indices(segs, script["cue_translations"])
-        script["empty_cue_indices"] = still_empty
-    script = _apply_trailing_cta_fill(script, segs)
-    script["output_lang_code"] = expected_code
-    script["output_lang_name"] = lang_name
-    return script
+def _repair_block_languages(lines, expected_code: str, lang_name: str,
+                            api_key: str, model: str) -> list:
+    """Redo the lines that came back in the wrong language. One call."""
+    wrong = _lines_wrong_language(lines, expected_code)
+    if not wrong:
+        return lines
+    out = _chat(
+        (
+            f"Rewrite each line into {lang_name} only, keeping its meaning "
+            f"and roughly its length. Return ONLY JSON: "
+            f"{{\"lines\": {{\"<index>\": \"<line>\"}}}}."
+        ),
+        json.dumps({str(i): lines[i] for i in wrong}, ensure_ascii=False),
+        api_key, model,
+    )
+    fixed = _extract_json(out).get("lines") or {}
+    repaired = list(lines)
+    for key, value in fixed.items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(repaired) and str(value or "").strip():
+            repaired[index] = str(value).strip()
+    still = _lines_wrong_language(repaired, expected_code)
+    if still:
+        raise OpenAIError(
+            f"Van con dong sai ngon ngu sau khi sua (mong {expected_code}): "
+            + " | ".join(f"[{i}] {repaired[i][:80]}" for i in still))
+    return repaired
 
 
 def rephrase_for_duration(text: str, seconds: float, api_key: str, *,
                           master_meaning: str, prev_text: str = "",
                           next_text: str = "", shorter: bool = True,
                           target_lang: str = "", lang_name: str = "",
+                          target_words_n: int,
                           model: str = DEFAULT_MODEL) -> str:
     """Chỉ đổi phrasing để vừa ~seconds. Khóa intent dòng — có thể CANNOT_FIT."""
     text = (text or "").strip()
     if not text:
         raise OpenAIError("Không có text để rephrase")
     sec = max(float(seconds), 0.4)
-    tw = target_words(sec)
+    # The word budget is measured from the real voice by the caller. There is
+    # no constant here on purpose: the old one was tuned for English and made
+    # every Vietnamese rewrite come out half as long as the slot.
+    tw = max(int(target_words_n), 2)
     system = _rephrase_system_prompt(
         seconds=sec, target_words_n=tw, shorter=shorter,
         master_meaning=master_meaning, prev_text=prev_text,
@@ -1225,665 +426,73 @@ def _rephrase_system_prompt(*, seconds: float, target_words_n: int,
     )
 
 
-def _asr_empty_should_stay_silent(asr_text: str, master_translation: str = "") -> bool:
-    """True → không fill TTS; ASR rác / không suy được từ master.
-
-    Ưu tiên looks_garbled; thêm heuristic ≥2 token TitleCase trong câu dài
-    (kiểu 'Sing Jemah kanil...').
-    """
-    asr = (asr_text or "").strip()
-    if not asr:
-        return True
-    if looks_garbled(asr):
-        return True
-    words = [w for w in re.sub(r"[,.!?]+", " ", asr).split() if w]
-    if len(words) >= 4:
-        caps = [
-            w for w in words
-            if len(w) > 1 and w[0].isupper() and w[1:].islower()
-        ]
-        if len(caps) >= 2:
-            return True
-    # Không bắt buộc overlap master (master có thể khác script khi dịch ID→VI)
-    _ = master_translation
-    return False
-
-
-def _restore_english_source_cues(script: dict, segs, lang_name: str) -> dict:
-    """Keep English teaching lines as Whisper heard them, not paraphrased."""
-    if not (lang_name or "").lower().startswith("english"):
-        return script
-    cues = list(script.get("cue_translations") or [])
-    changed = False
-    for i, seg in enumerate(segs or []):
-        if i >= len(cues):
-            break
-        asr = (seg.get("text") or "").replace("\n", " ").strip()
-        if looks_garbled(asr) or not _is_english_only_line(asr):
-            continue
-        if cues[i] != asr:
-            cues[i] = asr
-            changed = True
-    if not changed:
-        return script
-    out = dict(script)
-    out["cue_translations"] = cues
-    return out
-
-
-def _empty_asr_cue_indices(segs, cue_translations) -> list:
-    """ASR còn text nhưng cue_translations[i] rỗng."""
-    out = []
-    cues = list(cue_translations or [])
-    for i, seg in enumerate(segs or []):
-        asr = (seg.get("text") or "").replace("\n", " ").strip()
-        if not asr:
-            continue
-        cue = cues[i].strip() if i < len(cues) and cues[i] else ""
-        if not cue:
-            out.append(i)
-    return out
-
-
-def _fill_empty_cues(script: dict, segs, empty_idxs: list, lang_name: str,
-                     api_key: str, model: str = DEFAULT_MODEL) -> dict:
-    """1 lần: điền cue rỗng từ master; garbled → silence bắt buộc."""
-    import json
-    cues = list(script["cue_translations"])
-    n = len(cues)
-    master_t = script.get("master_translation") or ""
-    out = dict(script)
-    unc = list(out.get("uncertain_spans") or [])
-    merged = list(cues)
-
-    silent_idxs = []
-    fill_idxs = []
-    filled_idxs = []
-    crumb_idxs = set(_crumb_indices(segs))
-    copy_english = (lang_name or "").lower().startswith("english")
-    for i in empty_idxs:
-        asr = (segs[i].get("text") or "").replace("\n", " ").strip()
-        prev = segs[i - 1] if i else None
-        if (
-            i in crumb_idxs
-            or _asr_is_one_word_continuation(segs[i], prev)
-            or _asr_empty_should_stay_silent(asr, master_t)
-        ):
-            silent_idxs.append(i)
-            merged[i] = ""
-            for tag in (f"garbled_asr[{i}]", f"empty_cue[{i}]"):
-                if tag not in unc:
-                    unc.append(tag)
-        elif copy_english and _is_english_only_line(asr):
-            merged[i] = asr
-            filled_idxs.append(i)
-        elif _is_bilingual_echo(i, segs, merged):
-            silent_idxs.append(i)
-            merged[i] = ""
-            for tag in (f"garbled_asr[{i}]", f"empty_cue[{i}]"):
-                if tag not in unc:
-                    unc.append(tag)
-        else:
-            fill_idxs.append(i)
-
-    if fill_idxs:
-        asr_bits = []
-        for i in fill_idxs:
-            t = (segs[i].get("text") or "").replace("\n", " ").strip()
-            asr_bits.append({"index": i, "asr_text": t})
-        payload = {
-            "fill_indices": fill_idxs,
-            "asr_for_empty": asr_bits,
-            "cue_translations": merged,
-            "master_translation": master_t,
-            "master_meaning": script.get("master_meaning") or "",
-            "uncertain_spans": unc,
-        }
-        raw = _chat(
-            (
-                f"Some ASR cues have text but cue_translations is empty. "
-                f"Write spoken lines in {lang_name} ONLY for indices "
-                f"{fill_idxs}, and ONLY if the meaning can be inferred from "
-                f"master_translation (same ad). "
-                f"Leave all other cues unchanged. "
-                f"If ASR does not match any idea in master_translation, "
-                f"keep that cue as \"\" and add to uncertain_spans. "
-                f"Do NOT phonetically translate or invent meaning from "
-                f"gibberish ASR. Do not invent product claims or prices. "
-                f"Return ONLY valid JSON: "
-                f"{{\"cue_translations\": [exactly {n} strings], "
-                f"\"uncertain_spans\": [array]}}."
-            ),
-            json.dumps(payload, ensure_ascii=False),
-            api_key, model,
-        )
-        data = _extract_json(raw)
-        fixed = data.get("cue_translations")
-        if not isinstance(fixed, list) or len(fixed) != n:
-            aligned = _align_cue_count(
-                fixed if isinstance(fixed, list) else [], segs, n)
-            fixed = aligned if aligned is not None else None
-        if isinstance(fixed, list) and len(fixed) == n:
-            for i in fill_idxs:
-                new_t = (
-                    fixed[i] if isinstance(fixed[i], str)
-                    else str(fixed[i] or "")
-                ).strip()
-                if new_t:
-                    merged[i] = new_t
-                    filled_idxs.append(i)
-                else:
-                    merged[i] = ""
-                    tag = f"empty_cue[{i}]"
-                    if tag not in unc:
-                        unc.append(tag)
-            for u in data.get("uncertain_spans") or []:
-                if u not in unc:
-                    unc.append(u)
-        else:
-            for i in fill_idxs:
-                tag = f"empty_cue[{i}]"
-                if tag not in unc:
-                    unc.append(tag)
-
-    # Post-guard: index silent/garbled không được có text
-    for i in silent_idxs:
-        merged[i] = ""
-
-    out["cue_translations"] = merged
-    out["uncertain_spans"] = unc
-    out["cues_filled"] = bool(filled_idxs)
-    out["cues_filled_indices"] = filled_idxs
-    out["empty_cue_indices"] = [
-        i for i in empty_idxs if not (merged[i] or "").strip()
-    ]
-    out["garbled_silent_indices"] = silent_idxs
-    return out
-
-
-def _fullest_master(master: str, cues, groups) -> str:
-    """Chọn bản master dài nhất hợp lệ (tránh master_translation cắt cụt)."""
-    candidates = [(master or "").strip()]
-    cue_join = " ".join((t or "").strip() for t in (cues or []) if (t or "").strip())
-    if cue_join:
-        candidates.append(cue_join)
-    group_join = " ".join(
-        (g.get("translation") or "").strip()
-        for g in (groups or []) if (g.get("translation") or "").strip())
-    if group_join:
-        candidates.append(group_join)
-    return max(candidates, key=len)
-
-
-def _closing_line_from_master(master: str) -> str:
-    """Câu kết / CTA = sentence cuối của master."""
-    text = (master or "").strip()
-    if not text:
-        return ""
-    parts = re.split(r"(?<=[.!?…])\s+", text)
-    parts = [p.strip() for p in parts if p.strip()]
-    if not parts:
-        return text
-    return parts[-1]
-
-
-def _trailing_silent_span(segs, cues):
-    """(first_idx, last_idx, span_seconds) của đuôi cue rỗng, hoặc None."""
-    cues = list(cues or [])
-    n = len(cues)
-    if not n or not segs:
-        return None
-    i = n - 1
-    while i >= 0 and not (cues[i] or "").strip():
-        i -= 1
-    first = i + 1
-    if first >= n:
-        return None
-    last = n - 1
-    ss = float(segs[first].get("speech_start", segs[first]["start"]))
-    se = float(segs[last].get("speech_end", segs[last]["end"]))
-    return first, last, max(se - ss, 0.0)
-
-
-def _short_cta_variant(cta: str) -> str:
-    """Rút CTA ngắn hơn khi trùng cue trước (cùng intent, khác wording)."""
-    t = (cta or "").strip()
-    if not t:
-        return t
-    orig = t
-    # Bỏ đuôi thời gian phổ biến
-    t2 = re.sub(
-        r"\s*(ngay\s+bây\s+giờ|ngay\s+lập\s+tức|bây\s+giờ|right\s+now|now)\s*[.!?…]*\s*$",
-        ".",
-        t,
-        flags=re.IGNORECASE,
-    )
-    t2 = re.sub(r"\s+\.\s*$", ".", t2).strip()
-    if t2 and t2.rstrip(".!?…") and t2 != orig:
-        return t2 if t2.endswith((".", "!", "?")) else t2 + "."
-    # Rút còn cụm nút / thử
-    low = orig.lower()
-    if "nhấn" in low or "bấm" in low or "click" in low or "tap" in low:
-        if "dưới" in low or "below" in low:
-            return "Nhấn bên dưới."
-        return "Nhấn nút."
-    if "thử" in low or "try" in low:
-        return "Thử ngay."
-    words = re.findall(r"\S+", orig.rstrip(".!?"))
-    if len(words) > 3:
-        return " ".join(words[:3]) + "."
-    return orig
-
-
-def _apply_trailing_cta_fill(script: dict, segs, min_span: float = 1.5) -> dict:
-    """Đuôi silent/garbled dài → 1 CTA từ master (không phiên âm ASR)."""
-    out = dict(script)
-    out.setdefault("trailing_cta_filled", False)
-    cues = list(out.get("cue_translations") or [])
-    info = _trailing_silent_span(segs, cues)
-    if not info:
-        return out
-    first, last, span = info
-    if span < min_span:
-        return out
-    master = _fullest_master(
-        out.get("master_translation") or "",
-        cues,
-        out.get("semantic_groups") or [],
-    )
-    out["master_translation"] = master
-    cta = _closing_line_from_master(master)
-    if not cta:
-        return out
-    prev = ""
-    for j in range(first - 1, -1, -1):
-        if (cues[j] or "").strip():
-            prev = cues[j].strip()
-            break
-    # Trùng cue trước → dùng biến thể ngắn (vẫn fill, tránh miệng nói mà câm)
-    if prev and cta == prev:
-        cta = _short_cta_variant(cta)
-        if not cta or cta == prev:
-            cta = "Thử ngay."
-        out["trailing_cta_variant"] = True
-    cues[first] = cta
-    out["cue_translations"] = cues
-    out["trailing_cta_filled"] = True
-    out["trailing_cta_index"] = first
-    gs = [x for x in (out.get("garbled_silent_indices") or []) if x != first]
-    out["garbled_silent_indices"] = gs
-    unc = [
-        u for u in (out.get("uncertain_spans") or [])
-        if u not in (f"garbled_asr[{first}]", f"empty_cue[{first}]", first, str(first))
-    ]
-    out["uncertain_spans"] = unc
-    return out
-
-
 def _selfcheck():
-    assert _parse_numbered("1. xin chao\n2. tam biet", 2) == ["xin chao", "tam biet"]
-    assert _parse_numbered("2) hai\n1) mot", 2) == ["mot", "hai"]      # sai thứ tự
-    assert _parse_numbered("Sure!\n1. a\n2. b\n", 2) == ["a", "b"]     # bỏ lời dẫn
-    for raw, n in (("1. a", 2), ("1. a\n2. b\n3. c", 2), ("khong danh so", 1)):
+    """The block path, with the network replaced by canned answers."""
+    replies = []
+
+    def fake_chat(system, user, api_key, model):
+        return replies.pop(0)
+
+    global _chat
+    real_chat, _chat = _chat, fake_chat
+    try:
+        blocks = [
+            {"start": 0.0, "end": 2.0, "text": "hello there", "words": 9},
+            {"start": 3.0, "end": 5.0, "text": "buy it now", "words": 9},
+        ]
+        replies.append(json.dumps({
+            "master_meaning": "an ad",
+            "master_translation": "xin chào. mua ngay.",
+            "lines": ["xin chào các bạn nhé", "mua ngay hôm nay đi"],
+        }))
+        out = translate_blocks(blocks, "vi", "key")
+        assert out["lines"] == ["xin chào các bạn nhé", "mua ngay hôm nay đi"], out
+        assert out["output_lang_code"] == "vi"
+
+        # A short list is repaired by asking again, never padded by guessing.
+        replies.append(json.dumps({"lines": ["một dòng duy nhất thôi"]}))
+        replies.append(json.dumps({"lines": ["dòng một ở đây", "dòng hai ở đây"]}))
+        out = translate_blocks(blocks, "vi", "key")
+        assert out["lines"] == ["dòng một ở đây", "dòng hai ở đây"], out
+
+        # Still the wrong count after the repair: fail loudly.
+        replies.append(json.dumps({"lines": ["a"]}))
+        replies.append(json.dumps({"lines": ["a"]}))
         try:
-            _parse_numbered(raw, n)
+            translate_blocks(blocks, "vi", "key")
         except OpenAIError:
             pass
         else:
-            raise AssertionError(f"lệch số dòng phải ném: {raw!r}")
-    assert target_words(10) == 24 and word_count("a b c") == 3
-    assert _in_band(24, 24) and not _in_band(5, 24)
-    packed = " ".join(["word"] * 20)
-    assert score_pace(packed, 2.0)["verdict"] == "too_fast"
-    assert score_pace("Hi there.", 4.0)["verdict"] == "too_slow"
-    assert score_pace("Help me.", 0.6)["verdict"] == "ok"
-    assert score_pace("", 2.0)["verdict"] == "silent"
-    assert score_pace("one two three four five", 2.0)["verdict"] == "ok"
-    assert pace_counts([
-        {"verdict": "too_fast"}, {"verdict": "ok"}, {"heard": "too_slow"},
-    ], "verdict")["too_fast"] == 1
-    rule = _length_rule(30)
-    assert "30" in rule and "dubbing" in rule.lower()
-    assert "supporting detail" not in rule.lower()
-    assert _length_rule(0) == ""
-    # Heuristic tổng quát — không gắn case ASR cụ thể
-    assert looks_garbled("")  # rỗng
-    assert looks_garbled("Alpha Betagamma Deltaepsilon")  # TitleCase, không kết câu
-    assert looks_garbled("abcdefgh ijklmnop qrstuvwx")  # nhiều token dài
-    assert not looks_garbled("we need a loan but fear high fees.")
-    assert _mostly_same_script("hello world abcdef", "hello world abcdef")
-    assert _mostly_same_script("abcdef ghijkl", "prefix abcdef ghijkl suffix")
-    assert not _mostly_same_script("abcdef ghijkl", "hoan toan khac roi")
-    assert "garbled" in _asr_context_rule("Vietnamese").lower()
-    # Language mismatch heuristic (VI diacritics)
-    assert _resolve_output_lang("same", {"language": "id"})[0] == "id"
-    assert "Indonesian" in _resolve_output_lang("same", {"language": "id"})[1]
-    assert _resolve_output_lang("VI", {})[0] == "vi"
-    id_cues = [
-        "Butuh pinjaman tapi takut bunganya besar?",
-        "Pakai aplikasi ini untuk menghitung bunga.",
-        "Klik tombol di bawah sekarang.",
-    ]
-    assert _cue_lang_mismatch(id_cues, "id") == []
-    mixed = list(id_cues)
-    mixed[2] = "Nhấn nút bên dưới ngay bây giờ."
-    assert _cue_lang_mismatch(mixed, "id") == [2]
-    assert _cue_lang_mismatch(mixed, "vi")  # first ID lines lack VI marks
-    assert 2 not in _cue_lang_mismatch(
-        ["Nhấn nút bên dưới ngay bây giờ để đăng ký ngay."], "vi")
-    sample = _normalize_dub_script({
-        "source_language": "id",
-        "asr_confidence": "low",
-        "master_meaning": "loan app CTA",
-        "master_translation": "Full VI script.",
-        "uncertain_spans": [],
-        "cue_translations": ["Một.", "Hai ba.", "CTA."],
-        "semantic_groups": [
-            {"id": 1, "source_segment_indices": [0], "start": 0.1, "end": 2.0,
-             "source_text": "a", "translation": "Một."},
-            {"id": 2, "source_segment_indices": [1, 2], "start": 3.0, "end": 9.0,
-             "source_text": "b", "translation": "Hai ba. CTA."},
-        ],
-    }, 3)
-    assert len(sample["semantic_groups"]) == 2
-    assert sample["semantic_groups"][1]["source_segment_indices"] == [1, 2]
-    assert sample["cue_translations"] == ["Một.", "Hai ba.", "CTA."]
-    # Fallback: 1 group = 1 cue
-    one_each = _normalize_dub_script({
-        "master_meaning": "m", "master_translation": "t",
-        "semantic_groups": [
-            {"id": 1, "source_segment_indices": [0], "start": 0, "end": 1,
-             "translation": "A"},
-            {"id": 2, "source_segment_indices": [1], "start": 2, "end": 3,
-             "translation": "B"},
-        ],
-    }, 2)
-    assert one_each["cue_translations"] == ["A", "B"]
-    # Span group without cue_translations → fail
-    try:
-        _normalize_dub_script({
-            "master_meaning": "m",
-            "semantic_groups": [
-                {"id": 1, "source_segment_indices": [0, 1], "start": 0, "end": 9,
-                 "translation": "merged"},
-            ],
-        }, 2)
-    except OpenAIError:
-        pass
-    else:
-        raise AssertionError("span group thiếu cue_translations phải ném")
-    assert _extract_json('{"a":1}')["a"] == 1
-    assert _extract_json("```json\n{\"a\": 2}\n```")["a"] == 2
-    try:
-        _normalize_dub_script({"master_meaning": "x"}, 1)
-    except OpenAIError:
-        pass
-    else:
-        raise AssertionError("thiếu cue_translations/groups phải ném")
-    # Rephrase prompt locks same intent / no borrow; balanced longer/shorter
-    short_p = _rephrase_system_prompt(
-        seconds=1.5, target_words_n=4, shorter=True,
-        master_meaning="app pitch", prev_text="a", next_text="b",
-        lang_name="Vietnamese")
-    assert "same intent" in short_p.lower()
-    assert "do not borrow" in short_p.lower()
-    assert "aggressive condense" in short_p.lower()
-    long_p = _rephrase_system_prompt(
-        seconds=3.0, target_words_n=8, shorter=False,
-        master_meaning="app pitch", prev_text="", next_text="",
-        lang_name="Indonesian")
-    assert "do not borrow" in long_p.lower() or "Do not import" in long_p
-    assert "same intent" in long_p.lower()
-    assert "light expansion" in long_p.lower()
-    assert "aim close" in long_p.lower()
-    assert "stay near" in short_p.lower() or "target band" in short_p.lower()
-    recon_p = _reconstruct_system_prompt(
-        n=11, lang_name="Vietnamese", expected_code="vi",
-        lang_det="en", lang_p=0.97, conf="medium",
-        task="Produce a natural spoken translation into Vietnamese only.",
-    )
-    assert "index lock" in recon_p.lower()
-    assert "cue [i] only" in recon_p.lower()
-    assert "do not merge two asr" in recon_p.lower()
-    assert "leftover crumb" in recon_p.lower()
-    assert "second-speaker" in recon_p.lower()
-    assert "language-learning echo" in recon_p.lower()
-    assert "adjacent segments may form one sentence" not in recon_p.lower()
-    # Model merged 'I' + 'I gotta go' → pad the leftover index
-    segs_crumb = [
-        {"start": 1.0, "end": 2.0, "speech_start": 1.0, "speech_end": 2.0,
-         "speaker_id": "SPEAKER_00", "text": "Hello.", "no_speech_prob": 0.01},
-        {"start": 2.1, "end": 2.2, "speech_start": 2.1, "speech_end": 2.2,
-         "speaker_id": "SPEAKER_00", "text": "I", "no_speech_prob": 0.05},
-        {"start": 2.35, "end": 3.2, "speech_start": 2.35, "speech_end": 3.2,
-         "speaker_id": "SPEAKER_00", "text": "I gotta go.", "no_speech_prob": 0.05},
-        {"start": 3.4, "end": 4.0, "speech_start": 3.4, "speech_end": 4.0,
-         "speaker_id": "SPEAKER_00", "text": "Bye.", "no_speech_prob": 0.01},
-        {"start": 4.1, "end": 4.3, "speech_start": 4.1, "speech_end": 4.3,
-         "speaker_id": "SPEAKER_00", "text": "Ikitin", "no_speech_prob": 0.99},
-    ]
-    padded = _align_cue_count(["Hi.", "I gotta go.", "Bye."], segs_crumb, 5)
-    assert padded == ["Hi.", "", "I gotta go.", "Bye.", ""]
-    same = _align_cue_count(["a", "b", "c", "d", "e"], segs_crumb, 5)
-    assert same == ["a", "b", "c", "d", "e"]
-    assert _align_cue_count(["only", "two"], segs_crumb, 5) is None
-    # Language-learning drill: ID line + English echo merged into one slot
-    segs_drill = [
-        {"start": 54.5, "end": 55.84, "speech_start": 54.5, "speech_end": 55.84,
-         "speaker_id": "SPEAKER_00", "text": "Sekali lagi, tolong.",
-         "no_speech_prob": 0.47},
-        {"start": 56.12, "end": 57.18, "speech_start": 56.12, "speech_end": 57.18,
-         "speaker_id": "SPEAKER_00", "text": "One more time, please.",
-         "no_speech_prob": 0.47},
-        {"start": 57.46, "end": 58.12, "speech_start": 57.46, "speech_end": 58.12,
-         "speaker_id": "SPEAKER_00", "text": "Ikutin aku.",
-         "no_speech_prob": 0.47},
-        {"start": 58.41, "end": 59.74, "speech_start": 58.41, "speech_end": 59.74,
-         "speaker_id": "SPEAKER_00", "text": "One more time, please.",
-         "no_speech_prob": 0.83},
-    ]
-    drill_raw = [
-        "One more time, please.", "Follow me.", "One more time, please.",
-    ]
-    drill = _align_cue_count(drill_raw, segs_drill, 4)
-    assert drill == [
-        "", "One more time, please.", "Follow me.", "One more time, please.",
-    ]
-    data_drill, note_drill = _ensure_cue_count(
-        {"cue_translations": drill_raw}, segs_drill, 4, "k", "m")
-    assert note_drill == "aligned"
-    assert data_drill["cue_translations"][0] == ""
-    data_ok, note = _ensure_cue_count(
-        {"cue_translations": ["Hi.", "I gotta go.", "Bye."]},
-        segs_crumb, 5, "k", "m")
-    assert note == "aligned"
-    assert data_ok["cue_translations"][1] == ""
-    # Empty ASR cue helper + garbled → silence
-    segs_e = [
-        {"text": "hello there friends"},
-        {"text": "Sing Jemah kanil noise"},
-        {"text": ""},
-    ]
-    assert _empty_asr_cue_indices(segs_e, ["Xin chào.", "", ""]) == [1]
-    assert _empty_asr_cue_indices(segs_e, ["a", "b", ""]) == []
-    assert _asr_is_one_word_continuation(
-        {"text": "रखूं।", "speaker_id": "SPEAKER_00"},
-        {"text": "on the screen.", "speaker_id": "SPEAKER_00"},
-    )
-    assert not _asr_is_one_word_continuation(
-        {"text": "Help me.", "speaker_id": "SPEAKER_00"},
-        {"text": "Hi.", "speaker_id": "SPEAKER_00"},
-    )
-    segs_one = [
-        {"text": "finger on the screen", "speaker_id": "SPEAKER_00"},
-        {"text": "रखूं।", "speaker_id": "SPEAKER_00"},
-    ]
-    script_one = {
-        "cue_translations": ["Place your finger on the screen.", ""],
-        "master_translation": "Place your finger on the screen.",
-        "master_meaning": "app",
-        "uncertain_spans": [],
-    }
-    real_chat = _chat
-    def _no_fill(*_a, **_k):
-        raise AssertionError("must not fill a 1-word leftover")
-    globals()["_chat"] = _no_fill
-    try:
-        filled = _fill_empty_cues(script_one, segs_one, [1], "English", "k")
+            raise AssertionError("sai so dong phai bao loi")
+
+        # A line that came back in English is sent back once.
+        replies.append(json.dumps({
+            "master_translation": "x",
+            "lines": ["xin chào các bạn nhé", "buy it now today please"],
+        }))
+        replies.append(json.dumps({"lines": {"1": "mua ngay hôm nay đi"}}))
+        out = translate_blocks(blocks, "vi", "key")
+        assert out["lines"][1] == "mua ngay hôm nay đi", out
+
+        # rephrase passes the measured budget through to the prompt.
+        replies.append("câu ngắn hơn nhiều")
+        text = rephrase_for_duration(
+            "một câu rất dài", 2.0, "key",
+            master_meaning="", target_words_n=9, lang_name="Vietnamese")
+        assert text == "câu ngắn hơn nhiều", text
     finally:
-        globals()["_chat"] = real_chat
-    assert filled["cue_translations"][1] == ""
-    assert _looks_english("Help me.")
-    assert _looks_english("I gotta go.")
-    assert not _looks_english("Ikutin aku.")
-    segs_echo = [
-        {"start": 0, "end": 1.3, "speech_start": 0, "speech_end": 1.3,
-         "speaker_id": "SPEAKER_01", "text": "Tolong saya.",
-         "no_speech_prob": 0.05},
-        {"start": 1.6, "end": 2.6, "speech_start": 1.6, "speech_end": 2.6,
-         "speaker_id": "SPEAKER_03", "text": "Help me.",
-         "no_speech_prob": 0.05},
-    ]
-    script_echo = {
-        "cue_translations": ["Help me.", ""],
-        "master_translation": "Help me.",
-        "master_meaning": "drill",
-        "uncertain_spans": [],
-    }
-    globals()["_chat"] = _no_fill
-    try:
-        filled_echo = _fill_empty_cues(
-            script_echo, segs_echo, [1], "English", "k")
-    finally:
-        globals()["_chat"] = real_chat
-    assert filled_echo["cue_translations"] == ["Help me.", "Help me."]
-    segs_copy = [
-        {"start": 0, "end": 1, "speech_start": 0, "speech_end": 1,
-         "speaker_id": "SPEAKER_03", "text": "Help me.",
-         "no_speech_prob": 0.05},
-        {"start": 2, "end": 3, "speech_start": 2, "speech_end": 3,
-         "speaker_id": "SPEAKER_00", "text": "Ikutin aku.",
-         "no_speech_prob": 0.05},
-    ]
-    script_copy = {
-        "cue_translations": ["", "Follow me."],
-        "master_translation": "Help me. Follow me.",
-        "master_meaning": "drill",
-        "uncertain_spans": [],
-    }
-    globals()["_chat"] = _no_fill
-    try:
-        filled_copy = _fill_empty_cues(
-            script_copy, segs_copy, [0], "English", "k")
-    finally:
-        globals()["_chat"] = real_chat
-    assert filled_copy["cue_translations"][0] == "Help me."
-    assert _is_english_only_line("Help me.")
-    assert _is_english_only_line("I gotta go.")
-    assert _is_english_only_line("Easy peasy.")
-    assert not _is_english_only_line("Ikutin aku.")
-    assert not _is_english_only_line(
-        "3 bulan lalu, only English I have ever heard was from TV.")
-    restored = _restore_english_source_cues(
-        {"cue_translations": ["Could you assist me?", "Come along with me."]},
-        [
-            {"text": "Help me."},
-            {"text": "Ikutin aku."},
-        ],
-        "English",
-    )
-    assert restored["cue_translations"] == ["Help me.", "Come along with me."]
-    segs_short = [
-        {"start": 0, "end": 2, "speech_start": 0, "speech_end": 2,
-         "speaker_id": "SPEAKER_00",
-         "text": "Butuh pinjaman tapi takut bunganya besar?",
-         "no_speech_prob": 0.05},
-        {"start": 2, "end": 4, "speech_start": 2, "speech_end": 4,
-         "speaker_id": "SPEAKER_00",
-         "text": "Pakai aplikasi ini untuk menghitung bunga.",
-         "no_speech_prob": 0.05},
-        {"start": 4, "end": 5, "speech_start": 4, "speech_end": 5,
-         "speaker_id": "SPEAKER_00", "text": "Klik tombol sekarang.",
-         "no_speech_prob": 0.05},
-    ]
-    script_short = {
-        "cue_translations": ["Need a loan?", "", "Click now."],
-        "master_translation": "Need a loan? Use the app. Click now.",
-        "master_meaning": "loan app",
-        "uncertain_spans": [],
-    }
-    def _short_fill(*_a, **_k):
-        return (
-            '{"cue_translations": ["Need a loan?", "Use the app."], '
-            '"uncertain_spans": []}'
-        )
-    globals()["_chat"] = _short_fill
-    try:
-        filled_short = _fill_empty_cues(
-            script_short, segs_short, [1], "English", "k")
-    finally:
-        globals()["_chat"] = real_chat
-    assert len(filled_short["cue_translations"]) == 3
-    assert _asr_empty_should_stay_silent(
-        "Sing Jemah kanil, tapi cepetan selamat tinggi.")
-    assert not _asr_empty_should_stay_silent(
-        "Butuh pinjaman tapi takut bunganya besar?")
-    assert not _asr_empty_should_stay_silent(
-        "Pakai aplikasi ini untuk menghitung bunga pinjaman.")
-    # Trailing CTA fill
-    assert _closing_line_from_master(
-        "Câu một. Nhấn nút bên dưới ngay.") == "Nhấn nút bên dưới ngay."
-    assert "CTA cuối" in _fullest_master(
-        "Ngắn.", ["A.", "CTA cuối."], [{"translation": "A. B. CTA cuối."}])
-    segs_t = [
-        {"start": 0, "end": 2, "speech_start": 0, "speech_end": 2, "text": "a"},
-        {"start": 2, "end": 4, "speech_start": 2, "speech_end": 4, "text": "b"},
-        {"start": 9.0, "end": 11.0, "speech_start": 9.0, "speech_end": 11.0,
-         "text": "Sing Jemah kanil junk here"},
-    ]
-    script_t = {
-        "master_translation": (
-            "Bạn cần vay? Dùng app. Nhấn nút bên dưới ngay bây giờ."),
-        "cue_translations": ["Bạn cần vay?", "Dùng app.", ""],
-        "semantic_groups": [],
-        "garbled_silent_indices": [2],
-        "uncertain_spans": ["garbled_asr[2]"],
-    }
-    filled = _apply_trailing_cta_fill(script_t, segs_t, min_span=1.5)
-    assert filled["trailing_cta_filled"]
-    assert filled["trailing_cta_index"] == 2
-    assert "Nhấn nút" in filled["cue_translations"][2]
-    assert "Jemah" not in filled["cue_translations"][2]
-    # Trùng CTA với cue trước → biến thể ngắn, vẫn fill
-    assert _short_cta_variant("Nhấn nút bên dưới ngay bây giờ.") != (
-        "Nhấn nút bên dưới ngay bây giờ.")
-    segs_dup = [
-        {"start": 0, "end": 2, "speech_start": 0.0, "speech_end": 2.0, "text": "a"},
-        {"start": 7.5, "end": 8.9, "speech_start": 7.57, "speech_end": 8.93,
-         "text": "klik"},
-        {"start": 9.1, "end": 11.0, "speech_start": 9.19, "speech_end": 10.99,
-         "text": "Sing Jemah kanil junk"},
-    ]
-    script_dup = {
-        "master_translation": (
-            "Bạn cần vay? Dùng app. Nhấn nút bên dưới ngay bây giờ."),
-        "cue_translations": [
-            "Bạn cần vay?",
-            "Nhấn nút bên dưới ngay bây giờ.",
-            "",
-        ],
-        "semantic_groups": [],
-        "garbled_silent_indices": [2],
-        "uncertain_spans": ["garbled_asr[2]"],
-    }
-    filled_dup = _apply_trailing_cta_fill(script_dup, segs_dup, min_span=1.5)
-    assert filled_dup["trailing_cta_filled"]
-    assert filled_dup.get("trailing_cta_variant")
-    assert filled_dup["cue_translations"][2]
-    assert filled_dup["cue_translations"][2] != (
-        "Nhấn nút bên dưới ngay bây giờ.")
-    assert "Jemah" not in filled_dup["cue_translations"][2]
-    print("openai_translate_api.py self-check OK")
+        _chat = real_chat
+
+    prompt = _rephrase_system_prompt(
+        seconds=2.0, target_words_n=9, shorter=True, master_meaning="m",
+        prev_text="", next_text="", lang_name="Vietnamese")
+    assert "9" in prompt, "the word budget must reach the model"
+
+    assert word_count("một hai ba") == 3
+    assert _resolve_output_lang("vi", {})[0] == "vi"
+    assert _lines_wrong_language(["hello there friend"], "vi") == [0]
+    assert _lines_wrong_language(["xin chào các bạn ơi"], "vi") == []
+    print("translate.py self-check OK")
 
 
 if __name__ == "__main__":

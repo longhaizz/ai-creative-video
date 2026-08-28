@@ -1,60 +1,80 @@
-"""Make the new voice with VoxCPM, and fit it to the original timing.
+"""Speak the script and lay it on the timeline.
 
-Ported from spy-ads voxcpm_api.py and the _timed_speech / _fit_cue_audio
-methods of voxcpm_panel.py.
+The unit is a block: everything between two anchors. An anchor is a silence
+of ANCHOR_SILENCE or more, or a scene cut. One TTS call speaks a whole
+block, so the voice keeps one intonation across its sentences instead of
+starting again at every Whisper cue.
 
-The hard part is not making speech, it is making speech that lands where the
-old speech was. Reading the whole transcript as one block removes every
-pause between sentences, so the dub finishes early and the picture no longer
-matches. So each cue is spoken on its own and laid back at its own start
-time, and only the length inside a cue is adjusted.
-
-Order of preference when a line does not fit its slot:
-  1. leave it alone            (it is close enough)
-  2. change the speed a little (up to +15% / -18%)
-  3. ask OpenAI for a shorter or longer line, then try again
-  4. speed up harder (up to 1.4x) so it stays off the next cue
-  5. cut the tail to the window — overlapping speech is worse than a lost word
+A block is never cut, and never cut mid-sentence: when a run of speech is
+too long for one take, it is split after a full stop. When a block does not
+fit its room, the line is shortened, then the speed is changed by at most
+SOFT_TEMPO, and only then it may push the next block later. Overrunning by a
+few hundred milliseconds is always preferred to squeezing the voice harder,
+because a rushed voice is what a viewer hears as wrong.
 """
 
 from __future__ import annotations
 
 import json
+import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from server.jobs import PipelineError
-from server.steps.audio import (
-    SOFT_SLOWDOWN,
-    SOFT_SPEEDUP,
-    duration,
-    match_tempo,
-    place_clips,
-    trim_audio,
-)
+from server.steps.audio import clean_take, duration, match_tempo, place_clips
 from server.steps.translate import (
     CANNOT_FIT,
-    pace_counts,
-    reconstruct_script,
     rephrase_for_duration,
-    score_pace,
+    translate_blocks,
     word_count,
 )
 
-# How far the spoken length may sit from the slot before we act.
-RATIO_KEEP_LO = 0.92   # close enough, leave it
-RATIO_KEEP_HI = 1.08
-RATIO_SOFT_LO = 0.85   # a bit short or long, change the speed
-RATIO_SOFT_HI = 1.15   # past these, ask for a different line
-# A take this short vs the slot is B-roll, not a line that needs padding.
-RATIO_HOLE = 0.35
+# A pause this long at the end of a sentence ends a block. Ads are spoken
+# without real breaks — the sample clip never pauses longer than 0.22s — so a
+# high threshold would make the whole video one block.
+ANCHOR_SILENCE = 0.15
+# A pause this long is a break whatever the punctuation says: Whisper often
+# leaves the full stop out, but nobody stops for a second mid-sentence.
+LONG_SILENCE = 0.8
+# VoxCPM starts to wander on long takes. This ceiling is a guess until the
+# per-block numbers in the log say otherwise; see the "Blocks:" line.
+MAX_BLOCK_SECONDS = 10.0
+# Keep this much silence between two blocks.
+MIN_GAP = 0.08
+# How late a block may push the next one. A scene cut allows none, because a
+# cut is the moment a viewer checks the lips against the sound.
+DRIFT_CAP = 0.4
+SCENE_DRIFT_CAP = 0.0
+# The only speed change in the pipeline. Below what an ear picks up; there is
+# deliberately no harder setting, because sounding rushed is the failure we
+# are avoiding. A block that still does not fit runs over instead.
+SOFT_TEMPO = 1.08
+# Ask the translator for a line that fills this much of the room, not all of
+# it. The margin is what keeps the speed change from being needed at all.
+ROOM_AIM = 0.95
+# Takes per block. The one that says the words best wins.
+TAKES = 2
+# Both takes worse than this: pay for one more.
+EXTRA_TAKE_ERROR = 0.35
+# A gap this long between two words of one take is the model hesitating.
+MAX_HESITATION = 0.7
+HESITATION_PENALTY = 0.3
+# A take this much longer than the estimate is the model babbling, not a
+# long line. Cue 22 of the MRI clip spoke 23.68s for a 1.8s slot.
+BABBLE_FACTOR = 3.0
 
-# One rewrite only. A second one drifts away from the meaning without
-# fitting any better.
-MAX_REWRITES = 1
+# Where the words-per-second estimate starts before the first take is
+# measured. Every language is then corrected from the real voice.
+SEED_WORDS_PER_SECOND = {
+    "vi": 4.8,
+    "en": 2.6,
+    "id": 3.2,
+}
+DEFAULT_WORDS_PER_SECOND = 3.0
 
-# Last speed-up before we cut. Faster than this sounds wrong; slower leaves
-# the next cue overlapping.
-HARD_SPEEDUP = 1.4
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
+_SENTENCE_END = re.compile(r"[.!?…。！？][\"'”’)\]]*$")
+_PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
 
 # Voice presets, put in front of the text for /tts. Not used when cloning.
 VOICE_PRESETS = {
@@ -123,185 +143,235 @@ class VoxCPMModel:
         return out_wav
 
 
-def cue_slots(cues: list[dict], video_seconds: float) -> list[dict]:
-    """Work out the time slot of every cue.
+# -- blocks -----------------------------------------------------------------
 
-    `target` is how long the new speech should be. `window` is how far it
-    may run before it walks into the next cue. Silent cues still hold their
-    place on the timeline, so the one before them cannot borrow their time.
+
+def build_blocks(cues: list[dict], scenes: list[float],
+                 video_seconds: float) -> list[dict]:
+    """Group the cues into the takes we will speak.
+
+    Two passes. First the runs: a run ends at a scene cut, or where the
+    speaker finishes a sentence and pauses. Then the long runs are split
+    into blocks that one take can hold, always after a full stop — a seam
+    in the middle of a sentence is the one seam a listener notices.
     """
-    slots = []
-    count = len(cues)
-    for index, cue in enumerate(cues):
-        start = float(cue.get("speech_start", cue["start"]))
-        end = float(cue.get("speech_end", cue["end"]))
-        speech = max(end - start, 0.4)
-        if index + 1 < count:
-            following = cues[index + 1]
-            next_start = float(following.get("speech_start", following["start"]))
-            window = max(next_start - start, 0.4)
+    speaking = [cue for cue in cues if (cue.get("text") or "").strip()]
+    if not speaking:
+        raise PipelineError("There is nothing to say", code="internal")
+
+    cuts = sorted(float(t) for t in scenes or [])
+    runs: list[dict] = []
+    for cue in speaking:
+        start = _start(cue)
+        if runs:
+            last = runs[-1]["cues"][-1]
+            gap = start - _end(last)
+            cut = _cut_between(cuts, _end(last), start)
+            if cut:
+                runs[-1]["hard"] = True
+            ends = gap >= LONG_SILENCE or (
+                gap >= ANCHOR_SILENCE and ends_sentence(last))
+            if not cut and not ends:
+                runs[-1]["cues"].append(cue)
+                continue
+        runs.append({"cues": [cue], "hard": False})
+
+    blocks: list[dict] = []
+    for run in runs:
+        pieces = split_to_cap(run["cues"])
+        for piece in pieces:
+            blocks.append(_block_from(piece))
+        # Only the piece that ends at the cut may not drift over it.
+        blocks[-1]["hard"] = run["hard"]
+
+    for index, block in enumerate(blocks):
+        if index + 1 < len(blocks):
+            block["next_start"] = blocks[index + 1]["start"]
         else:
-            window = max(video_seconds - start, speech)
-        slots.append({
-            "start": start,
-            "end": end,
-            # Never chase a target that reaches into the next cue.
-            "target": min(speech, window),
-            "window": window,
-        })
-    return slots
+            block["next_start"] = max(video_seconds, block["end"])
+    return blocks
 
 
-def fit_cue(
-    line: str,
-    slot: dict,
-    work: Path,
-    index: int,
-    speak,
-    rewrite=None,
-    ctx=None,
-    stats=None,
-) -> Path:
-    """Speak one line and make it fit its slot. Returns the wav path.
+def _start(cue) -> float:
+    return float(cue.get("speech_start", cue["start"]))
 
-    `speak(text, path)` makes the audio. `rewrite(text, seconds, shorter)`
-    asks for a different line, or is None to skip that step.
+
+def _end(cue) -> float:
+    return max(float(cue.get("speech_end", cue["end"])), _start(cue) + 0.05)
+
+
+def ends_sentence(cue) -> bool:
+    return bool(_SENTENCE_END.search((cue.get("text") or "").strip()))
+
+
+def split_to_cap(cues: list[dict]) -> list[list[dict]]:
+    """Cut a long run into takes, after a full stop wherever possible.
+
+    When no sentence ends inside the ceiling, the widest pause in range is
+    used instead. One cue is always taken, so this ends.
     """
-    label = f"Cue {index + 1}"
-    target = float(slot["target"])
-    window = float(slot["window"])
-    # Hard limit: never grow into the next cue.
-    cap = min(target, max(window - 0.05, 0.4))
-    fit_path = work / f"cue_{index:03d}_fit.wav"
+    if _end(cues[-1]) - _start(cues[0]) <= MAX_BLOCK_SECONDS:
+        return [cues]
 
-    def log(message: str):
-        if ctx is not None:
-            ctx.log(f"{label}: {message}")
-
-    raw = speak(line, work / f"cue_{index:03d}.wav")
-    spoken = duration(raw)
-    ratio = spoken / target if target > 0 else 1.0
-    log(f"spoke {spoken:.2f}s for a {target:.2f}s slot (ratio {ratio:.2f})")
-    if stats is not None:
-        if ratio > RATIO_SOFT_HI:
-            heard = "too_fast"
-        elif ratio < RATIO_SOFT_LO:
-            heard = "too_slow"
+    fits = [
+        i for i in range(1, len(cues))
+        if _end(cues[i - 1]) - _start(cues[0]) <= MAX_BLOCK_SECONDS
+    ]
+    if not fits:
+        cut_at = 1
+    else:
+        sentences = [i for i in fits if ends_sentence(cues[i - 1])]
+        if sentences:
+            cut_at = max(sentences)
         else:
-            heard = "ok"
-        stats.update({
-            "spoken": round(spoken, 3),
-            "target": round(target, 3),
-            "ratio": round(ratio, 3),
-            "heard": heard,
-        })
+            cut_at = max(fits, key=lambda i: _start(cues[i]) - _end(cues[i - 1]))
+    return [cues[:cut_at]] + split_to_cap(cues[cut_at:])
 
-    candidates = [(raw, spoken, line)]
 
-    def stretch(path: Path, length: float, why: str) -> Path:
-        share = length / cap if cap > 0 else 1.0
-        if RATIO_KEEP_LO <= share <= RATIO_KEEP_HI:
-            out = path
-        elif share > 1.0:
-            out, tempo = match_tempo(path, cap, fit_path, slowest=1.0)
-            log(f"{why}: sped up by {tempo:.3f}")
-        else:
-            out, tempo = match_tempo(path, cap, fit_path, fastest=1.0)
-            log(f"{why}: slowed down by {tempo:.3f}")
+def _block_from(cues: list[dict]) -> dict:
+    return {
+        "start": _start(cues[0]),
+        "end": max(_end(cue) for cue in cues),
+        "cues": list(cues),
+        "text": " ".join((cue.get("text") or "").strip() for cue in cues).strip(),
+        "hard": False,
+        "ref_cue": cues[0],
+    }
 
-        # Last check: if it still reaches into the next cue, speed it up
-        # harder, then cut the tail. Overlapping speech is worse.
-        limit = max(window - 0.05, 0.4)
-        length_now = duration(out)
-        if length_now > window * 1.001 and length_now > 0.05:
-            needed = length_now / limit
-            if needed > 1.02:
-                clamped, tempo = match_tempo(
-                    out, limit, work / f"cue_{index:03d}_fit2.wav",
-                    slowest=1.0,
-                    fastest=max(SOFT_SPEEDUP, min(needed, HARD_SPEEDUP)),
-                )
-                if duration(clamped) < length_now:
-                    log(f"pushed to {tempo:.3f} to stay off the next cue")
-                    out = clamped
-            length_now = duration(out)
-            if length_now > window * 1.001:
-                out = trim_audio(
-                    out, limit, work / f"cue_{index:03d}_trim.wav",
-                )
-                log(f"cut to {duration(out):.2f}s to stay off the next cue")
-        return out
 
-    def best(why: str) -> Path:
-        def score(candidate):
-            _path, length, _text = candidate
-            over = max(0.0, length - window)
-            return (over > 0.02, abs(length - cap), over)
+def _cut_between(cuts: list[float], left: float, right: float) -> bool:
+    """Is there a scene change inside this pause?"""
+    return any(left <= t <= right for t in cuts)
 
-        path, length, text = min(candidates, key=score)
-        if stats is not None:
-            stats["spoken_text"] = text
-        out = stretch(path, length, why)
-        final = duration(out)
-        if final < target * 0.92:
-            log(f"still short: {final:.2f}s of {target:.2f}s, silence follows")
-        return out
 
-    def finish(path: Path, text: str) -> Path:
-        if stats is not None:
-            stats.setdefault("spoken_text", text)
-        return path
+class Pace:
+    """How many words this voice really says per second.
 
-    # Close enough already.
-    if RATIO_KEEP_LO <= ratio <= RATIO_KEEP_HI:
-        out = stretch(raw, spoken, "clamp") if spoken > window * 1.001 else raw
-        return finish(out, line)
+    The seed is only a starting point. Every take corrects it, so the same
+    code works for Vietnamese, Indonesian or a slow elderly preset without
+    a table anyone has to keep up to date.
+    """
 
-    # A bit off: the speed change alone is enough.
-    if RATIO_SOFT_LO <= ratio <= RATIO_SOFT_HI:
-        return finish(stretch(raw, spoken, "small fix"), line)
+    def __init__(self, seed: float):
+        self.value = float(seed) if seed and seed > 0 else DEFAULT_WORDS_PER_SECOND
+        self.samples = 0
 
-    # Far off, and nobody can rewrite it for us.
-    # Tiny slots: the LLM replaces "Water" with a stolen full sentence.
-    # A huge hole with almost no words is B-roll: stretch, leave silence.
-    # A real sentence that TTS rushed (ratio 0.34, 7+ words) still needs
-    # a longer line — that is a talking-head, not B-roll.
-    thin = word_count(line) <= 4
-    if rewrite is None or MAX_REWRITES < 1 or target < 0.8 or (
-            ratio < RATIO_HOLE and thin):
-        if target < 0.8 and rewrite is not None and MAX_REWRITES >= 1:
-            log("slot too short to rewrite, changing the speed instead")
-        elif ratio < RATIO_HOLE and thin:
-            log("slot much longer than the take, leaving silence after")
-        return best("clamp")
+    def observe(self, words: int, seconds: float) -> None:
+        if words < 3 or seconds <= 0.3:
+            return  # too small to say anything about the rate
+        measured = words / seconds
+        self.samples += 1
+        weight = 1.0 / min(self.samples + 1, 8)
+        self.value += (measured - self.value) * weight
 
-    shorter = ratio > RATIO_SOFT_HI
-    log(f"{'too long' if shorter else 'too short'}; asking for another line")
-    new_line = rewrite(line, target, shorter)
-    if new_line == CANNOT_FIT:
-        log("no shorter wording exists, changing the speed instead")
-        return best("cannot fit")
+    def words_for(self, seconds: float) -> int:
+        return max(int(float(seconds) * self.value), 2)
 
-    log(f"new line: {new_line}")
-    second = speak(new_line, work / f"cue_{index:03d}_r0.wav")
-    second_length = duration(second)
-    second_ratio = second_length / target if target > 0 else 1.0
-    log(f"spoke {second_length:.2f}s (ratio {second_ratio:.2f})")
+    def seconds_for(self, words: int) -> float:
+        return max(float(words) / self.value, 0.4)
 
-    closer = abs(second_length - cap) < abs(spoken - cap) - 1e-6
-    if not closer:
-        log(f"the rewrite fits no better ({ratio:.2f} to {second_ratio:.2f})")
-        return best("clamp")
 
-    candidates.append((second, second_length, new_line))
+def seed_pace(lang_code: str) -> float:
+    return SEED_WORDS_PER_SECOND.get(
+        (lang_code or "").lower(), DEFAULT_WORDS_PER_SECOND)
 
-    if RATIO_KEEP_LO <= second_ratio <= RATIO_KEEP_HI:
-        if second_length > window * 1.001:
-            return finish(stretch(second, second_length, "clamp"), new_line)
-        return finish(second, new_line)
-    if RATIO_SOFT_LO <= second_ratio <= RATIO_SOFT_HI:
-        return finish(stretch(second, second_length, "after rewrite"), new_line)
-    return best("final")
+
+# -- takes ------------------------------------------------------------------
+
+
+def _normalize(text: str) -> str:
+    return " ".join(_PUNCT.sub(" ", (text or "").casefold()).split())
+
+
+def text_error(asked: str, heard: str) -> float:
+    """0.0 when the take says the line, 1.0 when it says something else."""
+    left, right = _normalize(asked), _normalize(heard)
+    if not left or not right:
+        return 1.0
+    return 1.0 - SequenceMatcher(None, left, right).ratio()
+
+
+def best_take(line: str, work: Path, name: str, speak, listen, lang: str,
+              pace: Pace, log, cue=None) -> dict:
+    """Speak the line a few times and keep the best take.
+
+    Best means: says the words (checked by listening to it), and is not
+    wildly longer than the words can be. Both are needed — a take that
+    babbles for 20 seconds scores badly on length even when the first words
+    are right.
+    """
+    expected = pace.seconds_for(word_count(line))
+    takes: list[dict] = []
+    for number in range(TAKES):
+        takes.append(_one_take(line, work, f"{name}_t{number}", speak,
+                               listen, lang, expected, cue))
+        if _score(takes[-1]) < 0.1:
+            break  # clean and fluent, do not pay for another take
+    if min(_score(take) for take in takes) > EXTRA_TAKE_ERROR:
+        log("every take so far stumbled, trying once more")
+        takes.append(_one_take(line, work, f"{name}_t{len(takes)}", speak,
+                               listen, lang, expected, cue))
+
+    best = min(takes, key=lambda take: (round(_score(take), 2),
+                                        abs(take["length"] - expected)))
+    best["takes"] = len(takes)
+    if len(takes) > 1:
+        log(f"{len(takes)} takes, kept {best['length']:.2f}s "
+            f"(error {best['error']:.2f}, pause {best['hesitation']:.2f}s)")
+    return best
+
+
+def _score(take: dict) -> float:
+    """How bad a take is: wrong words, plus a fine for hesitating."""
+    penalty = HESITATION_PENALTY if take["hesitation"] > MAX_HESITATION else 0.0
+    return take["error"] + penalty
+
+
+def _one_take(line: str, work: Path, name: str, speak, listen, lang: str,
+              expected: float, cue=None) -> dict:
+    """Speak the line once, clean it, and listen to what came out.
+
+    Cleaning happens before the length is measured, so the length is speech
+    and not the silence the model padded around it.
+    """
+    raw = speak(line, work / f"{name}.wav", cue)
+    wav = clean_take(raw, work / f"{name}_clean.wav")
+    length = duration(wav)
+    heard = ""
+    words: list[dict] = []
+    if listen is not None:
+        result = listen(wav, lang) or {}
+        heard = (result.get("text") or "").strip()
+        words = list(result.get("words") or [])
+    error = text_error(line, heard) if heard else 0.0
+    if length > expected * BABBLE_FACTOR:
+        error = 1.0  # the model ran away, whatever the words say
+    return {
+        "path": wav,
+        "length": length,
+        "heard": heard,
+        "words": words,
+        "error": error,
+        "hesitation": longest_pause(words),
+        "text": line,
+    }
+
+
+def longest_pause(words: list[dict]) -> float:
+    """The widest gap between two words inside a take.
+
+    A take can say every word and still sound wrong, because the model
+    stopped in the middle of the sentence. The word times come free with
+    the listen-back, so this costs nothing.
+    """
+    biggest = 0.0
+    for left, right in zip(words, words[1:]):
+        biggest = max(biggest, float(right.get("start", 0.0))
+                      - float(left.get("end", 0.0)))
+    return biggest
+
+
+# -- laying the blocks on the timeline --------------------------------------
 
 
 def timed_speech(
@@ -313,212 +383,290 @@ def timed_speech(
     target_lang: str,
     meta: dict | None = None,
     ctx=None,
+    listen=None,
+    scenes: list[float] | None = None,
 ) -> Path:
-    """Translate, speak every cue, and lay them on one track.
+    """Translate, speak every block, and lay them on one track.
 
-    Returns a wav as long as the video, with the speech at the same moments
-    as in the original.
+    Returns a wav as long as the video. Every block keeps the moment the
+    speaker started, give or take the drift a long line needs.
     """
     if not openai_key:
         raise PipelineError(
             "An OpenAI key is needed, even for the same language: it repairs "
-            "the transcript and shares the lines out between cues",
+            "the transcript and shares the lines out between blocks",
             code="internal",
         )
 
+    blocks = build_blocks(cues, scenes or [], video_seconds)
     if ctx is not None:
-        ctx.step("Rewriting the script")
+        ctx.step(f"Rewriting the script ({len(blocks)} blocks)")
 
-    script = reconstruct_script(cues, target_lang, openai_key, asr_meta=meta or {})
-    lines = list(script["cue_translations"])
-    if len(lines) != len(cues):
-        raise PipelineError(
-            f"Got {len(lines)} lines for {len(cues)} cues", code="internal"
-        )
-
-    language_name = script.get("output_lang_name") or ""
-    master = script["master_meaning"]
-    slots = cue_slots(cues, video_seconds)
-    # Word-count "too fast" is not VoxCPM's real duration. Do not rewrite
-    # here; fit_cue measures the take and rewrites if the audio is off.
-    scores = [
-        score_pace(line, float(slots[i]["target"]))
-        for i, line in enumerate(lines)
-    ]
-    script["cue_translations"] = lines
-    script["pace"] = scores
-    (work / "dub_script.json").write_text(
-        json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
+    seed = seed_pace(_seed_lang(target_lang, meta))
+    pace = Pace(seed)
+    script = translate_blocks(
+        [
+            {
+                "start": block["start"],
+                "end": block["end"],
+                "text": block["text"],
+                "words": pace.words_for(
+                    (block["next_start"] - block["start"]) * ROOM_AIM),
+            }
+            for block in blocks
+        ],
+        target_lang, openai_key, asr_meta=meta or {},
     )
+    lines = list(script["lines"])
+    lang_code = script.get("output_lang_code") or ""
+    pace = Pace(seed_pace(lang_code) or seed)
 
     if ctx is not None:
-        _report_script(script, cues, ctx)
-        _report_pace(scores, ctx, "script")
-
-    spoken_indices = [i for i, line in enumerate(lines) if (line or "").strip()]
-    if not spoken_indices:
-        raise PipelineError("There is nothing to say", code="internal")
+        ctx.log(f"Meaning: {script['master_meaning']}")
+        ctx.log(f"Script: {script['master_translation']}")
+        for index, block in enumerate(blocks):
+            ctx.log(f"Block {index + 1} heard: {block['text']}")
+            ctx.log(f"Block {index + 1} script: {lines[index]}")
 
     if ctx is not None:
-        ctx.step(f"Making the voice ({len(spoken_indices)} lines)")
+        ctx.step(f"Making the voice ({len(blocks)} blocks)")
 
     clips: list[tuple[float, Path]] = []
-    spoken_cues: list[dict] = []
-    spoken_by_index: dict[int, str] = {}
-    for position, index in enumerate(spoken_indices):
+    spoken: list[dict] = []
+    report = {"stretched": 0, "max_tempo": 1.0, "max_drift": 0.0,
+              "errors": [], "overruns": 0, "takes": 0, "stumbles": 0,
+              "longest_block": 0.0}
+    delay = 0.0
+
+    for index, block in enumerate(blocks):
         if ctx is not None:
             ctx.check_cancel()
-        slot = slots[index]
-        line = lines[index].strip()
+        line = (lines[index] or "").strip()
+        if not line:
+            delay = 0.0
+            continue
 
-        previous = lines[spoken_indices[position - 1]].strip() if position else ""
-        following = (
-            lines[spoken_indices[position + 1]].strip()
-            if position + 1 < len(spoken_indices)
-            else ""
-        )
+        def log(message: str, _index=index):
+            if ctx is not None:
+                ctx.log(f"Block {_index + 1}: {message}")
 
-        def rewrite(text: str, seconds: float, shorter: bool) -> str:
-            return rephrase_for_duration(
-                text, seconds, openai_key,
-                master_meaning=master,
-                prev_text=previous,
-                next_text=following,
-                shorter=shorter,
-                target_lang=target_lang,
-                lang_name=language_name,
-            )
+        start = block["start"] + delay
+        cap = SCENE_DRIFT_CAP if block["hard"] else DRIFT_CAP
+        room = max(block["next_start"] - start - MIN_GAP, 0.4)
+        limit = room + cap
 
-        cue = cues[index]
+        take = best_take(line, work, f"blk_{index:03d}", speak, listen,
+                         lang_code, pace, log, block["ref_cue"])
+        log(f"{take['length']:.1f}s of {room:.1f}s, {take['takes']} take(s), "
+            f"error {take['error']:.2f}, longest pause "
+            f"{take['hesitation']:.2f}s")
+        pace.observe(word_count(take["text"]), take["length"])
 
-        def speak_this(text, path, _cue=cue):
-            return speak(text, path, _cue)
+        if take["length"] > limit and openai_key:
+            take = _shorten(take, line, room * ROOM_AIM, work, index, speak,
+                            listen, lang_code, pace, openai_key, target_lang,
+                            script, log, block["ref_cue"])
+            pace.observe(word_count(take["text"]), take["length"])
 
-        heard = {}
-        fitted = fit_cue(line, slot, work, index, speak_this, rewrite, ctx, heard)
-        spoken_text = heard.get("spoken_text") or line
-        spoken_by_index[index] = spoken_text
-        if ctx is not None:
-            ctx.log(f"Cue {index + 1} spoken: {spoken_text}")
-        if index < len(scores):
-            scores[index]["heard"] = heard.get("heard")
-            scores[index]["spoken_s"] = heard.get("spoken")
-            scores[index]["spoken_ratio"] = heard.get("ratio")
-        clips.append((slot["start"], fitted))
-        spoken_end = slot["start"] + duration(fitted)
-        spoken_cues.append({
-            "start": round(slot["start"], 3),
-            "end": round(max(spoken_end, slot["start"] + 0.05), 3),
-            "text": spoken_text,
-        })
+        path, tempo = _squeeze(take, limit, block["hard"], work, index, log)
+        length = duration(path)
+        if tempo != 1.0:
+            report["stretched"] += 1
+            report["max_tempo"] = max(report["max_tempo"], tempo)
+        report["errors"].append(take["error"])
+        report["takes"] += take["takes"]
+        report["longest_block"] = max(report["longest_block"], take["length"])
+        if take["hesitation"] > MAX_HESITATION:
+            report["stumbles"] += 1
 
-    for index, sub in enumerate(spoken_cues[:-1]):
-        nxt = spoken_cues[index + 1]["start"]
-        if sub["end"] > nxt:
-            sub["end"] = nxt
+        overrun = max(0.0, start + length + MIN_GAP - block["next_start"])
+        if overrun > cap + 0.01:
+            report["overruns"] += 1
+            log(f"runs {overrun * 1000:.0f}ms into the next block")
+        delay = overrun
+        report["max_drift"] = max(report["max_drift"], delay)
+
+        clips.append((start, path))
+        spoken.extend(_sentence_cues(take, start, length, tempo))
+
+    if not clips:
+        raise PipelineError("There is nothing to say", code="internal")
+
     (work / "spoken_cues.json").write_text(
-        json.dumps(spoken_cues, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    (work / "cue_trace.json").write_text(
-        json.dumps(
-            _cue_trace(cues, lines, spoken_by_index),
-            ensure_ascii=False, indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    script["pace"] = scores
+        json.dumps(spoken, ensure_ascii=False, indent=2), encoding="utf-8")
+    script["pace_words_per_second"] = round(pace.value, 2)
     (work / "dub_script.json").write_text(
-        json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+        json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
+
     if ctx is not None:
-        _report_pace(scores, ctx, "heard")
+        mean_error = sum(report["errors"]) / max(len(report["errors"]), 1)
+        ctx.log(
+            f"Smoothness: 0 lines cut, {report['stretched']} blocks stretched "
+            f"(max {report['max_tempo']:.2f}x), "
+            f"max drift {report['max_drift'] * 1000:.0f}ms, "
+            f"{report['overruns']} overruns, "
+            f"{report['stumbles']} blocks with a long pause inside, "
+            f"listen-back error {mean_error:.2f}, "
+            f"pace {pace.value:.1f} words/s"
+        )
+        ctx.log(
+            f"Blocks: {len(clips)} spoken, {report['takes']} takes, "
+            f"longest {report['longest_block']:.1f}s "
+            f"(ceiling {MAX_BLOCK_SECONDS:.0f}s)"
+        )
     return place_clips(clips, video_seconds, work / "speech_timed.wav")
 
 
-def _report_script(script: dict, cues: list[dict], ctx) -> None:
-    """Tell the user what the rewrite step decided."""
-    if script.get("language_repaired"):
-        ctx.log(
-            f"Some lines came back in the wrong language and were redone: "
-            f"{script.get('language_repair_indices')}"
-        )
-    if script.get("cue_count_aligned") or script.get("cue_count_repaired"):
-        ctx.log(
-            "The rewrite dropped some leftover Whisper fragments; "
-            "those slots were left silent"
-        )
-    if script.get("cues_filled"):
-        ctx.log(f"Filled cues the transcript left empty: {script.get('cues_filled_indices')}")
-    if script.get("trailing_cta_filled"):
-        ctx.log("Filled the silent ending with the closing line")
-    for index in script.get("garbled_silent_indices") or []:
-        heard = ""
-        if 0 <= index < len(cues):
-            heard = (cues[index].get("text") or "").replace("\n", " ").strip()
-        ctx.log(f"Cue {index + 1} was not understood, left silent: {heard[:100]}")
-    ctx.log(f"Meaning: {script['master_meaning']}")
-    ctx.log(f"Script: {script['master_translation']}")
-    if script.get("uncertain_spans"):
-        ctx.log(f"Unsure about: {script['uncertain_spans']}")
-    translations = list(script.get("cue_translations") or [])
-    for index, cue in enumerate(cues):
-        heard = (cue.get("text") or "").strip()
-        line = ""
-        if index < len(translations):
-            line = (translations[index] or "").strip()
-        ctx.log(f"Cue {index + 1} heard: {heard}")
-        ctx.log(f"Cue {index + 1} script: {line}")
+def _seed_lang(target_lang: str, meta: dict | None) -> str:
+    code = (target_lang or "").lower()
+    if code in ("", "same"):
+        return ((meta or {}).get("language") or "").lower()
+    return code
 
 
-def _cue_trace(cues: list[dict], lines: list[str], spoken_by_index: dict[int, str]) -> list[dict]:
-    """One row per cue: what Whisper heard, the script line, what TTS said."""
+def _shorten(take, line, room, work, index, speak, listen, lang, pace,
+             api_key, target_lang, script, log, cue=None):
+    """Ask for a shorter line, and keep it only if it really is shorter."""
+    log(f"too long for {room:.2f}s; asking for a shorter line")
+    try:
+        new_line = rephrase_for_duration(
+            line, room, api_key,
+            master_meaning=script.get("master_meaning") or "",
+            shorter=True,
+            target_lang=target_lang,
+            lang_name=script.get("output_lang_name") or "",
+            target_words_n=pace.words_for(room),
+        )
+    except PipelineError as error:
+        log(f"could not shorten it ({error}), changing the speed instead")
+        return take
+    if new_line == CANNOT_FIT or not new_line.strip():
+        log("no shorter wording exists, changing the speed instead")
+        return take
+    log(f"new line: {new_line}")
+    second = best_take(new_line, work, f"blk_{index:03d}_r", speak, listen,
+                       lang, pace, log, cue)
+    if second["length"] >= take["length"] or second["error"] > EXTRA_TAKE_ERROR:
+        log("the shorter line was no better, keeping the first one")
+        return take
+    return second
+
+
+def _squeeze(take, limit, hard, work, index, log):
+    """Change the speed just enough to fit. Never cut, never rush.
+
+    `hard` is not used to squeeze harder on purpose. At a scene cut the
+    block runs over by a few hundred milliseconds instead — the caller logs
+    it — because a rushed voice is heard by everyone and a late line by
+    almost no one.
+    """
+    length = take["length"]
+    if length <= limit:
+        return take["path"], 1.0
+    out, tempo = match_tempo(
+        take["path"], limit, work / f"blk_{index:03d}_fit.wav",
+        slowest=1.0, fastest=SOFT_TEMPO,
+    )
+    log(f"sped up by {tempo:.3f} to fit {limit:.2f}s")
+    return out, tempo
+
+
+def _sentence_cues(take, start: float, length: float, tempo: float) -> list[dict]:
+    """One subtitle per sentence, timed from the take we actually used."""
+    text = take["text"].strip()
+    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    if not sentences:
+        return []
+    if len(sentences) == 1:
+        return [{"start": round(start, 3),
+                 "end": round(start + length, 3),
+                 "text": sentences[0]}]
+
+    spans = _word_spans(sentences, take["words"], take["length"])
     out = []
-    for index, cue in enumerate(cues):
-        script_line = ""
-        if index < len(lines):
-            script_line = (lines[index] or "").strip()
-        spoken = spoken_by_index.get(index, "")
+    for sentence, (left, right) in zip(sentences, spans):
         out.append({
-            "id": index,
-            "start": round(float(cue.get("start", 0)), 3),
-            "end": round(float(cue.get("end", 0)), 3),
-            "heard": (cue.get("text") or "").strip(),
-            "script": script_line,
-            "spoken": spoken,
+            "start": round(start + left / max(tempo, 0.01), 3),
+            "end": round(min(start + right / max(tempo, 0.01), start + length), 3),
+            "text": sentence,
         })
     return out
 
 
-def _report_pace(scores: list, ctx, when: str) -> None:
-    """Log how many lines would sound rushed or dragged."""
-    key = "heard" if when == "heard" else "verdict"
-    counts = pace_counts(scores, key)
-    label = "Heard after TTS" if when == "heard" else "Word-count estimate"
-    ctx.log(
-        f"{label}: {counts['ok']} ok, {counts['too_fast']} too fast, "
-        f"{counts['too_slow']} too slow"
-    )
-    for index, score in enumerate(scores):
-        verdict = score.get(key) or ""
-        if verdict not in ("too_fast", "too_slow"):
-            continue
-        if when == "heard":
-            ctx.log(
-                f"Cue {index + 1} {verdict}: "
-                f"spoke {score.get('spoken_s')}s "
-                f"for a {score.get('slot_s')}s slot "
-                f"(ratio {score.get('spoken_ratio')})"
-            )
-            continue
-        after = score.get("after") or {}
-        note = "rewrote" if score.get("rewritten") else "kept"
-        ctx.log(
-            f"Cue {index + 1} {verdict}: "
-            f"{score['words']} words for {score['slot_s']}s "
-            f"(~{score['estimated_s']}s spoken), {note}"
-            + (
-                f" → {after.get('verdict')}"
-                if after.get("verdict") else ""
-            )
-        )
+def _word_spans(sentences: list[str], words: list[dict],
+                length: float) -> list[tuple[float, float]]:
+    """Where each sentence sits inside the take.
+
+    Word times come from listening to the take itself. When the listener
+    heard a different number of words than we asked for, fall back to
+    sharing the time out by text length: a wrong subtitle time is better
+    than a wrong one that pretends to be exact.
+    """
+    counts = [len(s.split()) for s in sentences]
+    if words and abs(len(words) - sum(counts)) <= max(2, sum(counts) // 4):
+        spans = []
+        cursor = 0
+        for count in counts:
+            first = words[min(cursor, len(words) - 1)]
+            last = words[min(cursor + count - 1, len(words) - 1)]
+            spans.append((float(first.get("start", 0.0)),
+                          float(last.get("end", length))))
+            cursor += count
+        return spans
+
+    total = sum(len(s) for s in sentences) or 1
+    spans = []
+    cursor = 0.0
+    for sentence in sentences:
+        share = length * len(sentence) / total
+        spans.append((cursor, cursor + share))
+        cursor += share
+    return spans
+
+
+def _selfcheck():
+    """Block building and pacing, without ffmpeg or a GPU."""
+    def cue(start, end, text="hello there"):
+        return {"start": start, "end": end, "speech_start": start,
+                "speech_end": end, "text": text}
+
+    # A short pause keeps one block, a long one ends it.
+    blocks = build_blocks(
+        [cue(0.0, 2.0), cue(2.2, 4.0), cue(6.0, 8.0)], [], 10.0)
+    assert len(blocks) == 2, blocks
+    assert blocks[0]["cues"] == blocks[0]["cues"]
+    assert blocks[0]["next_start"] == 6.0
+    assert blocks[1]["next_start"] == 10.0
+
+    # A scene cut in the pause ends the block, and marks it hard.
+    blocks = build_blocks([cue(0.0, 2.0), cue(2.2, 4.0)], [2.1], 6.0)
+    assert len(blocks) == 2
+    assert blocks[0]["hard"] is True
+
+    # A very long run is split even without a pause.
+    long_cues = [cue(i * 2.0, i * 2.0 + 1.9) for i in range(8)]
+    blocks = build_blocks(long_cues, [], 20.0)
+    assert len(blocks) > 1, "16s of speech must not be one take"
+    assert all(b["end"] - b["start"] <= MAX_BLOCK_SECONDS + 2 for b in blocks)
+
+    # Pace walks towards what the voice really does.
+    pace = Pace(2.4)
+    for _ in range(10):
+        pace.observe(10, 2.0)  # 5 words per second
+    assert 4.5 < pace.value < 5.1, pace.value
+    assert pace.words_for(2.0) >= 9
+
+    # Listening back tells a good take from a wrong one.
+    assert text_error("xin chào các bạn", "xin chào các bạn") < 0.01
+    assert text_error("xin chào các bạn", "hôm nay trời mưa") > 0.5
+
+    # Sentences share the take by word times when they line up.
+    words = [{"start": i * 0.5, "end": i * 0.5 + 0.4} for i in range(6)]
+    spans = _word_spans(["one two three", "four five six"], words, 3.0)
+    assert spans[0][0] == 0.0 and spans[1][0] == 1.5, spans
+
+    print("synth.py self-check OK")
+
+
+if __name__ == "__main__":
+    _selfcheck()

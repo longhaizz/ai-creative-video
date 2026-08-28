@@ -18,8 +18,7 @@ from server.steps.transcribe import SPEAKER_00
 MIN_REF_SECONDS = 3.0
 # Whisper often leaves a 50–300ms first-word crumb ("I", "You're", "Easy")
 # on the previous cut, then the full phrase in the next window. TTS
-# cannot speak those, and the rewrite model merges them and returns the
-# wrong cue_translations length.
+# cannot speak those, so they are folded into the line they belong to.
 PREFIX_CRUMB_SECONDS = 0.35
 PREFIX_CRUMB_GAP_SECONDS = 0.8
 SHORT_CTA_SECONDS = 0.6

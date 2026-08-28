@@ -1,27 +1,36 @@
-"""Fitting the new voice to the old timing.
+"""Laying the new voice on the timeline, block by block.
 
-This is the part of the pipeline that has no obvious right answer and fails
-quietly: nothing crashes when a line lands in the wrong place, the video
-just stops matching the sound.
+This is the part of the pipeline that fails quietly: nothing crashes when a
+line lands in the wrong place or a sentence is cut short, the video just
+stops matching the sound.
 
-The TTS model is replaced by ffmpeg tones of a chosen length, so the whole
-decision tree runs for real, including the speed changes.
+The TTS model is replaced by ffmpeg tones of a chosen length and the
+listener by a dict, so the whole decision tree runs for real, including the
+speed changes and the choice between takes.
 """
 
+import json
 import shutil
 import subprocess
 
 import pytest
 
 from server.jobs import PipelineError
+from server.steps import synth
 from server.steps.audio import duration
 from server.steps.synth import (
-    RATIO_KEEP_HI,
-    RATIO_KEEP_LO,
-    RATIO_HOLE,
-    SOFT_SPEEDUP,
-    cue_slots,
-    fit_cue,
+    DRIFT_CAP,
+    MAX_BLOCK_SECONDS,
+    MAX_HESITATION,
+    MIN_GAP,
+    SOFT_TEMPO,
+    Pace,
+    build_blocks,
+    ends_sentence,
+    longest_pause,
+    split_to_cap,
+    text_error,
+    timed_speech,
     with_voice_instruction,
 )
 
@@ -29,6 +38,11 @@ needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg is not on PATH",
 )
+
+
+def cue(start, end, text="hello there"):
+    return {"start": start, "end": end, "speech_start": start,
+            "speech_end": end, "text": text}
 
 
 # -- voice presets ----------------------------------------------------------
@@ -50,55 +64,88 @@ def test_an_empty_line_is_refused():
         with_voice_instruction("   ", "male_old")
 
 
-# -- working out the time slots ---------------------------------------------
+# -- building the blocks ----------------------------------------------------
 
 
-def cue(start, end, text="hi"):
-    return {"start": start, "end": end, "speech_start": start,
-            "speech_end": end, "text": text}
+def test_a_short_pause_keeps_one_block():
+    """A breath inside a sentence is not a place to restart the voice."""
+    blocks = build_blocks([cue(0.0, 2.0), cue(2.2, 4.0)], [], 10.0)
+    assert len(blocks) == 1
+    assert blocks[0]["start"] == 0.0 and blocks[0]["end"] == 4.0
 
 
-def test_a_slot_is_as_long_as_the_speech_it_replaces():
-    slots = cue_slots([cue(0.0, 2.0), cue(5.0, 7.0)], video_seconds=10.0)
-    assert slots[0]["target"] == 2.0
-    assert slots[1]["target"] == 2.0
+def test_a_real_pause_ends_the_block():
+    blocks = build_blocks([cue(0.0, 2.0), cue(3.0, 4.0)], [], 10.0)
+    assert len(blocks) == 2
+    assert blocks[0]["next_start"] == 3.0, "the pause is room block 1 may use"
 
 
-def test_the_window_reaches_to_the_next_cue_not_just_its_own_end():
-    """The pause after a sentence is room the voice may use if it has to."""
-    slots = cue_slots([cue(0.0, 2.0), cue(5.0, 7.0)], video_seconds=10.0)
-    assert slots[0]["window"] == 5.0, "2s of speech plus a 3s pause"
-    assert slots[0]["target"] == 2.0, "but it should still aim for 2s"
+def test_a_scene_cut_ends_the_block_and_marks_it_hard():
+    blocks = build_blocks([cue(0.0, 2.0), cue(2.2, 4.0)], [2.1], 6.0)
+    assert len(blocks) == 2
+    assert blocks[0]["hard"] is True, "no drift is allowed across a cut"
 
 
-def test_the_last_cue_may_use_the_rest_of_the_video():
-    slots = cue_slots([cue(0.0, 2.0), cue(5.0, 7.0)], video_seconds=10.0)
-    assert slots[1]["window"] == 5.0
+def test_a_long_run_of_speech_is_split():
+    """VoxCPM wanders on long takes, so a block has a ceiling."""
+    cues = [cue(i * 2.0, i * 2.0 + 1.9) for i in range(8)]
+    blocks = build_blocks(cues, [], 20.0)
+    assert len(blocks) > 1
+    assert all(b["end"] - b["start"] <= MAX_BLOCK_SECONDS + 2 for b in blocks)
 
 
-def test_a_target_never_reaches_into_the_next_cue():
-    """Whisper can end a cue after the next one starts."""
-    slots = cue_slots([cue(0.0, 6.0), cue(4.0, 8.0)], video_seconds=10.0)
-    assert slots[0]["target"] == 4.0, "clipped to where the next cue begins"
+def test_the_last_block_may_use_the_rest_of_the_video():
+    blocks = build_blocks([cue(0.0, 2.0)], [], 10.0)
+    assert blocks[0]["next_start"] == 10.0
 
 
-def test_a_silent_cue_still_holds_its_place():
-    """An empty cue keeps its slot, so the one before cannot take its time."""
-    cues = [cue(0.0, 2.0), cue(3.0, 5.0, text=""), cue(6.0, 8.0)]
-    slots = cue_slots(cues, video_seconds=10.0)
-    assert slots[0]["window"] == 3.0, "not 6.0: the silent cue is in the way"
+def test_silent_cues_are_left_out():
+    blocks = build_blocks([cue(0.0, 2.0), cue(2.2, 3.0, text="")], [], 6.0)
+    assert len(blocks) == 1
+    assert blocks[0]["end"] == 2.0
 
 
-# -- fitting one line -------------------------------------------------------
+# -- the measured word rate -------------------------------------------------
 
 
-def tone_maker(tmp_path, lengths):
-    """A stand-in for the TTS model. `lengths` maps a line to its seconds."""
+def test_the_pace_walks_towards_the_real_voice():
+    """The old code used one constant for every language. It was wrong."""
+    pace = Pace(2.4)
+    for _ in range(10):
+        pace.observe(10, 2.0)  # the voice really says 5 words a second
+    assert 4.5 < pace.value < 5.1
+    assert pace.words_for(2.0) >= 9
+
+
+def test_a_tiny_sample_does_not_move_the_pace():
+    pace = Pace(4.0)
+    pace.observe(1, 0.2)
+    assert pace.value == 4.0
+
+
+# -- judging a take ---------------------------------------------------------
+
+
+def test_a_take_that_says_the_line_scores_clean():
+    assert text_error("xin chào các bạn", "xin chào các bạn") < 0.01
+
+
+def test_a_take_that_says_something_else_scores_badly():
+    assert text_error("xin chào các bạn", "hôm nay trời mưa") > 0.5
+
+
+# -- the whole pass ---------------------------------------------------------
+
+
+def tone_maker(lengths):
+    """Stand-in for VoxCPM. `lengths` maps a line to a list of take lengths."""
     calls = []
 
-    def speak(text, out_wav):
+    def speak(text, out_wav, cue=None):
         calls.append(text)
         seconds = lengths[text]
+        if isinstance(seconds, list):
+            seconds = seconds[min(calls.count(text), len(seconds)) - 1]
         subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error",
              "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
@@ -111,311 +158,274 @@ def tone_maker(tmp_path, lengths):
     return speak
 
 
-def slot(target, window=None):
-    return {"start": 0.0, "end": target, "target": target,
-            "window": window if window is not None else target}
-
-
-@needs_ffmpeg
-def test_a_line_that_already_fits_is_left_alone(tmp_path):
-    speak = tone_maker(tmp_path, {"hello": 2.0})
-    out = fit_cue("hello", slot(2.0), tmp_path, 0, speak)
-    assert abs(duration(out) - 2.0) < 0.05
-
-
-@needs_ffmpeg
-def test_a_slightly_long_line_is_sped_up(tmp_path):
-    speak = tone_maker(tmp_path, {"hello": 2.2})
-    out = fit_cue("hello", slot(2.0), tmp_path, 0, speak)
-    assert duration(out) < 2.2
-    assert abs(duration(out) - 2.0) < 0.1
-
-
-@needs_ffmpeg
-def test_a_slightly_short_line_is_slowed_down(tmp_path):
-    speak = tone_maker(tmp_path, {"hello": 1.75})
-    out = fit_cue("hello", slot(2.0), tmp_path, 0, speak)
-    assert duration(out) > 1.75
-
-
-@needs_ffmpeg
-def test_a_far_too_long_line_is_rewritten(tmp_path):
-    speak = tone_maker(tmp_path, {"a long line": 4.0, "short": 2.1})
-    asked = []
-
-    def rewrite(text, seconds, shorter):
-        asked.append(shorter)
-        return "short"
-
-    out = fit_cue("a long line", slot(2.0), tmp_path, 0, speak, rewrite)
-    assert asked == [True], "it should ask for something shorter"
-    assert speak.calls == ["a long line", "short"]
-    assert abs(duration(out) - 2.0) < 0.15
-
-
-@needs_ffmpeg
-def test_fit_cue_records_the_line_that_was_spoken(tmp_path):
-    speak = tone_maker(tmp_path, {"a long line": 4.0, "short": 2.1})
-    stats = {}
-
-    def rewrite(text, seconds, shorter):
-        return "short"
-
-    fit_cue("a long line", slot(2.0), tmp_path, 0, speak, rewrite, stats=stats)
-    assert stats["spoken_text"] == "short"
-
-
-@needs_ffmpeg
-def test_a_far_too_short_line_asks_for_a_longer_one(tmp_path):
-    speak = tone_maker(tmp_path, {"hi": 1.0, "hello there friend": 1.95})
-    asked = []
-
-    def rewrite(text, seconds, shorter):
-        asked.append(shorter)
-        return "hello there friend"
-
-    fit_cue("hi", slot(2.0), tmp_path, 0, speak, rewrite)
-    assert asked == [False], "it should ask for something longer"
-
-
-@needs_ffmpeg
-def test_a_tiny_slot_is_not_rewritten(tmp_path):
-    speak = tone_maker(tmp_path, {"Water": 0.96})
-    asked = []
-
-    def rewrite(text, seconds, shorter):
-        asked.append(text)
-        return "I doubt you can handle this traffic when we get into it."
-
-    out = fit_cue("Water", slot(0.4, window=0.4), tmp_path, 0, speak, rewrite)
-    assert asked == []
-    assert speak.calls == ["Water"]
-    assert duration(out) <= 0.4 + 0.05
-
-
-@needs_ffmpeg
-def test_a_rewrite_that_fits_no_better_is_dropped(tmp_path):
-    """Keep the best take, not the newest one."""
-    speak = tone_maker(tmp_path, {"long": 4.0, "also long": 4.5})
-
-    def rewrite(text, seconds, shorter):
-        return "also long"
-
-    out = fit_cue("long", slot(2.0), tmp_path, 0, speak, rewrite)
-    # 4.0 is nearer to 2.0 than 4.5, so the first take wins and is squeezed.
-    assert duration(out) < 4.0
-
-
-@needs_ffmpeg
-def test_a_closer_rewrite_is_kept(tmp_path):
-    """0.83 → 0.98 is nearer the slot; keep the second take."""
-    speak = tone_maker(tmp_path, {"short": 1.66, "closer": 1.96})
-
-    def rewrite(text, seconds, shorter):
-        return "closer"
-
-    stats = {}
-    out = fit_cue(
-        "short", slot(2.0, window=9.0), tmp_path, 0, speak, rewrite, stats=stats,
-    )
-    assert stats["spoken_text"] == "closer"
-    assert abs(duration(out) - 1.96) < 0.08
-
-
-@needs_ffmpeg
-def test_a_b_roll_hole_is_not_rewritten(tmp_path):
-    speak = tone_maker(tmp_path, {"hi": 0.6})
-    asked = []
-
-    def rewrite(text, seconds, shorter):
-        asked.append(text)
-        return "padding that invents a new sentence"
-
-    fit_cue("hi", slot(2.0, window=9.0), tmp_path, 0, speak, rewrite)
-    assert asked == []
-    assert 0.6 / 2.0 < RATIO_HOLE
-
-
-@needs_ffmpeg
-def test_a_rushed_sentence_is_lengthened_not_treated_as_b_roll(tmp_path):
-    """TTS 0.3x a real line is a talking-head hole, not B-roll."""
-    line = "You don't need a network to use this translator."
-    speak = tone_maker(tmp_path, {line: 0.6, "a much longer spoken line here": 1.9})
-    asked = []
-
-    def rewrite(text, seconds, shorter):
-        asked.append(shorter)
-        return "a much longer spoken line here"
-
-    fit_cue(line, slot(2.0, window=9.0), tmp_path, 0, speak, rewrite)
-    assert asked == [False]
-
-
-@needs_ffmpeg
-def test_a_line_that_still_overruns_is_cut(tmp_path):
-    """A line that still overruns after speed-up is cut to the window.
-
-    Overlapping the next cue is worse than losing the tail of a word.
-    """
-    speak = tone_maker(tmp_path, {"very long": 6.0})
-    out = fit_cue("very long", slot(2.0, window=2.0), tmp_path, 0, speak)
-    assert duration(out) <= 2.0 + 0.05
-    assert duration(out) < 6.0
-
-
-@needs_ffmpeg
-def test_a_line_may_use_the_pause_after_it(tmp_path):
-    """With a wide window there is no need to speed anything up."""
-    speak = tone_maker(tmp_path, {"hello": 2.0})
-    out = fit_cue("hello", slot(2.0, window=6.0), tmp_path, 0, speak)
-    assert abs(duration(out) - 2.0) < 0.05
-
-
-@needs_ffmpeg
-def test_it_stays_off_the_next_cue_when_the_limits_allow(tmp_path):
-    """Overlapping speech is worse than speech that is a little too fast.
-
-    This one fits inside the limits. When it does not, see
-    test_a_tight_window_is_cut_to_the_window: the tail is cut rather than
-    the next cue overlapped.
-    """
-    speak = tone_maker(tmp_path, {"hello": 3.0})
-    out = fit_cue("hello", slot(2.8, window=2.5), tmp_path, 0, speak)
-    assert duration(out) <= 2.5 + 0.05
-
-
-@needs_ffmpeg
-def test_cannot_fit_falls_back_to_the_speed_change(tmp_path):
-    from server.steps.synth import CANNOT_FIT
-
-    speak = tone_maker(tmp_path, {"long": 4.0})
-
-    def rewrite(text, seconds, shorter):
-        return CANNOT_FIT
-
-    # A wide window, so only the soft limit applies.
-    out = fit_cue("long", slot(2.0, window=9.0), tmp_path, 0, speak, rewrite)
-    assert speak.calls == ["long"], "no second take when nothing can be said"
-    assert abs(duration(out) - 4.0 / SOFT_SPEEDUP) < 0.05, "capped at the soft limit"
-
-
-@needs_ffmpeg
-def test_a_tight_window_is_cut_to_the_window(tmp_path):
-    """Speed-up first, then cut. The next cue must not be overlapped."""
-    speak = tone_maker(tmp_path, {"long": 4.0})
-    out = fit_cue("long", slot(2.0, window=2.0), tmp_path, 0, speak)
-    length = duration(out)
-
-    assert length < 4.0 / SOFT_SPEEDUP - 0.05, "faster than the soft cap alone"
-    assert length <= 2.0 + 0.05, "must not run into the next cue"
-
-
-@needs_ffmpeg
-def test_the_keep_band_is_the_one_the_code_uses(tmp_path):
-    """A ratio just inside the band is untouched, just outside is not."""
-    inside = RATIO_KEEP_HI - 0.02
-    outside = RATIO_KEEP_HI + 0.05
-    speak = tone_maker(tmp_path, {"a": 2.0 * inside, "b": 2.0 * outside})
-
-    kept = fit_cue("a", slot(2.0, window=9.0), tmp_path, 0, speak)
-    assert abs(duration(kept) - 2.0 * inside) < 0.05
-
-    changed = fit_cue("b", slot(2.0, window=9.0), tmp_path, 1, speak)
-    assert duration(changed) < 2.0 * outside - 0.05
-
-
-def test_the_bands_make_sense():
-    assert RATIO_KEEP_LO < 1.0 < RATIO_KEEP_HI
-
-
-def test_report_script_logs_heard_and_script():
-    from server.steps.synth import _report_script
-
-    logs = []
-
-    class Ctx:
-        def log(self, message):
-            logs.append(message)
-
-    _report_script(
-        {
-            "master_meaning": "pregnancy test ad",
-            "master_translation": "Put your finger on the screen.",
-            "cue_translations": ["Đặt ngón tay lên màn hình.", "Tải miễn phí."],
+def listener(heard=None):
+    """Stand-in for whisper. Says it heard exactly what it was given."""
+    def listen(wav, lang):
+        text = heard if heard is not None else _asked_for(wav)
+        return {"text": text, "words": []}
+    return listen
+
+
+_ASKED: dict = {}
+
+
+def _asked_for(wav):
+    return _ASKED.get(str(wav), "")
+
+
+def run_blocks(monkeypatch, tmp_path, cues, lines, lengths, scenes=(),
+               video_seconds=10.0, rewrite=None):
+    """Run timed_speech with the model and the translator replaced."""
+    monkeypatch.setattr(
+        synth, "translate_blocks",
+        lambda blocks, lang, key, asr_meta=None: {
+            "lines": lines,
+            "master_meaning": "meaning",
+            "master_translation": " ".join(lines),
+            "output_lang_code": "vi",
+            "output_lang_name": "Vietnamese",
         },
-        [
-            {"text": "बस अपनी उंगली को स्क्रीन पर रखें"},
-            {"text": "डाउलोट करें और आजमायें"},
-        ],
-        Ctx(),
     )
-    assert "Cue 1 heard: बस अपनी उंगली को स्क्रीन पर रखें" in logs
-    assert "Cue 1 script: Đặt ngón tay lên màn hình." in logs
-    assert "Cue 2 heard: डाउलोट करें और आजमायें" in logs
-    assert "Cue 2 script: Tải miễn phí." in logs
+    if rewrite is not None:
+        monkeypatch.setattr(synth, "rephrase_for_duration", rewrite)
 
+    speak = tone_maker(lengths)
 
-def test_cue_trace_has_heard_script_spoken():
-    from server.steps.synth import _cue_trace
+    def speak_and_remember(text, out_wav, cue=None):
+        path = speak(text, out_wav, cue)
+        _ASKED[str(path)] = text
+        return path
 
-    rows = _cue_trace(
-        [{"start": 0.0, "end": 2.0, "text": "hello"},
-         {"start": 2.0, "end": 4.0, "text": "bye"}],
-        ["xin chào", "tạm biệt"],
-        {0: "xin chào nhé"},
+    out = timed_speech(
+        cues, tmp_path, video_seconds, speak_and_remember, "key", "vi",
+        meta={"language": "en"}, ctx=None, listen=listener(),
+        scenes=list(scenes),
     )
-    assert rows[0] == {
-        "id": 0, "start": 0.0, "end": 2.0,
-        "heard": "hello", "script": "xin chào", "spoken": "xin chào nhé",
-    }
-    assert rows[1]["spoken"] == ""
+    spoken = json.loads((tmp_path / "spoken_cues.json").read_text(encoding="utf-8"))
+    return out, spoken, speak
 
 
-def test_refit_script_pace_rewrites_a_packed_line(monkeypatch):
-    from server.steps.translate import refit_script_pace, score_pace
+@needs_ffmpeg
+def test_a_block_that_fits_is_left_alone(monkeypatch, tmp_path):
+    cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
+    out, spoken, _ = run_blocks(
+        monkeypatch, tmp_path, cues,
+        lines=["câu một ở đây.", "câu hai ở đây."],
+        lengths={"câu một ở đây.": 2.0, "câu hai ở đây.": 2.0},
+    )
+    assert duration(out) == pytest.approx(10.0, abs=0.2)
+    assert [s["start"] for s in spoken] == [0.0, 3.0], "kept the original clock"
 
-    packed = " ".join(["word"] * 20)
-    assert score_pace(packed, 2.0)["verdict"] == "too_fast"
+
+@needs_ffmpeg
+def test_a_long_block_eats_the_pause_instead_of_being_cut(monkeypatch, tmp_path):
+    """2s of speech plus a 1s pause is 3s of room, and nothing is trimmed."""
+    cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
+    out, spoken, _ = run_blocks(
+        monkeypatch, tmp_path, cues,
+        lines=["câu một dài hơn.", "câu hai ở đây."],
+        lengths={"câu một dài hơn.": 2.8, "câu hai ở đây.": 2.0},
+    )
+    assert spoken[0]["end"] - spoken[0]["start"] == pytest.approx(2.8, abs=0.1)
+    assert spoken[1]["start"] == pytest.approx(3.0, abs=0.05), "no drift needed"
+
+
+@needs_ffmpeg
+def test_an_overlong_block_pushes_the_next_one_but_not_past_the_cap(
+        monkeypatch, tmp_path):
+    cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
+    out, spoken, _ = run_blocks(
+        monkeypatch, tmp_path, cues,
+        lines=["câu một rất dài.", "câu hai ở đây."],
+        lengths={"câu một rất dài.": 3.4, "câu hai ở đây.": 2.0},
+        rewrite=lambda *a, **k: "",  # the rewrite gives up
+    )
+    drift = spoken[1]["start"] - 3.0
+    assert 0 < drift <= DRIFT_CAP + 0.01, drift
+    assert spoken[0]["end"] <= spoken[1]["start"] - MIN_GAP + 0.01
+
+
+@needs_ffmpeg
+def test_the_next_block_returns_to_the_original_clock(monkeypatch, tmp_path):
+    """Drift is never carried past one block: every anchor resets it."""
+    cues = [cue(0.0, 2.0), cue(3.0, 4.0), cue(6.0, 8.0)]
+    out, spoken, _ = run_blocks(
+        monkeypatch, tmp_path, cues,
+        lines=["câu một rất dài.", "câu hai.", "câu ba ở đây."],
+        lengths={"câu một rất dài.": 3.4, "câu hai.": 1.0,
+                 "câu ba ở đây.": 2.0},
+        rewrite=lambda *a, **k: "",
+    )
+    assert spoken[1]["start"] > 3.0, "block 2 starts late"
+    assert spoken[2]["start"] == pytest.approx(6.0, abs=0.05), "block 3 is on time"
+
+
+@needs_ffmpeg
+def test_a_scene_cut_is_never_crossed_by_rushing_the_voice(monkeypatch, tmp_path):
+    """A rushed voice is heard by everyone; a late line by almost no one."""
+    cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
+    out, spoken, _ = run_blocks(
+        monkeypatch, tmp_path, cues,
+        lines=["câu một rất dài.", "câu hai ở đây."],
+        lengths={"câu một rất dài.": 3.4, "câu hai ở đây.": 2.0},
+        scenes=[2.5],
+        rewrite=lambda *a, **k: "",
+    )
+    spoken_length = spoken[0]["end"] - spoken[0]["start"]
+    assert spoken_length >= 3.4 / SOFT_TEMPO - 0.1, "never faster than the cap"
+    assert spoken[1]["start"] - 3.0 < 0.4, "and the overrun stays small"
+
+
+@needs_ffmpeg
+def test_a_shorter_line_is_asked_for_before_the_speed_is_touched(
+        monkeypatch, tmp_path):
+    asked = []
+
+    def rewrite(text, seconds, api_key, **kw):
+        asked.append((text, round(seconds, 2), kw.get("target_words_n")))
+        return "câu ngắn."
+
+    cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
+    out, spoken, speak = run_blocks(
+        monkeypatch, tmp_path, cues,
+        lines=["câu một rất dài.", "câu hai ở đây."],
+        lengths={"câu một rất dài.": 3.4, "câu ngắn.": 1.5,
+                 "câu hai ở đây.": 2.0},
+        rewrite=rewrite,
+    )
+    assert asked, "the long block must ask for a shorter line first"
+    assert asked[0][2], "the rewrite gets the measured word budget"
+    assert "câu ngắn." in speak.calls
+    assert spoken[1]["start"] == pytest.approx(3.0, abs=0.05), "no drift left"
+
+
+@needs_ffmpeg
+def test_a_babbling_take_loses_to_the_good_one(monkeypatch, tmp_path):
+    """VoxCPM sometimes runs away. The second take must win."""
+    cues = [cue(0.0, 2.0)]
+    out, spoken, speak = run_blocks(
+        monkeypatch, tmp_path, cues,
+        lines=["câu một ở đây."],
+        lengths={"câu một ở đây.": [20.0, 2.0]},
+        video_seconds=6.0,
+    )
+    assert speak.calls.count("câu một ở đây.") >= 2, "a bad take is not kept"
+    assert spoken[0]["end"] - spoken[0]["start"] < 4.0
+
+
+@needs_ffmpeg
+def test_every_sentence_of_a_block_gets_its_own_subtitle(monkeypatch, tmp_path):
+    cues = [cue(0.0, 4.0)]
+    out, spoken, _ = run_blocks(
+        monkeypatch, tmp_path, cues,
+        lines=["Câu một. Câu hai."],
+        lengths={"Câu một. Câu hai.": 4.0},
+        video_seconds=6.0,
+    )
+    assert [s["text"] for s in spoken] == ["Câu một.", "Câu hai."]
+    assert spoken[0]["end"] <= spoken[1]["start"] + 0.01
+
+
+# -- keeping the seam off the middle of a sentence --------------------------
+
+
+def test_a_long_run_is_split_after_a_full_stop():
+    """A seam inside a sentence is the one seam a listener notices."""
+    cues = [
+        cue(0.0, 3.0, "first sentence ends here."),
+        cue(3.1, 6.0, "second sentence ends here."),
+        cue(6.1, 9.0, "third one runs on and on"),
+        cue(9.1, 12.0, "and still keeps going."),
+    ]
+    pieces = split_to_cap(cues)
+    assert len(pieces) == 2
+    assert ends_sentence(pieces[0][-1]), "the cut lands on a full stop"
+
+
+def test_a_run_with_no_full_stop_is_split_at_the_widest_pause():
+    cues = [
+        cue(0.0, 3.0, "no punctuation here"),
+        cue(3.1, 6.0, "still nothing"),
+        cue(6.5, 9.0, "after the widest pause"),
+        cue(9.1, 12.0, "and the end"),
+    ]
+    pieces = split_to_cap(cues)
+    assert len(pieces) == 2
+    assert pieces[1][0]["start"] == 6.5, "split where the speaker breathed"
+
+
+def test_a_pause_without_a_full_stop_still_ends_a_block_when_it_is_long():
+    """Whisper often leaves the full stop out. A second of silence is a break."""
+    blocks = build_blocks([cue(0.0, 2.0, "no stop here"),
+                           cue(3.5, 5.0, "next thought")], [], 8.0)
+    assert len(blocks) == 2
+
+
+def test_a_small_pause_mid_sentence_keeps_one_block():
+    blocks = build_blocks([cue(0.0, 2.0, "half a thought"),
+                           cue(2.2, 4.0, "the other half.")], [], 8.0)
+    assert len(blocks) == 1, "0.2s is a breath, not a break"
+
+
+# -- judging how fluent a take is -------------------------------------------
+
+
+def test_a_take_that_stops_mid_sentence_is_spotted():
+    words = [{"start": 0.0, "end": 0.4}, {"start": 1.8, "end": 2.2}]
+    assert longest_pause(words) > MAX_HESITATION
+
+
+def test_a_take_that_runs_on_has_no_long_pause():
+    words = [{"start": 0.0, "end": 0.4}, {"start": 0.5, "end": 0.9}]
+    assert longest_pause(words) < MAX_HESITATION
+
+
+@needs_ffmpeg
+def test_a_stumbling_take_loses_to_a_fluent_one(monkeypatch, tmp_path):
+    from server.steps import synth
 
     monkeypatch.setattr(
-        "server.steps.translate.fit_length",
-        lambda text, tw, key, model="x": "one two three four five",
+        synth, "translate_blocks",
+        lambda blocks, lang, key, asr_meta=None: {
+            "lines": ["câu một ở đây."],
+            "master_meaning": "m",
+            "master_translation": "câu một ở đây.",
+            "output_lang_code": "vi",
+            "output_lang_name": "Vietnamese",
+        },
     )
-    out, scores = refit_script_pace(
-        [packed, "one two three four five"],
-        [{"target": 2.0}, {"target": 2.0}],
-        "k",
-    )
-    assert out[0] == "one two three four five"
-    assert scores[0]["rewritten"] is True
-    assert scores[0]["after"]["verdict"] == "ok"
-    assert out[1] == "one two three four five"
-    assert scores[1]["rewritten"] is False
+    speak = tone_maker({"câu một ở đây.": 2.0})
+    seen = []
 
+    def listen(wav, lang):
+        seen.append(wav)
+        if len(seen) == 1:  # the first take says it all, but stops halfway
+            return {"text": "câu một ở đây.",
+                    "words": [{"start": 0.0, "end": 0.3},
+                              {"start": 1.5, "end": 1.9}]}
+        return {"text": "câu một ở đây.",
+                "words": [{"start": 0.0, "end": 0.3},
+                          {"start": 0.4, "end": 0.9}]}
 
-def _mean_volume_db(path):
-    result = subprocess.run(
-        ["ffmpeg", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
-        capture_output=True, text=True,
-    )
-    import re
-    match = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", result.stderr or "")
-    assert match, result.stderr[-200:]
-    return float(match.group(1))
+    timed_speech([cue(0.0, 2.0)], tmp_path, 6.0, speak, "key", "vi",
+                 meta={"language": "en"}, ctx=None, listen=listen, scenes=[])
+    assert len(seen) >= 2, "a take that hesitates is not kept"
 
 
 @needs_ffmpeg
-def test_make_audible_raises_a_quiet_mix(tmp_path):
-    from server.steps.audio import make_audible
+def test_the_silence_a_take_is_padded_with_is_removed(tmp_path):
+    """A block must start speaking on the beat it was given."""
+    import subprocess
 
-    quiet = tmp_path / "quiet.wav"
+    from server.steps.audio import clean_take, duration
+
+    raw = tmp_path / "raw.wav"
     subprocess.run(
-        [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-            "-af", "volume=-24dB", "-c:a", "pcm_s16le", str(quiet),
-        ],
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=1",
+         "-af", "adelay=300:all=1,apad=pad_dur=0.4",
+         "-c:a", "pcm_s16le", str(raw)],
         check=True, capture_output=True,
     )
-    out = make_audible(quiet, tmp_path / "loud.wav")
-    assert _mean_volume_db(out) > _mean_volume_db(quiet) + 8
+    assert duration(raw) == pytest.approx(1.7, abs=0.05)
+    assert duration(clean_take(raw, tmp_path / "clean.wav")) < 1.3
