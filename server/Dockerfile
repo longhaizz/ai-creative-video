@@ -1,5 +1,5 @@
 # =========================================================================
-# Dub server. One image, one GPU, three virtual environments.
+# Dub server. One image, one GPU, two virtual environments.
 #
 # The second venv is not a style choice. The subtitle remover needs
 # numpy 2.2 for paddle, LatentSync needs numpy 1.26, and the two ABIs do not
@@ -10,9 +10,8 @@
 # subprocess and waits, still holding the GPU, so it is still one job at a
 # time.
 #
-#   /opt/venv-main   python 3.10   FastAPI, LatentSync, VoxCPM
+#   /opt/venv-main   python 3.10   FastAPI, LatentSync, VoxCPM, Whisper, Demucs
 #   /opt/venv-vsr    python 3.12   video-subtitle-remover, paddle
-#   /opt/venv-od     python 3.10   Demucs, VAD, Pyannote, Whisper
 #
 # Model weights are NOT in the image. They are several gigabytes and they
 # change on their own schedule, so they are mounted; see docker-compose.yml.
@@ -88,18 +87,6 @@ RUN MPLBACKEND=Agg PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     /opt/venv-vsr/bin/paddlex --install hpi-gpu
 
 # -------------------------------------------------------------------------
-# Open Dubbing venv. pyannote's transformers stack does not sit next to
-# LatentSync, so Demucs + VAD + Whisper run in their own interpreter.
-# -------------------------------------------------------------------------
-COPY server/requirements-open-dubbing.txt server/
-
-RUN python3.10 -m venv /opt/venv-od \
-    && /opt/venv-od/bin/pip install --upgrade pip \
-    && /opt/venv-od/bin/pip install torch torchaudio \
-        --extra-index-url https://download.pytorch.org/whl/cu121 \
-    && /opt/venv-od/bin/pip install -r server/requirements-open-dubbing.txt
-
-# -------------------------------------------------------------------------
 # The code, last, so that editing it rebuilds only this layer.
 # -------------------------------------------------------------------------
 COPY server/ server/
@@ -109,7 +96,6 @@ COPY video-subtitle-remover/ video-subtitle-remover/
 
 ENV VSR_PYTHON=/opt/venv-vsr/bin/python \
     VSR_DIR=/app/video-subtitle-remover \
-    OPEN_DUBBING_PYTHON=/opt/venv-od/bin/python \
     LATENTSYNC_DIR=/app/LatentSync \
     JOBS_DIR=/app/jobs \
     HF_HOME=/models/huggingface
