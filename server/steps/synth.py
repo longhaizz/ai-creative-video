@@ -364,6 +364,7 @@ def timed_speech(
 
     clips: list[tuple[float, Path]] = []
     spoken_cues: list[dict] = []
+    spoken_by_index: dict[int, str] = {}
     for position, index in enumerate(spoken_indices):
         if ctx is not None:
             ctx.check_cancel()
@@ -395,6 +396,10 @@ def timed_speech(
 
         heard = {}
         fitted = fit_cue(line, slot, work, index, speak_this, rewrite, ctx, heard)
+        spoken_text = heard.get("spoken_text") or line
+        spoken_by_index[index] = spoken_text
+        if ctx is not None:
+            ctx.log(f"Cue {index + 1} spoken: {spoken_text}")
         if index < len(scores):
             scores[index]["heard"] = heard.get("heard")
             scores[index]["spoken_s"] = heard.get("spoken")
@@ -404,7 +409,7 @@ def timed_speech(
         spoken_cues.append({
             "start": round(slot["start"], 3),
             "end": round(max(spoken_end, slot["start"] + 0.05), 3),
-            "text": heard.get("spoken_text") or line,
+            "text": spoken_text,
         })
 
     for index, sub in enumerate(spoken_cues[:-1]):
@@ -413,6 +418,13 @@ def timed_speech(
             sub["end"] = nxt
     (work / "spoken_cues.json").write_text(
         json.dumps(spoken_cues, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (work / "cue_trace.json").write_text(
+        json.dumps(
+            _cue_trace(cues, lines, spoken_by_index),
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
     )
 
     script["pace"] = scores
@@ -449,6 +461,33 @@ def _report_script(script: dict, cues: list[dict], ctx) -> None:
     ctx.log(f"Script: {script['master_translation']}")
     if script.get("uncertain_spans"):
         ctx.log(f"Unsure about: {script['uncertain_spans']}")
+    translations = list(script.get("cue_translations") or [])
+    for index, cue in enumerate(cues):
+        heard = (cue.get("text") or "").strip()
+        line = ""
+        if index < len(translations):
+            line = (translations[index] or "").strip()
+        ctx.log(f"Cue {index + 1} heard: {heard}")
+        ctx.log(f"Cue {index + 1} script: {line}")
+
+
+def _cue_trace(cues: list[dict], lines: list[str], spoken_by_index: dict[int, str]) -> list[dict]:
+    """One row per cue: what Whisper heard, the script line, what TTS said."""
+    out = []
+    for index, cue in enumerate(cues):
+        script_line = ""
+        if index < len(lines):
+            script_line = (lines[index] or "").strip()
+        spoken = spoken_by_index.get(index, "")
+        out.append({
+            "id": index,
+            "start": round(float(cue.get("start", 0)), 3),
+            "end": round(float(cue.get("end", 0)), 3),
+            "heard": (cue.get("text") or "").strip(),
+            "script": script_line,
+            "spoken": spoken,
+        })
+    return out
 
 
 def _report_pace(scores: list, ctx, when: str) -> None:

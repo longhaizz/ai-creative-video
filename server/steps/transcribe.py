@@ -10,6 +10,7 @@ Every cue is SPEAKER_00. There is no diarization.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -66,7 +67,7 @@ def transcribe(models: WhisperModels, audio: Path, size: str, ctx=None):
     meta["whisper_model"] = size
     if ctx is not None:
         ctx.log(
-            f"{len(cues)} cues, language {meta['language']} "
+            f"{len(cues)} cues after split, language {meta['language']} "
             f"(p={meta['language_probability']:.2f}), "
             f"confidence {meta['confidence']}"
         )
@@ -89,18 +90,54 @@ def _run_once(models: WhisperModels, audio: Path, size: str, ctx):
     )
     language_probability = float(getattr(info, "language_probability", 0.0) or 0.0)
 
+    raw_segments = []
     cues = []
     for segment in segments:
+        text = (segment.text or "").strip()
+        if text:
+            raw_segments.append({
+                "id": len(raw_segments),
+                "start": round(float(segment.start), 3),
+                "end": round(float(segment.end), 3),
+                "text": text,
+            })
         cues.extend(_cues_from_segment(segment))
 
     cues = [cue for cue in cues if cue["text"]]
     if not cues:
         raise PipelineError("No speech was found in the video", code="invalid_input")
 
+    _write_transcript(audio, size, info, raw_segments, ctx)
+
     return cues, {
         "language": getattr(info, "language", "") or "",
         "language_probability": language_probability,
     }
+
+
+def _write_transcript(audio: Path, size: str, info, raw_segments: list[dict], ctx):
+    """CLI-shaped JSON of what Whisper heard, before TTS splits."""
+    duration = float(getattr(info, "duration", 0.0) or 0.0)
+    payload = {
+        "file": Path(audio).name,
+        "language": getattr(info, "language", "") or "",
+        "language_probability": round(
+            float(getattr(info, "language_probability", 0.0) or 0.0), 4
+        ),
+        "duration": round(duration, 3),
+        "model": size,
+        "segments": raw_segments,
+    }
+    dest = Path(audio).parent / "transcript.json"
+    dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    if ctx is None:
+        return
+    ctx.log(
+        f"Whisper heard {len(raw_segments)} segments, "
+        f"language {payload['language']} -> {dest.name}"
+    )
+    for seg in raw_segments:
+        ctx.log(f"{seg['start']:.2f}-{seg['end']:.2f}  {seg['text']}")
 
 
 def _cues_from_segment(segment) -> list[dict]:
