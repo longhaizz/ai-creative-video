@@ -105,3 +105,30 @@ class DubRequest(DubParams):
         return DubParams(
             **{name: getattr(self, name) for name in DubParams.model_fields}
         )
+
+
+class SpeakParams(BaseModel):
+    """One clone job: this text, in that voice."""
+
+    text: str = Field(..., min_length=1, max_length=8000)
+    cfg_value: float = Field(2.0, ge=1.0, le=3.0)
+    inference_timesteps: int = Field(10, ge=5, le=30)
+
+    @field_validator("text")
+    @classmethod
+    def _text_must_have_words(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("text must not be empty")
+        return text
+
+
+class SpeakRequest(SpeakParams):
+    """The form POST /speak reads: the line, plus a voice sample."""
+
+    audio: UploadFile
+
+    def settings(self) -> SpeakParams:
+        return SpeakParams(
+            **{name: getattr(self, name) for name in SpeakParams.model_fields}
+        )
