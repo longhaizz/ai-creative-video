@@ -74,8 +74,9 @@ giờ chạy nhầm.
 
 ```
 POST   /dub                  → 202 {job_id}
+POST   /speak                → 202 {job_id}
 GET    /jobs/{id}?since=N    → {status, step, log, queue_position, error_code}
-GET    /jobs/{id}/result     → mp4, rồi job bị xoá
+GET    /jobs/{id}/result     → mp4 hoặc wav, rồi job bị xoá
 DELETE /jobs/{id}            → huỷ
 GET    /health               → {status, models_loaded, gpu}
 ```
@@ -88,6 +89,10 @@ Mọi endpoint cần `Authorization: Bearer <API_KEY>`, kể cả `/health`.
 `no_face` **không phải hỏng** — creative quảng cáo thường không có
 talking-head, pipeline bỏ qua lipsync và vẫn xuất video.
 
+### POST /dub
+
+Một video vào → một video lồng tiếng ra.
+
 ```bash
 JOB=$(curl -s -H "Authorization: Bearer $API_KEY" \
     -F "video=@clip.mp4" -F "lipsync=true" -F "target_lang=vi" \
@@ -97,7 +102,33 @@ curl -H "Authorization: Bearer $API_KEY" "localhost:8000/jobs/$JOB?since=0"
 curl -H "Authorization: Bearer $API_KEY" "localhost:8000/jobs/$JOB/result" -o out.mp4
 ```
 
-Tham số đầy đủ: [`schemas.py`](schemas.py).
+### POST /speak
+
+Một đoạn text + một file audio mẫu giọng → một file WAV. Server clone giọng
+từ audio mẫu (VoxCPM) rồi đọc text — không cần video, không dịch, không khớp
+miệng. Cùng hàng đợi và cùng luồng job với `/dub`.
+
+| Field | Bắt buộc | Mặc định | Ghi chú |
+|---|---|---|---|
+| `text` | có | — | Nội dung cần đọc (1–8000 ký tự) |
+| `audio` | có | — | File mẫu giọng (wav/mp3, tối đa 25MB) |
+| `cfg_value` | không | `2.0` | Độ bám text, 1.0–3.0 |
+| `inference_timesteps` | không | `10` | Số bước sinh, 5–30 |
+
+```bash
+JOB=$(curl -s -H "Authorization: Bearer $API_KEY" \
+    -F "text=Xin chào, đây là giọng đã clone" \
+    -F "audio=@voice_sample.wav" \
+    localhost:8000/speak | jq -r .job_id)
+
+curl -H "Authorization: Bearer $API_KEY" "localhost:8000/jobs/$JOB?since=0"
+curl -H "Authorization: Bearer $API_KEY" "localhost:8000/jobs/$JOB/result" -o out.wav
+```
+
+Khác với `/dub`: `/speak` **chỉ clone từ audio mẫu**, không dùng preset giọng
+(`male_young`, `female_old`, …). Preset chỉ có trên `/dub` qua `voice_mode`.
+
+Tham số đầy đủ: [`schemas.py`](schemas.py) (`DubParams`, `SpeakParams`).
 
 ## Biến môi trường
 
@@ -139,7 +170,7 @@ app.py         HTTP, auth, tạo app
 jobs.py        JobRunner — hàng đợi, worker, trạng thái, TTL
 pipeline.py    run_dub — ghép 9 bước
 limits.py      chặn upload quá cỡ trước khi chạm đĩa
-schemas.py     tham số POST /dub
+schemas.py     tham số POST /dub và POST /speak
 steps/         mỗi file một bước
 tests/         101 ca, không cần GPU
 ```
