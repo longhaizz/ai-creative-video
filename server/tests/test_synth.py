@@ -17,16 +17,18 @@ import pytest
 
 from server import config
 from server.jobs import PipelineError
+from pathlib import Path
+
+from server.steps import duration as duration_model
 from server.steps import synth
 from server.steps.audio import duration
 from server.steps.synth import (
     DRIFT_CAP,
+    LAST_HIGH,
     MAX_BLOCK_SECONDS,
     MAX_HESITATION,
     MIN_GAP,
-    SOFT_TEMPO,
     build_blocks,
-    pick_variant,
     ends_sentence,
     longest_pause,
     split_to_cap,
@@ -34,6 +36,20 @@ from server.steps.synth import (
     timed_speech,
     with_voice_instruction,
 )
+
+@pytest.fixture(autouse=True)
+def no_rewrites(monkeypatch):
+    """No test may call OpenAI.
+
+    Handing the same line back is what a translator with nothing new to
+    offer does, and fit_block stops as soon as it sees a line it has already
+    spoken. Tests that want the rewrite path patch this again themselves.
+    """
+    monkeypatch.setattr(
+        synth, "rewrite_line",
+        lambda text, words, lang_name, api_key, model=None: text,
+    )
+
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -213,30 +229,42 @@ def test_a_block_that_fits_is_left_alone(monkeypatch, tmp_path):
 
 
 @needs_ffmpeg
-def test_a_long_block_eats_the_pause_instead_of_being_cut(monkeypatch, tmp_path):
-    """2s of speech plus a 1s pause is 3s of room, and nothing is trimmed."""
+def test_a_block_stops_when_the_speaker_stops(monkeypatch, tmp_path):
+    """The pause after a block belongs to the pause, not to the block.
+
+    2s of speech and then a 1s pause used to count as 3s of room, so the dub
+    kept talking while the speaker had already stopped. Now 2.8s of speech is
+    squeezed towards the 2.0s the speaker used.
+    """
     cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
     out, spoken, _ = run_blocks(
         monkeypatch, tmp_path, cues,
         lines=["câu một dài hơn.", "câu hai ở đây."],
         lengths={"câu một dài hơn.": 2.8, "câu hai ở đây.": 2.0},
     )
-    assert spoken[0]["end"] - spoken[0]["start"] == pytest.approx(2.8, abs=0.1)
+    spoken_length = spoken[0]["end"] - spoken[0]["start"]
+    assert spoken_length < 2.8 - 0.2, "it no longer eats the pause"
+    assert spoken_length == pytest.approx(2.8 / LAST_HIGH, abs=0.15)
     assert spoken[1]["start"] == pytest.approx(3.0, abs=0.05), "no drift needed"
 
 
 @needs_ffmpeg
 def test_an_overlong_block_pushes_the_next_one_but_not_past_the_cap(
         monkeypatch, tmp_path):
+    """A line no squeeze can save moves the next block, by the cap at most.
+
+    6s spoken into a 2s slot is still 4.8s after the widest squeeze. The
+    block behind it gives up the cap and no more: a block that starts a
+    second late is further out than one with a moment of overlap.
+    """
     cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
     out, spoken, _ = run_blocks(
         monkeypatch, tmp_path, cues,
         lines=["câu một rất dài.", "câu hai ở đây."],
-        lengths={"câu một rất dài.": 3.4, "câu hai ở đây.": 2.0},
+        lengths={"câu một rất dài.": 6.0, "câu hai ở đây.": 2.0},
     )
     drift = spoken[1]["start"] - 3.0
     assert 0 < drift <= DRIFT_CAP + 0.01, drift
-    assert spoken[0]["end"] <= spoken[1]["start"] - MIN_GAP + 0.01
 
 
 @needs_ffmpeg
@@ -246,7 +274,7 @@ def test_the_next_block_returns_to_the_original_clock(monkeypatch, tmp_path):
     out, spoken, _ = run_blocks(
         monkeypatch, tmp_path, cues,
         lines=["câu một rất dài.", "câu hai.", "câu ba ở đây."],
-        lengths={"câu một rất dài.": 3.4, "câu hai.": 1.0,
+        lengths={"câu một rất dài.": 6.0, "câu hai.": 1.0,
                  "câu ba ở đây.": 2.0},
     )
     assert spoken[1]["start"] > 3.0, "block 2 starts late"
@@ -254,8 +282,13 @@ def test_the_next_block_returns_to_the_original_clock(monkeypatch, tmp_path):
 
 
 @needs_ffmpeg
-def test_a_scene_cut_is_never_crossed_by_rushing_the_voice(monkeypatch, tmp_path):
-    """A rushed voice is heard by everyone; a late line by almost no one."""
+def test_a_line_too_long_is_squeezed_to_the_wide_band_and_no_further(
+        monkeypatch, tmp_path):
+    """A block lands on the speaker's own end, but the voice has a floor.
+
+    3.4s of speech for a 2.0s slot needs 1.7x, which is tape-speed. The
+    block is squeezed by the widest we allow and runs over by the rest.
+    """
     cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
     out, spoken, _ = run_blocks(
         monkeypatch, tmp_path, cues,
@@ -264,14 +297,19 @@ def test_a_scene_cut_is_never_crossed_by_rushing_the_voice(monkeypatch, tmp_path
         scenes=[2.5],
     )
     spoken_length = spoken[0]["end"] - spoken[0]["start"]
-    assert spoken_length >= 3.4 / SOFT_TEMPO - 0.1, "never faster than the cap"
+    assert spoken_length == pytest.approx(3.4 / LAST_HIGH, abs=0.15),         "squeezed by the wide band, not past it"
     assert spoken[1]["start"] - 3.0 < 0.4, "and the overrun stays small"
 
 
 @needs_ffmpeg
-def test_a_wide_room_takes_the_long_line(monkeypatch, tmp_path):
-    """This is what fills the silence the old code left over speech."""
-    cues = [cue(0.0, 1.2, "one."), cue(5.0, 6.0, "two.")]
+def test_a_long_speech_takes_the_long_line(monkeypatch, tmp_path):
+    """The room is how long the speaker spoke, not the pause after them.
+
+    4.5s of speech takes the 4.4s wording. The old rule counted the silence
+    up to the next block as room too, which is how the dub ended up talking
+    over a pause the speaker had left on purpose.
+    """
+    cues = [cue(0.0, 4.5, "one."), cue(6.0, 7.0, "two.")]
     entry = {"short": "ngắn.", "normal": "vừa vừa thôi bạn.",
              "long": "dài hơn nhiều, đủ để lấp hết chỗ trống này."}
     out, spoken, speak = run_blocks(
@@ -279,8 +317,8 @@ def test_a_wide_room_takes_the_long_line(monkeypatch, tmp_path):
         lengths={entry["short"]: 0.6, entry["normal"]: 1.4,
                  entry["long"]: 4.4, "câu hai.": 1.0},
     )
-    assert entry["long"] in speak.calls, speak.calls
-    assert entry["short"] not in speak.calls, "only the chosen line is spoken"
+    assert spoken[0]["text"] == entry["long"], spoken
+    assert spoken[0]["end"] - spoken[0]["start"] > 1.0, "the room is filled"
 
 
 @needs_ffmpeg
@@ -511,3 +549,70 @@ def test_a_block_left_half_silent_is_reported(monkeypatch, tmp_path):
     )
     filling = ctx.report("Filling:")
     assert "1 holes" in filling, filling
+
+
+@needs_ffmpeg
+def test_a_block_that_ends_early_is_stretched(monkeypatch, tmp_path):
+    """The hole this fixes: the dub going quiet while the speaker talks on.
+
+    Nothing used to lengthen a take. 1.8s of voice for 2.0s of speech was
+    left as 1.8s, and the last 200ms were silence over a moving mouth.
+    """
+    cues = [cue(0.0, 2.0), cue(3.0, 5.0)]
+    out, spoken, _ = run_blocks(
+        monkeypatch, tmp_path, cues,
+        lines=["câu một ở đây.", "câu hai ở đây."],
+        lengths={"câu một ở đây.": 1.8, "câu hai ở đây.": 2.0},
+    )
+    assert spoken[0]["end"] - spoken[0]["start"] == pytest.approx(2.0, abs=0.05)
+
+
+@needs_ffmpeg
+def test_a_new_line_is_asked_for_when_no_wording_fits(monkeypatch, tmp_path):
+    """All three lengths miss, so one more is written and it is the one used."""
+    entry = {"short": "quá ngắn.", "normal": "quá ngắn.", "long": "quá ngắn."}
+    asked = []
+
+    def rewrite(text, words, lang_name, api_key, model=None):
+        asked.append(words)
+        return "câu vừa in đúng chỗ trống này."
+
+    monkeypatch.setattr(synth, "rewrite_line", rewrite)
+    out, spoken, _ = run_blocks(
+        monkeypatch, tmp_path, [cue(0.0, 3.0), cue(4.0, 5.0)],
+        lines=[entry, "câu hai."],
+        lengths={"quá ngắn.": 0.5, "câu vừa in đúng chỗ trống này.": 3.0,
+                 "câu hai.": 1.0},
+    )
+    assert asked, "a line this far off must be written again"
+    assert spoken[0]["text"] == "câu vừa in đúng chỗ trống này."
+
+
+def test_the_loop_stops_when_there_is_nothing_new_to_say(monkeypatch, tmp_path):
+    """A translator with no other wording must not be paid four times."""
+    entry = {"short": "một câu.", "normal": "một câu.", "long": "một câu."}
+    calls = []
+
+    monkeypatch.setattr(
+        synth, "rewrite_line",
+        lambda text, words, lang_name, api_key, model=None: (
+            calls.append(words) or text),
+    )
+    model = duration_model.load(tmp_path / "duration.csv")
+
+    def speak(text, out_wav, cue=None):
+        Path(out_wav).write_bytes(b"")
+        return Path(out_wav)
+
+    def fake_best_take(line, work, name, *args, **kwargs):
+        return {"path": Path(work) / f"{name}.wav", "length": 9.0, "heard": "",
+                "words": [], "error": 0.0, "hesitation": 0.0, "text": line,
+                "takes": 1}
+
+    monkeypatch.setattr(synth, "best_take", fake_best_take)
+    take = synth.fit_block(
+        entry, 1.0, tmp_path, 0, speak, None, "vi", "Vietnamese",
+        model, duration_model.Speed(), "key", None, lambda message: None,
+    )
+    assert take["tries"] == 1, "only the one wording was ever spoken"
+    assert len(calls) == 1, "asked once, and never again once it repeated"

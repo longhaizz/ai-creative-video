@@ -242,18 +242,24 @@ def tempo_for(speech_seconds: float, target_seconds: float,
 
 def match_tempo(speech, target_seconds: float, out_wav,
                 slowest: float = SOFT_SLOWDOWN,
-                fastest: float = SOFT_SPEEDUP) -> tuple[Path, float]:
+                fastest: float = SOFT_SPEEDUP,
+                deadband: float = 0.02) -> tuple[Path, float]:
     """Bring the speech near target_seconds by changing its speed only.
 
     Nothing is cut: a sentence that ends early keeps its silence, and one
     that runs long is squeezed, never truncated. Returns (path, tempo).
+
+    `deadband` is the change small enough to skip. The default leaves up to
+    2% on the clock, which is 100ms on a five second block — fine when the
+    aim is only to fit, far too much when the aim is to land on the frame
+    the speaker stopped on. Pass a smaller one for that.
     """
     out_wav = Path(out_wav)
     out_wav.parent.mkdir(parents=True, exist_ok=True)
     speech = Path(speech)
     tempo = tempo_for(duration(speech), target_seconds, slowest, fastest)
 
-    if abs(tempo - 1.0) < 0.02:
+    if abs(tempo - 1.0) < deadband:
         if speech.resolve() != out_wav.resolve():
             shutil.copy2(speech, out_wav)
         return out_wav, 1.0
