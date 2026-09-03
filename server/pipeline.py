@@ -271,10 +271,10 @@ def _clone(ctx: JobContext, models: Models) -> Path:
 
     ctx.step("Cloning voice and speaking text")
 
-    # VoxCPM's `reference_wav_path` expects a WAV (or at least something
-    # decodable as audio). Normalize to PCM WAV first so inputs like
-    # mp3/mp4 are safe.
-    reference_wav = work / "reference_audio.wav"
+    # Always write to a different path. When the upload is already
+    # reference_audio.wav, extracting into the same file makes ffmpeg
+    # refuse ("Output same as Input").
+    reference_wav = work / "reference_pcm.wav"
     audio.extract_audio(reference_media, reference_wav)
 
     out_wav = work / "result.wav"
