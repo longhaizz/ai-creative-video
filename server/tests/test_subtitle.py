@@ -291,3 +291,16 @@ def test_subtitles_follow_the_spoken_take_not_the_asr_window(tmp_path):
     }]
     out = _subtitle_cues(tmp_path, asr)
     assert out == [{"start": 1.9, "end": 4.0, "text": "I bet you cannot."}]
+
+
+def test_a_stalled_burn_gives_up(monkeypatch):
+    """The burn is the slowest ffmpeg we run. It must still let go."""
+    import sys
+
+    from server.jobs import PipelineError
+    from server.steps import subtitle
+
+    monkeypatch.setattr(subtitle, "BURN_TIMEOUT", 0.5)
+    with pytest.raises(PipelineError) as error:
+        subtitle._burn_once([sys.executable, "-c", "import time; time.sleep(30)"])
+    assert "was stopped" in str(error.value)

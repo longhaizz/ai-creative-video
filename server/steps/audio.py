@@ -24,9 +24,10 @@ OUTPUT_LUFS = -14.0
 # worker was still waiting for it. A dead line here is better than a dead
 # server, so we stop it and let the one job fail.
 #
-# The value is generous. The slowest call is an x264 encode of one shot,
-# which takes minutes, not a quarter of an hour.
-FFMPEG_TIMEOUT = 900.0
+# The slowest call through here is an x264 encode of one shot, at the default
+# preset. That is minutes on an ad, so five is already many times over. The
+# subtitle burn is slower and runs on its own limit; see subtitle.py.
+FFMPEG_TIMEOUT = 300.0
 
 
 def run_ffmpeg(command: list[str], timeout: float = FFMPEG_TIMEOUT) -> str:

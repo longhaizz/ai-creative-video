@@ -35,20 +35,32 @@ TAIL_LINES = 25
 NO_SUBTITLE_EXIT_CODE = 3
 
 
+# ffprobe only reads the header. A minute is a broken file, not a slow one.
+PROBE_TIMEOUT = 60.0
+
+
 def probe_size(video: Path) -> tuple[int, int]:
     """Return (width, height) of the video."""
-    result = subprocess.run(
-        [
-            config.FFPROBE_BIN,
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "json",
-            str(video),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                config.FFPROBE_BIN,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "json",
+                str(video),
+            ],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise PipelineError(
+            f"ffprobe could not read {video.name} within "
+            f"{PROBE_TIMEOUT:.0f}s", code="invalid_input",
+        ) from None
     if result.returncode != 0:
         raise PipelineError(
             f"Could not read the video: {result.stderr.strip()[:200]}",
