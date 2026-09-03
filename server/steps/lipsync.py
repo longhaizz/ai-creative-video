@@ -214,16 +214,28 @@ def shot_ranges(
 
 
 def detect_scenes(video: Path, threshold: float = SCENE_THRESHOLD) -> list[float]:
-    """Scene-change times from ffmpeg. Empty list means one shot."""
-    result = subprocess.run(
-        [
-            config.FFMPEG_BIN, "-hide_banner",
-            "-i", str(video),
-            "-vf", f"select='gt(scene,{threshold})',showinfo",
-            "-an", "-f", "null", "-",
-        ],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    """Scene-change times from ffmpeg. Empty list means one shot.
+
+    This decodes the picture once and writes nothing, so it is quick. The
+    limit is here because a stalled ffmpeg holds the single worker, and this
+    one cannot go through run_ffmpeg: the times are printed on stderr.
+    """
+    try:
+        result = subprocess.run(
+            [
+                config.FFMPEG_BIN, "-hide_banner",
+                "-i", str(video),
+                "-vf", f"select='gt(scene,{threshold})',showinfo",
+                "-an", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=audio.FFMPEG_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise PipelineError(
+            f"Reading the scene cuts ran longer than "
+            f"{audio.FFMPEG_TIMEOUT:.0f}s and was stopped"
+        ) from None
     return parse_scene_times(result.stderr or "")
 
 

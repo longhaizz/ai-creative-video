@@ -215,6 +215,29 @@ def _filter_path(ass: Path) -> str:
     return ass.resolve().as_posix().replace(":", "\\:").replace("'", "\\'")
 
 
+# The slowest ffmpeg in the pipeline: it encodes the whole picture again at
+# preset slow, so it can run slower than the video plays. Twice what a two
+# minute clip needs, and still short enough to catch a stall the same day.
+BURN_TIMEOUT = 600.0
+
+
+def _burn_once(command: list[str]):
+    """Run the burn, and give up rather than hold the queue for ever."""
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=BURN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise PipelineError(
+            f"Burning the subtitles ran longer than {BURN_TIMEOUT:.0f}s "
+            "and was stopped"
+        ) from None
+
+
 def burn(
     video: Path,
     cues: list[dict],
@@ -244,28 +267,24 @@ def burn(
         ass = write_ass(
             cues, Path(work) / "burn.ass", width, height, font, size, position
         )
-        result = subprocess.run(
-            [
-                config.FFMPEG_BIN, "-y", "-loglevel", "error",
-                "-i", str(video),
-                "-vf", f"ass='{_filter_path(ass)}'",
-                # Burning the subtitles means the picture is encoded again,
-                # and this is the last encode in the pipeline. Left to
-                # itself ffmpeg picks CRF 23 here and undoes the detail
-                # LatentSync just made.
-                "-c:v", "libx264",
-                "-preset", "slow",
-                "-crf", "14",
-                "-pix_fmt", "yuv420p",
-                # The audio is already final by this point, so copy it
-                # instead of encoding it a second time.
-                "-c:a", "copy",
-                "-movflags", "+faststart",
-                str(out_path),
-            ],
-            capture_output=True,
-            text=True,
-        )
+        result = _burn_once([
+            config.FFMPEG_BIN, "-y", "-loglevel", "error",
+            "-i", str(video),
+            "-vf", f"ass='{_filter_path(ass)}'",
+            # Burning the subtitles means the picture is encoded again,
+            # and this is the last encode in the pipeline. Left to
+            # itself ffmpeg picks CRF 23 here and undoes the detail
+            # LatentSync just made.
+            "-c:v", "libx264",
+            "-preset", "slow",
+            "-crf", "14",
+            "-pix_fmt", "yuv420p",
+            # The audio is already final by this point, so copy it
+            # instead of encoding it a second time.
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            str(out_path),
+        ])
 
     if result.returncode != 0:
         raise PipelineError(
