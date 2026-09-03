@@ -19,8 +19,20 @@ from server import config
 from server.auth import require_api_key
 from server.jobs import DONE, JobContext, JobRunner, PipelineError
 from server.limits import BodySizeLimit
-from server.schemas import DubRequest
+from server.schemas import CloneRequest, DubRequest
 from server.uploads import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, save_upload
+
+CLONE_AUDIO_EXTENSIONS = {
+    ".wav",
+    ".mp3",
+    ".m4a",
+    ".flac",
+    # Containers that may still contain audio streams.
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".webm",
+}
 
 
 def not_built_yet(context: JobContext) -> Path:
@@ -127,6 +139,25 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
         runner.enqueue(job.id)
         return {"job_id": job.id}
 
+    @app.post("/speak", status_code=202)
+    def speak(form: Annotated[CloneRequest, Form()]):
+        runner = get_runner()
+        job = runner.create(form.settings())
+        try:
+            save_upload(
+                form.audio,
+                job.workdir,
+                CLONE_AUDIO_EXTENSIONS,
+                config.MAX_AUDIO_BYTES,
+                "reference_audio",
+            )
+        except Exception:
+            # A job that never got its files must not sit in the store.
+            runner.drop(job.id)
+            raise
+        runner.enqueue(job.id)
+        return {"job_id": job.id}
+
     @app.get("/jobs/{job_id}")
     def job_state(job_id: str, since: Annotated[int, Query(ge=0)] = 0):
         get_job_or_404(job_id)
@@ -146,10 +177,18 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
             )
         # Forget the job once the file has gone out. Nobody downloads the
         # same dub twice, and the disk is not free.
+        assert job.result_path is not None
+        ext = job.result_path.suffix.lower()
+        media_type = {
+            ".mp4": "video/mp4",
+            ".wav": "audio/wav",
+            ".mp3": "audio/mpeg",
+            ".m4a": "audio/mp4",
+        }.get(ext, "application/octet-stream")
         return FileResponse(
             job.result_path,
-            media_type="video/mp4",
-            filename=f"{job_id}.mp4",
+            media_type=media_type,
+            filename=f"{job_id}{ext}",
             background=BackgroundTask(runner.drop, job_id),
         )
 

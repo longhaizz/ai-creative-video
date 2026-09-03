@@ -51,6 +51,9 @@ def make_run_dub(models: Models):
     """Build the run_dub the JobRunner calls, holding the loaded models."""
 
     def run_dub(ctx: JobContext) -> Path:
+        kind = getattr(ctx.params, "job_kind", "dub")
+        if kind == "clone":
+            return _clone(ctx, models)
         return _dub(ctx, models)
 
     return run_dub
@@ -252,3 +255,33 @@ def _subtitle_cues(work: Path, cues: list[dict]) -> list[dict]:
         for item in spoken
         if (item.get("text") or "").strip()
     ]
+
+
+def _clone(ctx: JobContext, models: Models) -> Path:
+    """Audio-only voice cloning: reference_audio + text -> wav."""
+    params = ctx.params
+    work = ctx.workdir
+
+    reference_media = _reference_audio(work)
+    if reference_media is None:
+        raise PipelineError(
+            "reference_audio was not saved",
+            code="invalid_input",
+        )
+
+    ctx.step("Cloning voice and speaking text")
+
+    # VoxCPM's `reference_wav_path` expects a WAV (or at least something
+    # decodable as audio). Normalize to PCM WAV first so inputs like
+    # mp3/mp4 are safe.
+    reference_wav = work / "reference_audio.wav"
+    audio.extract_audio(reference_media, reference_wav)
+
+    out_wav = work / "result.wav"
+    return models.voice.speak(
+        params.text,
+        out_wav,
+        params.cfg_value,
+        params.inference_timesteps,
+        reference_wav=reference_wav,
+    )

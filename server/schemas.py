@@ -29,9 +29,13 @@ VoiceMode = Literal[
 # How the subtitle remover paints over the old text.
 VsrMode = Literal["sttn-det", "sttn-auto", "lama", "propainter"]
 
+JobKind = Literal["dub", "clone"]
+
 
 class DubParams(BaseModel):
     """One dub job. Files are sent next to this, not inside it."""
+
+    job_kind: JobKind = "dub"
 
     # -- voice -------------------------------------------------------------
     voice_mode: VoiceMode = "original"
@@ -104,4 +108,43 @@ class DubRequest(DubParams):
         """The settings alone. The pipeline must not see open file handles."""
         return DubParams(
             **{name: getattr(self, name) for name in DubParams.model_fields}
+        )
+
+
+class CloneParams(BaseModel):
+    """An audio-only voice cloning job.
+
+    The server clones the voice from `reference_audio`, then speaks `text`
+    with VoxCPM.
+    """
+
+    job_kind: Literal["clone"] = "clone"
+
+    text: str = Field("", max_length=4000)
+
+    # Keep aligned with DubParams, so the desktop UI can reuse sliders.
+    cfg_value: float = Field(2.0, ge=1.0, le=3.0)
+    inference_timesteps: int = Field(10, ge=5, le=30)
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def _strip_text(cls, value):
+        return (value or "").strip()
+
+    @model_validator(mode="after")
+    def _text_must_not_be_blank(self):
+        if not (self.text or "").strip():
+            raise ValueError("text must not be blank")
+        return self
+
+
+class CloneRequest(CloneParams):
+    """The form POST /speak reads: the settings above, plus the voice file."""
+
+    audio: UploadFile
+
+    def settings(self) -> CloneParams:
+        """The settings alone. The pipeline must not see open file handles."""
+        return CloneParams(
+            **{name: getattr(self, name) for name in CloneParams.model_fields}
         )
