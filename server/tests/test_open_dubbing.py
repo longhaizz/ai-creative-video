@@ -336,9 +336,11 @@ def test_transcribe_does_not_retry_large_v3(tmp_path):
 
             class Model:
                 def transcribe(self, path, **kwargs):
-                    # VAD threw quiet voice-over away; see ADR 0001.
+                    # VAD threw quiet voice-over away; see ADR 0001. And
+                    # carrying the last sentence forward made Whisper write
+                    # one line for a whole window and skip the rest of it.
                     assert kwargs.get("vad_filter") is False
-                    assert kwargs.get("condition_on_previous_text") is True
+                    assert kwargs.get("condition_on_previous_text") is False
                     assert kwargs.get("language") is None
                     seg = _Segment("hello there.", 0.0, 1.2, [
                         _Word("hello", 0.0, 0.5),
