@@ -58,6 +58,18 @@ LAST_LOW, LAST_HIGH = 0.85, 1.25
 FIT_DEADBAND = 0.002
 # Takes one block may cost before the closest one so far is kept.
 MAX_FIT_TRIES = 4
+# A wording already written is only worth speaking when it is roughly the
+# right size. The three that come with a block are guesses made before the
+# voice was heard, and a guess that is a third of the room does not become
+# right by being spoken: it just burns one of the four tries. Outside this
+# band we go straight to asking for a line written against the measured
+# speed. The first try is exempt — something has to be said to measure.
+TRY_LOW, TRY_HIGH = 0.8, 1.3
+# A block shorter than this is a sliver, not a block. Whisper cuts a number
+# like "11.26" across two windows and leaves 0.44s holding ".26"; no
+# sentence fits that, so the dub is squeezed to the floor and still runs
+# over. Slivers are folded back into the block they were torn from.
+MIN_BLOCK_SECONDS = 1.0
 # Takes per block. The one that says the words best wins.
 TAKES = 2
 # Both takes worse than this: pay for one more.
@@ -186,12 +198,47 @@ def build_blocks(cues: list[dict], scenes: list[float],
         # Only the piece that ends at the cut may not drift over it.
         blocks[-1]["hard"] = run["hard"]
 
+    blocks = _fold_slivers(blocks, cuts)
+
     for index, block in enumerate(blocks):
         if index + 1 < len(blocks):
             block["next_start"] = blocks[index + 1]["start"]
         else:
             block["next_start"] = max(video_seconds, block["end"])
     return blocks
+
+
+def _fold_slivers(blocks: list[dict], cuts: list[float]) -> list[dict]:
+    """Join every block too short to hold a sentence to its neighbour."""
+    folded: list[dict] = []
+    for block in blocks:
+        short = block["end"] - block["start"] < MIN_BLOCK_SECONDS
+        if folded and short and _joinable(folded[-1], block, cuts):
+            folded[-1] = _join(folded[-1], block)
+            continue
+        folded.append(block)
+    # A sliver at the very front has nothing behind it to join.
+    while len(folded) > 1 and (
+            folded[0]["end"] - folded[0]["start"] < MIN_BLOCK_SECONDS
+            and _joinable(folded[0], folded[1], cuts)):
+        folded[1] = _join(folded[0], folded[1])
+        folded.pop(0)
+    return folded
+
+
+def _joinable(left: dict, right: dict, cuts: list[float]) -> bool:
+    """Two blocks may be one take: no cut between them, and not too long."""
+    if left["hard"]:
+        return False  # left ends on a scene cut; nothing may cross it
+    if _cut_between(cuts, left["end"], right["start"]):
+        return False
+    return right["end"] - left["start"] <= MAX_BLOCK_SECONDS
+
+
+def _join(left: dict, right: dict) -> dict:
+    joined = _block_from(left["cues"] + right["cues"])
+    joined["hard"] = right["hard"]
+    return joined
 
 
 def _start(cue) -> float:
@@ -550,17 +597,19 @@ def fit_block(entry: dict, target: float, work: Path, index: int, speak,
     heard is a new one asked for. The closest take is kept, so a block that
     never lands still gets the best of what was tried.
     """
-    tried: list[str] = []
+    # Every wording spoken, with the seconds it really took. The translator
+    # gets this back: a rewrite that knows the last line came out 9% long is
+    # a correction, while one told only "about 25 words" is another guess.
+    spoken_lines: list[tuple[str, float]] = []
     rewrites = 0
     spoken_takes = 0
     best = None
     for attempt in range(MAX_FIT_TRIES):
-        choice = _next_line(entry, tried, target, model, speed, lang,
+        choice = _next_line(entry, spoken_lines, target, model, speed, lang,
                             lang_name, api_key, log)
         if choice is None:
             break  # nothing left to say that has not been said
         line, label, guess = choice
-        tried.append(line)
         rewrites += label == "rewrite"
         take = best_take(line, work, f"blk_{index:03d}_{attempt}", speak,
                          listen, lang, guess, log, cue)
@@ -571,7 +620,8 @@ def fit_block(entry: dict, target: float, work: Path, index: int, speak,
         take["need"] = take["length"] / max(target, 0.01)
         take["label"] = label
         take["guess"] = guess
-        if best is None or abs(take["need"] - 1.0) < abs(best["need"] - 1.0):
+        spoken_lines.append((line, take["length"]))
+        if best is None or _closer(take, best):
             best = take
         if FIT_LOW <= take["need"] <= FIT_HIGH:
             break
@@ -580,13 +630,26 @@ def fit_block(entry: dict, target: float, work: Path, index: int, speak,
     if best is None:
         raise PipelineError("A block came back with no line at all",
                             code="internal")
-    best["tries"] = len(tried)
+    best["tries"] = len(spoken_lines)
     best["rewrites"] = rewrites
     best["spoken_takes"] = spoken_takes
     return best
 
 
-def _next_line(entry: dict, tried: list[str], target: float, model, speed,
+def _closer(take: dict, best: dict) -> bool:
+    """Is this take the better one to keep? Words first, length second.
+
+    Length alone would keep a take that says the wrong words at the right
+    moment, which is the one thing a viewer cannot forgive. A take that
+    stumbles only wins when everything else stumbled too.
+    """
+    stumbled = take["error"] > EXTRA_TAKE_ERROR
+    if stumbled != (best["error"] > EXTRA_TAKE_ERROR):
+        return not stumbled
+    return abs(take["need"] - 1.0) < abs(best["need"] - 1.0)
+
+
+def _next_line(entry: dict, spoken_lines: list, target: float, model, speed,
                lang: str, lang_name: str, api_key: str, log):
     """The next wording worth speaking, or None when there is none left.
 
@@ -595,6 +658,7 @@ def _next_line(entry: dict, tried: list[str], target: float, model, speed,
     came back with what we already had — and trying again would only spend
     money to hear the same thing.
     """
+    tried = [text for text, _seconds in spoken_lines]
     best = None
     for key in VARIANTS:
         text = (entry.get(key) or "").strip()
@@ -604,14 +668,19 @@ def _next_line(entry: dict, tried: list[str], target: float, model, speed,
         if best is None or abs(guess - target) < best[0]:
             best = (abs(guess - target), key, text, guess)
     if best is not None:
-        return best[2], best[1], best[3]
+        fits = TRY_LOW <= best[3] / max(target, 0.01) <= TRY_HIGH
+        # Nothing spoken yet: say the closest one, whatever it measures.
+        # Until a take is heard, `speed` is a guess and so is this.
+        if fits or not tried or not api_key:
+            return best[2], best[1], best[3]
     if not api_key:
         return None
     words = model.words_for(target / max(speed.value, 0.01), lang)
     source = (entry.get("normal") or (tried[-1] if tried else "")).strip()
     if not source:
         return None
-    text = rewrite_line(source, words, lang_name, api_key).strip()
+    text = rewrite_line(source, spoken_lines, target, words,
+                        lang_name, api_key).strip()
     if not text or text in tried:
         return None
     log(f"asked for a line of about {words} words")

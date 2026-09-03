@@ -25,6 +25,7 @@ from server.steps.audio import duration
 from server.steps.synth import (
     DRIFT_CAP,
     LAST_HIGH,
+    MAX_FIT_TRIES,
     MAX_BLOCK_SECONDS,
     MAX_HESITATION,
     MIN_GAP,
@@ -47,7 +48,8 @@ def no_rewrites(monkeypatch):
     """
     monkeypatch.setattr(
         synth, "rewrite_line",
-        lambda text, words, lang_name, api_key, model=None: text,
+        lambda line, attempts, seconds, words, lang_name, api_key,
+        model=None: line,
     )
 
 
@@ -323,7 +325,8 @@ def test_a_long_speech_takes_the_long_line(monkeypatch, tmp_path):
 
 @needs_ffmpeg
 def test_a_tight_room_takes_the_short_line(monkeypatch, tmp_path):
-    cues = [cue(0.0, 0.6, "one."), cue(0.9, 3.0, "two.")]
+    """One second of speech takes the wording the model reads as 0.69s."""
+    cues = [cue(0.0, 1.0, "one."), cue(1.4, 3.0, "two.")]
     entry = {"short": "ngắn.", "normal": "vừa vừa thôi bạn.",
              "long": "dài hơn nhiều, đủ để lấp hết chỗ trống này."}
     out, spoken, speak = run_blocks(
@@ -331,8 +334,8 @@ def test_a_tight_room_takes_the_short_line(monkeypatch, tmp_path):
         lengths={entry["short"]: 0.6, entry["normal"]: 1.4,
                  entry["long"]: 4.4, "câu hai.": 1.0},
     )
-    assert entry["short"] in speak.calls, speak.calls
-    assert spoken[1]["start"] == pytest.approx(0.9, abs=0.05), "no drift"
+    assert speak.calls[0] == entry["short"], speak.calls
+    assert spoken[1]["start"] == pytest.approx(1.4, abs=0.05), "no drift"
 
 
 @needs_ffmpeg
@@ -573,8 +576,9 @@ def test_a_new_line_is_asked_for_when_no_wording_fits(monkeypatch, tmp_path):
     entry = {"short": "quá ngắn.", "normal": "quá ngắn.", "long": "quá ngắn."}
     asked = []
 
-    def rewrite(text, words, lang_name, api_key, model=None):
-        asked.append(words)
+    def rewrite(line, attempts, seconds, words, lang_name, api_key,
+                model=None):
+        asked.append((words, len(attempts)))
         return "câu vừa in đúng chỗ trống này."
 
     monkeypatch.setattr(synth, "rewrite_line", rewrite)
@@ -595,8 +599,8 @@ def test_the_loop_stops_when_there_is_nothing_new_to_say(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         synth, "rewrite_line",
-        lambda text, words, lang_name, api_key, model=None: (
-            calls.append(words) or text),
+        lambda line, attempts, seconds, words, lang_name, api_key,
+        model=None: (calls.append(words) or line),
     )
     model = duration_model.load(tmp_path / "duration.csv")
 
@@ -616,3 +620,78 @@ def test_the_loop_stops_when_there_is_nothing_new_to_say(monkeypatch, tmp_path):
     )
     assert take["tries"] == 1, "only the one wording was ever spoken"
     assert len(calls) == 1, "asked once, and never again once it repeated"
+
+
+def test_a_sliver_is_folded_into_the_block_before_it():
+    """Whisper cut "11.26" in two and left 0.44s holding ".26".
+
+    No sentence fits 0.44s, so that block was squeezed to the floor and
+    still ran a second into the next one. It is a tail, not a block.
+    """
+    cues = [cue(0.0, 2.0, "eleven"), cue(2.1, 2.54, ".26")]
+    blocks = build_blocks(cues, [], 10.0)
+    assert len(blocks) == 1, blocks
+    assert blocks[0]["text"] == "eleven .26"
+
+
+def test_a_sliver_across_a_scene_cut_is_left_alone():
+    """A cut is an anchor. Nothing is allowed to be spoken across one."""
+    cues = [cue(0.0, 2.0, "eleven"), cue(2.1, 2.54, ".26")]
+    blocks = build_blocks(cues, [2.05], 10.0)
+    assert len(blocks) == 2, blocks
+
+
+def test_the_take_that_says_the_words_wins_over_the_one_that_fits():
+    """Length alone kept a take that said something else at the right time."""
+    entry = {"short": "một câu.", "normal": "hai câu.", "long": "ba câu."}
+    lengths = iter([2.0, 1.0])      # the second one lands on the target
+    errors = iter([0.0, 0.9])       # but it says something else
+
+    def fake_best_take(line, work, name, *args, **kwargs):
+        return {"path": Path(work) / f"{name}.wav", "length": next(lengths),
+                "heard": "", "words": [], "error": next(errors),
+                "hesitation": 0.0, "text": line, "takes": 1}
+
+    import server.steps.synth as s
+    saved = s.best_take
+    s.best_take = fake_best_take
+    try:
+        take = s.fit_block(
+            entry, 1.0, Path("."), 0, None, None, "vi", "Vietnamese",
+            duration_model.load(None), duration_model.Speed(), "",
+            None, lambda message: None,
+        )
+    finally:
+        s.best_take = saved
+    assert take["text"] == "một câu.", "the clean take is kept"
+
+
+def test_a_wording_of_the_wrong_size_is_not_spoken_at_all(monkeypatch):
+    """Four tries is the whole budget; a third of the room does not earn one.
+
+    The first block of a real job spent three of its four tries on wordings
+    measured at 1.30x, 1.35x and 0.39x, and the one rewrite that had the
+    speed to work with ran out of tries at 1.09x.
+    """
+    entry = {"short": "một.", "normal": "hai câu ở đây.",
+             "long": "ba câu dài hơn nhiều so với hai câu ở đây."}
+    asked = []
+
+    def fake_best_take(line, work, name, *args, **kwargs):
+        return {"path": Path(work) / f"{name}.wav", "length": 9.0, "heard": "",
+                "words": [], "error": 0.0, "hesitation": 0.0, "text": line,
+                "takes": 1}
+
+    monkeypatch.setattr(synth, "best_take", fake_best_take)
+    monkeypatch.setattr(
+        synth, "rewrite_line",
+        lambda line, attempts, seconds, words, lang_name, api_key,
+        model=None: (asked.append(words) or f"câu viết lại số {len(asked)}."),
+    )
+    take = synth.fit_block(
+        entry, 1.4, Path("."), 0, None, None, "vi", "Vietnamese",
+        duration_model.load(None), duration_model.Speed(), "key",
+        None, lambda message: None,
+    )
+    assert take["tries"] == MAX_FIT_TRIES
+    assert len(asked) >= 2, "the budget went on written lines, not guesses"
