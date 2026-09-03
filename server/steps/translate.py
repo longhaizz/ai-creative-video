@@ -289,23 +289,42 @@ def translate_blocks(blocks, target_lang: str, api_key: str,
     }
 
 
-def rewrite_line(text: str, target_words: int, lang_name: str, api_key: str,
+def rewrite_line(line: str, attempts, target_seconds: float,
+                 target_words: int, lang_name: str, api_key: str,
                  model: str = DEFAULT_MODEL) -> str:
-    """Say the same thing again, in about `target_words` words.
+    """Write the line again, at a length we have measured rather than guessed.
 
-    The three lengths that come with a block are guesses made before anyone
-    spoke. This is asked afterwards, when the voice has been measured and we
-    know how many words actually fit the room the speaker left.
+    `attempts` is every wording already spoken for this block, with the
+    seconds it really took: [(text, seconds), ...]. Handing those back is
+    the whole point. Asking for "about 25 words" on its own is a shot in the
+    dark, and the model has no way of knowing the last shot came back 9% too
+    long. With the misses in front of it, the next line is a correction
+    instead of another guess.
     """
+    lines = [f"The line is spoken into a slot of {target_seconds:.2f} seconds.",
+             "", f"Meaning to keep: {line}"]
+    if attempts:
+        lines += ["", "Already spoken, and how long each one really took:"]
+        for text, seconds in attempts:
+            drift = (seconds - target_seconds) / max(target_seconds, 0.01)
+            side = "too long" if drift > 0 else "too short"
+            lines.append(f'  "{text}" took {seconds:.2f}s, '
+                         f"{abs(drift) * 100:.0f}% {side}")
+        last_text, last_seconds = attempts[-1]
+        drift = (last_seconds - target_seconds) / max(target_seconds, 0.01)
+        change = "shorter" if drift > 0 else "longer"
+        lines += ["", f"So write it about {abs(drift) * 100:.0f}% {change} "
+                      f"than that last one."]
+    lines += ["", f"Aim for about {max(int(target_words), 1)} words."]
+
     system = (
         f"You rewrite one line of ad voice-over in {lang_name}. Keep the "
         f"meaning, the tone, and every number, name and call to action. "
         f"Length matters more than elegance: the line is spoken into a fixed "
-        f"slot. Answer with the line only — no quotes, no notes, no JSON."
+        f"slot, and it has already been tried at the wrong lengths. Answer "
+        f"with the line only — no quotes, no notes, no JSON."
     )
-    user = (f"Write this in about {max(int(target_words), 1)} words:\n"
-            f"{text}")
-    return _chat(system, user, api_key, model).strip()
+    return _chat(system, "\n".join(lines), api_key, model).strip()
 
 
 def _one_entry(item) -> dict | None:

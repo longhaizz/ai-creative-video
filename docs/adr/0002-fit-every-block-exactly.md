@@ -31,3 +31,20 @@ written for meaning alone.
 "Fit: worst Xms, average Yms, N lines rewritten, M blocks on the wide band"
 is logged per job. The wide-band count is the one to watch — blocks landing
 there are translations of the wrong size, not a tempo problem.
+
+## What the first real job taught us
+
+Eight blocks of a 35s Hindi ad: the silence over a moving mouth went from
+seconds to 0.2s, and the average landing was 95ms out. Three things were
+wrong all the same, and all three are now fixed.
+
+* Five of the eight blocks ended on the wide band, because three of the four
+  tries went on the wordings written before anyone spoke. Two of them
+  measured a third of the room. A wording is only spoken now when it is
+  roughly the right size; otherwise the try is spent on a line written
+  against the speed we measured.
+* One block kept a take that said the wrong words because it was the right
+  length. Takes are compared on the words first now, length second.
+* The worst landing, 731ms, was a block of 0.44s holding ".26" — Whisper had
+  split "11.26" across two windows. Blocks shorter than a second are folded
+  back into the block they were torn from, unless a scene cut sits between.
