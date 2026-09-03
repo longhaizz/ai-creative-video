@@ -17,6 +17,28 @@ def test_jobs_run_one_at_a_time_in_order(make_runner):
         assert runner.get(job.id).status == DONE
 
 
+def test_the_worker_survives_a_broken_clean_up(make_runner, monkeypatch):
+    """Clean-up that raises must cost one job, not the whole queue.
+
+    This is the five-day freeze: a folder that could not be deleted killed
+    the worker thread, and every job after it waited for ever.
+    """
+    runner = make_runner(FakePipeline(sleep=0.3))
+
+    # Both are queued before the clean-up breaks, so only the worker meets it.
+    first, second = runner.submit({}), runner.submit({})
+
+    def boom():
+        raise PermissionError("the folder is busy")
+
+    monkeypatch.setattr(runner, "purge_expired", boom)
+
+    assert wait_until(lambda: runner.get(first.id).status == DONE)
+    assert wait_until(lambda: runner.get(second.id).status == DONE), \
+        "the second job proves the worker is still there"
+    assert runner.worker_alive()
+
+
 def test_queue_position_counts_jobs_in_front(make_runner):
     pipeline = FakePipeline(sleep=0.2)
     runner = make_runner(pipeline)

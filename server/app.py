@@ -97,6 +97,7 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
             "status": "ok",
             "models_loaded": app.state.models_loaded,
             "gpu": _gpu_name(),
+            "worker_alive": get_runner().worker_alive(),
         }
 
     @app.post("/dub", status_code=202)

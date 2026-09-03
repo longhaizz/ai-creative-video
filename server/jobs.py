@@ -134,6 +134,14 @@ class JobRunner:
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
 
+    def worker_alive(self) -> bool:
+        """Is the one worker still there? /health reports this.
+
+        Without it a dead worker looks exactly like a healthy idle server
+        from the outside: jobs are still accepted, they just never run.
+        """
+        return self._thread is not None and self._thread.is_alive()
+
     def stop(self, timeout: float = 5.0) -> None:
         self._queue.put(None)  # tells the worker to return
         if self._thread is not None:
@@ -308,11 +316,18 @@ class JobRunner:
             job_id = self._queue.get()
             if job_id is None:  # sentinel from stop()
                 return
-            job = self.get(job_id)
-            if job is None:  # dropped or purged while waiting
-                continue
-            self._run_one(job)
-            self.purge_expired()
+            # Nothing in here may end the loop. _run_one() already turns any
+            # bug into a failed job, but the clean-up after it used to run
+            # bare: one PermissionError from a folder we could not delete
+            # would kill this thread, and from then on every job would sit in
+            # the queue for ever while /health still said "ok".
+            try:
+                job = self.get(job_id)
+                if job is not None:  # else it was dropped while waiting
+                    self._run_one(job)
+                self.purge_expired()
+            except Exception as error:  # noqa: BLE001 - the worker must survive
+                print(f"[worker] {error!r}", flush=True)
 
     def _run_one(self, job: Job) -> None:
         if self._is_cancelled(job.id):
@@ -351,10 +366,13 @@ class JobRunner:
 
 
 def _remove(path: Path) -> None:
+    # Every OSError is swallowed, not only the missing folder. A file still
+    # held open by a child process, or a busy network disk, leaves rubbish
+    # behind; that costs disk. Letting the error out costs the worker.
     try:
         if path.is_dir():
             shutil.rmtree(path)
         else:
             path.unlink()
-    except FileNotFoundError:
+    except OSError:
         pass

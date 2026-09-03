@@ -18,8 +18,33 @@ from server.jobs import PipelineError
 OUTPUT_LUFS = -14.0
 
 
-def run_ffmpeg(command: list[str]) -> str:
-    result = subprocess.run(command, capture_output=True, text=True)
+# A filter graph can stall. ffmpeg then does not fail and does not exit: it
+# sleeps 10ms, tries again, and repeats forever. One take of three seconds
+# did that for five days and froze the whole queue behind it, because the
+# worker was still waiting for it. A dead line here is better than a dead
+# server, so we stop it and let the one job fail.
+#
+# The value is generous. The slowest call is an x264 encode of one shot,
+# which takes minutes, not a quarter of an hour.
+FFMPEG_TIMEOUT = 900.0
+
+
+def run_ffmpeg(command: list[str], timeout: float = FFMPEG_TIMEOUT) -> str:
+    try:
+        # stdin is closed on purpose: ffmpeg reads keys from it, and under PM2
+        # it would inherit a pipe that never gives it anything.
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        # subprocess.run has already killed the child and waited for it.
+        raise PipelineError(
+            f"ffmpeg ran longer than {timeout:.0f}s and was stopped"
+        ) from None
     if result.returncode != 0:
         raise PipelineError(f"ffmpeg failed: {(result.stderr or '')[-300:]}")
     return result.stdout
