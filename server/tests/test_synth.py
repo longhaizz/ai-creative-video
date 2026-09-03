@@ -695,3 +695,31 @@ def test_a_wording_of_the_wrong_size_is_not_spoken_at_all(monkeypatch):
     )
     assert take["tries"] == MAX_FIT_TRIES
     assert len(asked) >= 2, "the budget went on written lines, not guesses"
+
+
+def test_the_word_budget_comes_from_the_line_that_was_spoken():
+    """20 words took 5s, so 6s is worth 24 of them. No model needed.
+
+    This is what asked for 33 words three times over while every take came
+    back a quarter too long: the fit does not move inside one job, so it
+    answered the same thing however loudly the measurements disagreed.
+    """
+    model = duration_model.load(None)
+    speed = duration_model.Speed()
+    said = [(" ".join(["từ"] * 20), 5.0)]
+    assert synth._word_budget(said, 6.0, model, speed, "vi") == 24
+
+
+def test_the_word_budget_asks_the_model_only_before_anything_is_spoken():
+    model = duration_model.load(None)
+    speed = duration_model.Speed()
+    assert (synth._word_budget([], 6.0, model, speed, "vi")
+            == model.words_for(6.0, "vi"))
+
+
+def test_the_word_budget_steps_over_a_take_that_babbled():
+    """The line nearest the target anchors it, so a runaway is passed over."""
+    model = duration_model.load(None)
+    speed = duration_model.Speed()
+    said = [(" ".join(["từ"] * 12), 2.7), (" ".join(["từ"] * 12), 8.1)]
+    assert synth._word_budget(said, 3.28, model, speed, "vi") == 15

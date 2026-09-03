@@ -502,7 +502,11 @@ def timed_speech(
             report["wide"] += 1
         if tempo != 1.0:
             report["stretched"] += 1
-            report["max_tempo"] = max(report["max_tempo"], tempo)
+            # Furthest from 1.0, not largest. max() starting at 1.0 could
+            # never see a block that was slowed down, so a 0.85x drag was
+            # reported as "max 1.00x" beside the speed that caused it.
+            if abs(tempo - 1.0) > abs(report["max_tempo"] - 1.0):
+                report["max_tempo"] = tempo
         report["errors"].append(take["error"])
         report["takes"] += take["spoken_takes"]
         report["longest_block"] = max(report["longest_block"], take["length"])
@@ -679,7 +683,7 @@ def _next_line(entry: dict, spoken_lines: list, target: float, model, speed,
             return best[2], best[1], best[3]
     if not api_key:
         return None
-    words = model.words_for(target / max(speed.value, 0.01), lang)
+    words = _word_budget(spoken_lines, target, model, speed, lang)
     source = (entry.get("normal") or (tried[-1] if tried else "")).strip()
     if not source:
         return None
@@ -689,6 +693,32 @@ def _next_line(entry: dict, spoken_lines: list, target: float, model, speed,
         return None
     log(f"asked for a line of about {words} words")
     return text, "rewrite", model.seconds(text, lang) * speed.value
+
+
+def _word_budget(spoken_lines: list, target: float, model, speed,
+                 lang: str) -> int:
+    """How many words to ask for. Measured first, guessed only when new.
+
+    Nothing has been spoken yet: the model is all there is. But once a line
+    has been heard, its own words and its own seconds are a better ruler
+    than any fit — this voice, this language, this sentence. Asking the
+    model again is how the same 33 words were asked for three times in a
+    row while every take came back a quarter too long: the fit is a
+    constant inside one job, so it answers the same thing however often the
+    measurements disagree with it.
+
+    The line closest to the target anchors it. A take that babbled lands
+    far from the target and is passed over for one that did not, and a
+    short scaling is a smaller lie than a long one: a sentence costs some
+    seconds before its first word, and pure scaling cannot see them.
+    """
+    if not spoken_lines:
+        return model.words_for(target / max(speed.value, 0.01), lang)
+    text, seconds = min(spoken_lines, key=lambda said: abs(said[1] - target))
+    spoken = len(text.split())
+    if spoken < 1 or seconds <= 0.01:
+        return model.words_for(target / max(speed.value, 0.01), lang)
+    return max(round(spoken * target / seconds), 2)
 
 
 def fit_tempo(take: dict, target: float, ceiling: float, work: Path,
