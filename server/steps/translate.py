@@ -289,6 +289,25 @@ def translate_blocks(blocks, target_lang: str, api_key: str,
     }
 
 
+def rewrite_line(text: str, target_words: int, lang_name: str, api_key: str,
+                 model: str = DEFAULT_MODEL) -> str:
+    """Say the same thing again, in about `target_words` words.
+
+    The three lengths that come with a block are guesses made before anyone
+    spoke. This is asked afterwards, when the voice has been measured and we
+    know how many words actually fit the room the speaker left.
+    """
+    system = (
+        f"You rewrite one line of ad voice-over in {lang_name}. Keep the "
+        f"meaning, the tone, and every number, name and call to action. "
+        f"Length matters more than elegance: the line is spoken into a fixed "
+        f"slot. Answer with the line only — no quotes, no notes, no JSON."
+    )
+    user = (f"Write this in about {max(int(target_words), 1)} words:\n"
+            f"{text}")
+    return _chat(system, user, api_key, model).strip()
+
+
 def _one_entry(item) -> dict | None:
     """Normalise one entry to three non-empty lengths, or None.
 

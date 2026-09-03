@@ -162,14 +162,17 @@ def _run_once(models: WhisperModels, audio: Path, size: str, ctx):
     # missing and nothing noticed, because a gap between two blocks is
     # measured by nobody.
     #
-    # Hearing the music too is the price. condition_on_previous_text=False is
-    # what keeps that price low: it stops Whisper from filling a music-only
-    # window with the sentence it just heard.
+    # Hearing the music too is the price. condition_on_previous_text stays on
+    # all the same: it is what keeps a name or a number spelled the same way
+    # from one window to the next. The risk it carries is the opposite of
+    # today's fault — Whisper repeating the last sentence over a music-only
+    # window — so watch the "Speech:" line below for a share that climbs
+    # towards the whole clip.
     segments, info = model.transcribe(
         str(audio),
         language=None,
         vad_filter=False,
-        condition_on_previous_text=False,
+        condition_on_previous_text=True,
         word_timestamps=True,
     )
     language_probability = float(getattr(info, "language_probability", 0.0) or 0.0)

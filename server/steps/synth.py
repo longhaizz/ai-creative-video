@@ -24,7 +24,7 @@ from server import config
 from server.jobs import PipelineError
 from server.steps import duration as duration_model
 from server.steps.audio import clean_take, duration, match_tempo, place_clips
-from server.steps.translate import VARIANTS, translate_blocks
+from server.steps.translate import VARIANTS, rewrite_line, translate_blocks
 
 # A pause this long at the end of a sentence ends a block. Ads are spoken
 # without real breaks — the sample clip never pauses longer than 0.22s — so a
@@ -42,13 +42,22 @@ MIN_GAP = 0.08
 # cut is the moment a viewer checks the lips against the sound.
 DRIFT_CAP = 0.4
 SCENE_DRIFT_CAP = 0.0
-# The only speed change in the pipeline. Below what an ear picks up; there is
-# deliberately no harder setting, because sounding rushed is the failure we
-# are avoiding. A block that still does not fit runs over instead.
-SOFT_TEMPO = 1.08
-# Ask the translator for a line that fills this much of the room, not all of
-# it. The margin is what keeps the speed change from being needed at all.
-ROOM_AIM = 0.95
+# A block must start and stop with the speaker, so the speed is always
+# changed by the little that is left over. These are the two bands.
+#
+# Inside the first one nobody hears the change, so a line that lands here is
+# kept. Outside it the line is written again instead — a shorter or longer
+# wording of the same thing costs an API call, while a rushed voice costs
+# the viewer. Only when four tries have not found one does the wide band
+# run, and that block is logged: it is a translation the wrong size, not a
+# tempo problem.
+FIT_LOW, FIT_HIGH = 0.98, 1.03
+LAST_LOW, LAST_HIGH = 0.85, 1.25
+# A change smaller than this is not worth an ffmpeg pass. 0.2% of a five
+# second block is 10ms, which is the accuracy we are promising.
+FIT_DEADBAND = 0.002
+# Takes one block may cost before the closest one so far is kept.
+MAX_FIT_TRIES = 4
 # Takes per block. The one that says the words best wins.
 TAKES = 2
 # Both takes worse than this: pay for one more.
@@ -374,9 +383,9 @@ def timed_speech(
                 "start": block["start"],
                 "end": block["end"],
                 "text": block["text"],
+                # The room is the speech itself, not the pause after it.
                 "words": model.words_for(
-                    (block["next_start"] - block["start"]) * ROOM_AIM,
-                    lang_code),
+                    block["end"] - block["start"], lang_code),
             }
             for block in blocks
         ],
@@ -403,7 +412,8 @@ def timed_speech(
     report = {"stretched": 0, "max_tempo": 1.0, "max_drift": 0.0,
               "errors": [], "overruns": 0, "takes": 0, "stumbles": 0,
               "longest_block": 0.0, "silence": 0.0, "holes": 0,
-              "guess_error": [], "variants": {key: 0 for key in VARIANTS}}
+              "guess_error": [], "variants": {key: 0 for key in VARIANTS},
+              "rewrites": 0, "wide": 0, "fit_error": []}
     delay = 0.0
 
     for index, block in enumerate(blocks):
@@ -417,33 +427,37 @@ def timed_speech(
 
         start = block["start"] + delay
         cap = SCENE_DRIFT_CAP if block["hard"] else DRIFT_CAP
-        room = max(block["next_start"] - start - MIN_GAP, 0.4)
-        limit = room + cap
+        # What the block owns is the speech, not the pause behind it. Aiming
+        # at the next block's start is what let the dub keep talking after
+        # the speaker had already stopped.
+        target = max(block["end"] - block["start"], 0.4)
+        ceiling = max(block["next_start"] - start - MIN_GAP, 0.4) + cap
 
-        line, variant, guess = pick_variant(
-            entry, room, limit, model, speed, lang_code)
-        report["variants"][variant] += 1
-        log(f"{variant} line, {guess:.1f}s guessed for {room:.1f}s of room")
-
-        take = best_take(line, work, f"blk_{index:03d}", speak, listen,
-                         lang_code, guess, log, block["ref_cue"])
-        log(f"{take['length']:.1f}s of {room:.1f}s, {take['takes']} take(s), "
+        take = fit_block(
+            entry, target, work, index, speak, listen, lang_code,
+            script.get("output_lang_name") or lang_code, model, speed,
+            openai_key, block["ref_cue"], log,
+        )
+        if take["label"] in report["variants"]:
+            report["variants"][take["label"]] += 1
+        report["rewrites"] += take["rewrites"]
+        report["guess_error"].append(
+            abs(take["guess"] - take["length"]) / max(take["length"], 0.2))
+        log(f"{take['length']:.1f}s for {target:.1f}s of speech, "
+            f"{take['tries']} line(s), {take['takes']} take(s), "
             f"error {take['error']:.2f}, longest pause "
             f"{take['hesitation']:.2f}s")
 
-        # Every take teaches the model, and tells us how fast this voice is.
-        model.record(lang_code, take["text"], take["length"])
-        speed.observe(model.seconds(take["text"], lang_code), take["length"])
-        report["guess_error"].append(
-            abs(guess - take["length"]) / max(take["length"], 0.2))
-
-        path, tempo = _squeeze(take, limit, block["hard"], work, index, log)
+        path, tempo = fit_tempo(take, target, ceiling, work, index, log)
         length = duration(path)
+        report["fit_error"].append(abs(length - min(target, ceiling)))
+        if not FIT_LOW <= take["need"] <= FIT_HIGH:
+            report["wide"] += 1
         if tempo != 1.0:
             report["stretched"] += 1
             report["max_tempo"] = max(report["max_tempo"], tempo)
         report["errors"].append(take["error"])
-        report["takes"] += take["takes"]
+        report["takes"] += take["spoken_takes"]
         report["longest_block"] = max(report["longest_block"], take["length"])
         if take["hesitation"] > MAX_HESITATION:
             report["stumbles"] += 1
@@ -461,7 +475,12 @@ def timed_speech(
         if overrun > cap + 0.01:
             report["overruns"] += 1
             log(f"runs {overrun * 1000:.0f}ms into the next block")
-        delay = overrun
+        # The next block is pushed by the overrun, but never by more than the
+        # cap: it has its own moment to start on. Whatever is left over lands
+        # on top of it. Two voices for a moment is bad; a block that starts a
+        # second late is worse, and used to be possible because the squeeze
+        # had no floor. A scene cut has a cap of zero, so nothing moves there.
+        delay = min(overrun, cap)
         report["max_drift"] = max(report["max_drift"], delay)
 
         clips.append((start, path))
@@ -498,6 +517,13 @@ def timed_speech(
             f"lines chosen {mix}, length guess off by "
             f"{guess_error * 100:.0f}%, voice speed {speed.value:.2f}x"
         )
+        gaps = report["fit_error"] or [0.0]
+        ctx.log(
+            f"Fit: worst {max(gaps) * 1000:.0f}ms, "
+            f"average {sum(gaps) / len(gaps) * 1000:.0f}ms, "
+            f"{report['rewrites']} lines rewritten, "
+            f"{report['wide']} blocks on the wide band"
+        )
         ctx.log(
             f"Blocks: {len(clips)} spoken, {report['takes']} takes, "
             f"longest {report['longest_block']:.1f}s "
@@ -513,46 +539,109 @@ def _seed_lang(target_lang: str, meta: dict | None) -> str:
     return code
 
 
-def pick_variant(entry: dict, room: float, limit: float, model, speed,
-                 lang: str):
-    """Choose the length that fits the room, before anything is spoken.
+def fit_block(entry: dict, target: float, work: Path, index: int, speak,
+              listen, lang: str, lang_name: str, model, speed, api_key: str,
+              cue, log) -> dict:
+    """Speak the block until its length needs no audible change of speed.
 
-    This is what used to be a second call to the translator and a second
-    take: the three wordings already exist, so fitting is a choice, not a
-    retry. Anything guessed to overrun is only taken when all three do.
+    Every take measures this voice, so the next wording is chosen against a
+    number and not a guess. The lines that came with the block are spoken
+    first because they are already paid for; only when all of them have been
+    heard is a new one asked for. The closest take is kept, so a block that
+    never lands still gets the best of what was tried.
     """
-    aim = room * ROOM_AIM
+    tried: list[str] = []
+    rewrites = 0
+    spoken_takes = 0
     best = None
-    for key in VARIANTS:
-        text = (entry.get(key) or "").strip()
-        if not text:
-            continue
-        guess = model.seconds(text, lang) * speed.value
-        score = (guess > limit, abs(guess - aim))
-        if best is None or score < best[0]:
-            best = (score, key, text, guess)
+    for attempt in range(MAX_FIT_TRIES):
+        choice = _next_line(entry, tried, target, model, speed, lang,
+                            lang_name, api_key, log)
+        if choice is None:
+            break  # nothing left to say that has not been said
+        line, label, guess = choice
+        tried.append(line)
+        rewrites += label == "rewrite"
+        take = best_take(line, work, f"blk_{index:03d}_{attempt}", speak,
+                         listen, lang, guess, log, cue)
+        spoken_takes += take["takes"]
+        # Every take teaches the model, and tells us how fast this voice is.
+        model.record(lang, take["text"], take["length"])
+        speed.observe(model.seconds(take["text"], lang), take["length"])
+        take["need"] = take["length"] / max(target, 0.01)
+        take["label"] = label
+        take["guess"] = guess
+        if best is None or abs(take["need"] - 1.0) < abs(best["need"] - 1.0):
+            best = take
+        if FIT_LOW <= take["need"] <= FIT_HIGH:
+            break
+        log(f"{take['length']:.2f}s for {target:.2f}s needs "
+            f"{take['need']:.2f}x, looking for another wording")
     if best is None:
         raise PipelineError("A block came back with no line at all",
                             code="internal")
-    return best[2], best[1], best[3]
+    best["tries"] = len(tried)
+    best["rewrites"] = rewrites
+    best["spoken_takes"] = spoken_takes
+    return best
 
 
-def _squeeze(take, limit, hard, work, index, log):
-    """Change the speed just enough to fit. Never cut, never rush.
+def _next_line(entry: dict, tried: list[str], target: float, model, speed,
+               lang: str, lang_name: str, api_key: str, log):
+    """The next wording worth speaking, or None when there is none left.
 
-    `hard` is not used to squeeze harder on purpose. At a scene cut the
-    block runs over by a few hundred milliseconds instead — the caller logs
-    it — because a rushed voice is heard by everyone and a late line by
-    almost no one.
+    Returning None is not a failure. It means the block has no other way of
+    being said — the three lengths were the same sentence, or the rewrite
+    came back with what we already had — and trying again would only spend
+    money to hear the same thing.
     """
-    length = take["length"]
-    if length <= limit:
-        return take["path"], 1.0
+    best = None
+    for key in VARIANTS:
+        text = (entry.get(key) or "").strip()
+        if not text or text in tried:
+            continue
+        guess = model.seconds(text, lang) * speed.value
+        if best is None or abs(guess - target) < best[0]:
+            best = (abs(guess - target), key, text, guess)
+    if best is not None:
+        return best[2], best[1], best[3]
+    if not api_key:
+        return None
+    words = model.words_for(target / max(speed.value, 0.01), lang)
+    source = (entry.get("normal") or (tried[-1] if tried else "")).strip()
+    if not source:
+        return None
+    text = rewrite_line(source, words, lang_name, api_key).strip()
+    if not text or text in tried:
+        return None
+    log(f"asked for a line of about {words} words")
+    return text, "rewrite", model.seconds(text, lang) * speed.value
+
+
+def fit_tempo(take: dict, target: float, ceiling: float, work: Path,
+              index: int, log):
+    """Land the block on the moment the speaker stopped.
+
+    Both directions matter. A take that runs long is squeezed, and one that
+    ends early is stretched — leaving it short is what left holes of silence
+    while the speaker was still talking.
+
+    `ceiling` is the only thing allowed to beat the target: a block may not
+    be stretched into the one behind it.
+    """
+    goal = min(target, ceiling)
+    need = take["length"] / max(goal, 0.01)
+    if FIT_LOW <= need <= FIT_HIGH:
+        slowest, fastest = FIT_LOW, FIT_HIGH
+    else:
+        slowest, fastest = LAST_LOW, LAST_HIGH
+        log(f"still needs {need:.2f}x after every try, using the wide band")
     out, tempo = match_tempo(
-        take["path"], limit, work / f"blk_{index:03d}_fit.wav",
-        slowest=1.0, fastest=SOFT_TEMPO,
+        take["path"], goal, work / f"blk_{index:03d}_fit.wav",
+        slowest=slowest, fastest=fastest, deadband=FIT_DEADBAND,
     )
-    log(f"sped up by {tempo:.3f} to fit {limit:.2f}s")
+    if tempo != 1.0:
+        log(f"speed {tempo:.3f}x to land on {goal:.2f}s")
     return out, tempo
 
 
