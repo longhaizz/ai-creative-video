@@ -162,17 +162,23 @@ def _run_once(models: WhisperModels, audio: Path, size: str, ctx):
     # missing and nothing noticed, because a gap between two blocks is
     # measured by nobody.
     #
-    # Hearing the music too is the price. condition_on_previous_text stays on
-    # all the same: it is what keeps a name or a number spelled the same way
-    # from one window to the next. The risk it carries is the opposite of
-    # today's fault — Whisper repeating the last sentence over a music-only
-    # window — so watch the "Speech:" line below for a share that climbs
-    # towards the whole clip.
+    # condition_on_previous_text is off again. It was turned back on to keep
+    # a name spelled the same way from one window to the next, and the price
+    # turned out to be the opposite of the one guessed: not Whisper
+    # repeating itself over a music-only window, but Whisper carrying the
+    # last sentence forward, writing one short line for a whole window and
+    # stamping the window's end on it. The seek pointer follows that end, so
+    # every second in between is dropped without being decoded. A misspelled
+    # name is cheaper than a lost line.
+    #
+    # Watch the "Speech:" line below. It is the only place a dropped line
+    # shows up: a share far under the clip means Whisper skipped, and one
+    # that climbs to the whole clip means it hallucinated over the music.
     segments, info = model.transcribe(
         str(audio),
         language=None,
         vad_filter=False,
-        condition_on_previous_text=True,
+        condition_on_previous_text=False,
         word_timestamps=True,
     )
     language_probability = float(getattr(info, "language_probability", 0.0) or 0.0)
@@ -216,13 +222,15 @@ def _write_transcript(audio: Path, size: str, info, raw_segments: list[dict], ct
         "model": size,
         "segments": raw_segments,
     }
+    # Next to the audio that was read, which is the stems folder now, not
+    # the job root. The log prints the whole path so it can still be found.
     dest = Path(audio).parent / "transcript.json"
     dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     if ctx is None:
         return
     ctx.log(
         f"Whisper heard {len(raw_segments)} segments, "
-        f"language {payload['language']} -> {dest.name}"
+        f"language {payload['language']} -> {dest}"
     )
     for seg in raw_segments:
         ctx.log(f"{seg['start']:.2f}-{seg['end']:.2f}  {seg['text']}")

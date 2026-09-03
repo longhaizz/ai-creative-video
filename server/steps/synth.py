@@ -614,9 +614,13 @@ def fit_block(entry: dict, target: float, work: Path, index: int, speak,
         take = best_take(line, work, f"blk_{index:03d}_{attempt}", speak,
                          listen, lang, guess, log, cue)
         spoken_takes += take["takes"]
-        # Every take teaches the model, and tells us how fast this voice is.
-        model.record(lang, take["text"], take["length"])
-        speed.observe(model.seconds(take["text"], lang), take["length"])
+        # Only a take that said the words teaches anything. One that babbles
+        # or swallows half the line is still a real number of seconds, but
+        # they are the seconds of something else — writing it down teaches
+        # the model that this sentence takes that long, which it does not.
+        if take["error"] <= EXTRA_TAKE_ERROR:
+            model.record(lang, take["text"], take["length"], speed.value)
+            speed.observe(model.seconds(take["text"], lang), take["length"])
         take["need"] = take["length"] / max(target, 0.01)
         take["label"] = label
         take["guess"] = guess

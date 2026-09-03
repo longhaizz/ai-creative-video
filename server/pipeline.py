@@ -87,12 +87,21 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     width, height = audio.video_size(video)
     ctx.log(f"{video_seconds:.1f}s, {width}x{height}")
 
-    # 2. Split voice from music, then read the mix with Whisper.
+    # 2. Split voice from music, then read the voice with Whisper.
+    #
+    # Whisper reads the vocals stem, not the mix. Music under the voice is
+    # what makes it write one short sentence for a whole 30s window and
+    # stamp the end of that window on it; the seek pointer then jumps to
+    # that end and the speech in between is never decoded at all. Demucs
+    # has already run by this line, so the clean voice costs nothing.
+    #
+    # This is not the VAD that ADR 0001 dropped: a VAD throws quiet
+    # voice-over away, demucs only pulls the music off it.
     mix = audio.extract_audio(video, work / "mix.wav")
     vocals, music = separate.separate(mix, work, ctx=ctx)
     ctx.check_cancel()
     cues, meta = transcribe.transcribe(
-        models.whisper, mix, params.whisper_model, ctx=ctx
+        models.whisper, vocals, params.whisper_model, ctx=ctx
     )
     cues = open_dubbing.attach_refs(cues, vocals, work / "od")
     ctx.check_cancel()
