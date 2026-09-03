@@ -27,6 +27,10 @@ from pathlib import Path
 DEFAULT_COEF = (0.21, 0.12, 0.28, 0.30, 0.20)
 # Below this many rows a fit says more about the noise than about the voice.
 MIN_SAMPLES = 30
+# The columns of the history file. Everything after `seconds` is there to
+# train something better later, not for the fit below.
+HEADER = ["lang", "syllables", "commas", "stops", "digits", "seconds",
+          "speed", "text"]
 # Languages that write one syllable per space-separated word.
 SYLLABIC = ("vi", "zh", "ja", "th")
 # Everywhere else, a word is about this many syllables.
@@ -122,8 +126,20 @@ class Model:
         overhead = (self.coef[4] + self.coef[2]) * rate
         return max(int((float(seconds) - overhead) / per_word), 2)
 
-    def record(self, lang: str, text: str, measured: float) -> None:
-        """Keep one (line, how long it really took) pair for the next fit."""
+    def record(self, lang: str, text: str, measured: float,
+               speed: float = 1.0) -> None:
+        """Keep one (line, how long it really took) pair for the next fit.
+
+        The line itself is written down, not only the four numbers this fit
+        happens to use. Without it the history can never train anything but
+        this one model: a better feature thought of next month cannot be
+        computed backwards from "24 syllables, 3 commas". The text is the
+        data; the features are one reading of it.
+
+        `speed` is how fast the voice of that job ran. It is what separates
+        "this line is long" from "this voice is slow", and the two look
+        identical in a column of seconds.
+        """
         if measured <= 0.2:
             return
         row = (*features(text, lang), float(measured))
@@ -136,10 +152,8 @@ class Model:
             with self.path.open("a", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
                 if new:
-                    writer.writerow(
-                        ["lang", "syllables", "commas", "stops", "digits",
-                         "seconds"])
-                writer.writerow([lang, *row])
+                    writer.writerow(HEADER)
+                writer.writerow([lang, *row, round(float(speed), 3), text])
         except OSError:
             self.path = None  # stop trying; the job carries on regardless
 
@@ -152,17 +166,41 @@ class Model:
         return True
 
     def _read(self) -> None:
+        """Load the history. Rows written before the text column still count.
+
+        Only the first six fields are read, so a row from any version fits:
+        the older ones simply stop there.
+        """
         if self.path is None or not self.path.is_file():
             return
         try:
             with self.path.open(newline="", encoding="utf-8") as handle:
                 for line in csv.reader(handle):
-                    if len(line) != 6 or line[0] == "lang":
+                    if len(line) < 6 or line[0] == "lang":
                         continue
                     try:
-                        self.rows.append(tuple(float(v) for v in line[1:]))
+                        self.rows.append(tuple(float(v) for v in line[1:6]))
                     except ValueError:
                         continue
+        except OSError:
+            return
+        self._fix_header()
+
+    def _fix_header(self) -> None:
+        """Bring an old file's header line up to date, once.
+
+        The rows below it grew two columns. Leaving the header short is how
+        a spreadsheet ends up showing seconds under the heading for digits.
+        """
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines(True)
+            if not lines or not lines[0].startswith("lang,"):
+                return
+            wanted = ",".join(HEADER)
+            if lines[0].strip() == wanted:
+                return
+            lines[0] = wanted + "\n"
+            self.path.write_text("".join(lines), encoding="utf-8")
         except OSError:
             return
 

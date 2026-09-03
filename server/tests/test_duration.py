@@ -6,6 +6,8 @@ runs into the next one. It also has to survive a missing or broken history
 file without taking a dub job down with it.
 """
 
+import csv
+
 from server.steps import duration
 
 
@@ -89,3 +91,45 @@ def test_a_runaway_take_does_not_move_the_voice_speed():
     before = speed.value
     speed.observe(2.0, 40.0)
     assert speed.value == before
+
+
+def test_a_row_written_before_the_text_column_still_counts(tmp_path):
+    """290 takes were recorded before the line itself was kept.
+
+    Dropping them on the day a column is added would throw away the only
+    history there is.
+    """
+    path = tmp_path / "duration.csv"
+    path.write_text(
+        "lang,syllables,commas,stops,digits,seconds\n"
+        "vi,24,3,1,0,6.24\n",
+        encoding="utf-8",
+    )
+    model = duration.Model(path)
+    assert model.rows == [(24.0, 3.0, 1.0, 0.0, 6.24)]
+
+
+def test_the_line_and_the_voice_speed_are_written_down(tmp_path):
+    """The text is the data. The four features are one reading of it."""
+    path = tmp_path / "duration.csv"
+    model = duration.Model(path)
+    model.record("vi", "câu này dài vừa phải.", 2.5, speed=1.22)
+
+    rows = list(csv.reader(path.read_text(encoding="utf-8").splitlines()))
+    assert rows[0] == duration.HEADER
+    assert rows[1][-1] == "câu này dài vừa phải."
+    assert rows[1][-2] == "1.22"
+
+
+def test_an_old_header_is_brought_up_to_date(tmp_path):
+    """Rows grew two columns; a short header misreads the whole file."""
+    path = tmp_path / "duration.csv"
+    path.write_text(
+        "lang,syllables,commas,stops,digits,seconds\n"
+        "vi,24,3,1,0,6.24\n",
+        encoding="utf-8",
+    )
+    duration.Model(path)
+    first = path.read_text(encoding="utf-8").splitlines()[0]
+    assert first == ",".join(duration.HEADER)
+    assert "vi,24,3,1,0,6.24" in path.read_text(encoding="utf-8"), "rows kept"
