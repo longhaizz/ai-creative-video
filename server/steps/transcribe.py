@@ -222,8 +222,6 @@ def _write_transcript(audio: Path, size: str, info, raw_segments: list[dict], ct
         "model": size,
         "segments": raw_segments,
     }
-    # Next to the audio that was read, which is the stems folder now, not
-    # the job root. The log prints the whole path so it can still be found.
     dest = Path(audio).parent / "transcript.json"
     dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     if ctx is None:
