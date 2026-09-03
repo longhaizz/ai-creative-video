@@ -65,13 +65,50 @@ def transcribe(models: WhisperModels, audio: Path, size: str, ctx=None):
     quality = asr_quality(cues, meta["language_probability"])
     meta["confidence"] = _confidence(quality, meta["language_probability"])
     meta["whisper_model"] = size
+    seconds = speech_seconds(cues)
+    meta["speech_seconds"] = round(seconds, 2)
     if ctx is not None:
         ctx.log(
             f"{len(cues)} cues after split, language {meta['language']} "
             f"(p={meta['language_probability']:.2f}), "
             f"confidence {meta['confidence']}"
         )
+        whole = meta.get("audio_seconds") or 0.0
+        share = f" ({seconds / whole * 100:.0f}%)" if whole > 0 else ""
+        ctx.log(f"Speech: {seconds:.1f}s of {whole:.1f}s{share}")
     return cues, meta
+
+
+def speech_seconds(cues: list[dict]) -> float:
+    """How much of the clip Whisper heard someone speak.
+
+    The one number that says whether a line went missing. A hole between two
+    cues is invisible everywhere else: the dub only measures the silence
+    inside a block it already has, so speech that was never heard is never
+    counted. Compare two runs of the same video and a drop here is a line
+    Whisper dropped.
+
+    Cues overlap, so the spans are merged before they are added up.
+    """
+    spans = sorted(
+        (float(cue.get("speech_start", cue["start"])),
+         float(cue.get("speech_end", cue["end"])))
+        for cue in cues
+    )
+    total = 0.0
+    left = right = None
+    for start, end in spans:
+        if end <= start:
+            continue
+        if right is None or start > right:
+            if right is not None:
+                total += right - left
+            left, right = start, end
+        else:
+            right = max(right, end)
+    if right is not None:
+        total += right - left
+    return total
 
 
 def listen(models: WhisperModels, wav, language: str = "",
@@ -116,8 +153,24 @@ def _run_once(models: WhisperModels, audio: Path, size: str, ctx):
         ctx.step(f"Reading the speech (whisper {size})")
 
     model = models.get(size)
+    # No VAD, and no carrying the last sentence into the next window.
+    #
+    # vad_filter=True runs Silero, which is what ADR 0001 dropped from the
+    # step in front of Whisper: it throws quiet voice-over away as no-speech.
+    # It was still on in here, and it is why the same Indonesian ad came back
+    # as 3 blocks on one run and 4 on the next. A whole spoken line went
+    # missing and nothing noticed, because a gap between two blocks is
+    # measured by nobody.
+    #
+    # Hearing the music too is the price. condition_on_previous_text=False is
+    # what keeps that price low: it stops Whisper from filling a music-only
+    # window with the sentence it just heard.
     segments, info = model.transcribe(
-        str(audio), language=None, vad_filter=True, word_timestamps=True
+        str(audio),
+        language=None,
+        vad_filter=False,
+        condition_on_previous_text=False,
+        word_timestamps=True,
     )
     language_probability = float(getattr(info, "language_probability", 0.0) or 0.0)
 
@@ -143,6 +196,7 @@ def _run_once(models: WhisperModels, audio: Path, size: str, ctx):
     return cues, {
         "language": getattr(info, "language", "") or "",
         "language_probability": language_probability,
+        "audio_seconds": float(getattr(info, "duration", 0.0) or 0.0),
     }
 
 
