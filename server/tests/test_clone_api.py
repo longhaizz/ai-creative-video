@@ -96,3 +96,41 @@ def test_speak_accepts_mp4_container_audio(client):
             files={"audio": ("ref.mp4", b"x" * 10, "video/mp4")},
         )
         assert response.status_code == 202
+
+
+def test_clone_does_not_convert_wav_onto_itself(monkeypatch, tmp_path):
+    """A .wav upload must not be ffmpeg's input and output at once."""
+    from server import pipeline
+    from server.pipeline import Models
+    from server.schemas import CloneParams
+
+    (tmp_path / "reference_audio.wav").write_bytes(b"u")
+    seen = []
+
+    def fake_extract(src, out):
+        seen.append((Path(src).resolve(), Path(out).resolve()))
+        Path(out).write_bytes(b"pcm")
+        return Path(out)
+
+    monkeypatch.setattr(pipeline.audio, "extract_audio", fake_extract)
+
+    class Voice:
+        def speak(self, text, out_wav, *a, **kw):
+            Path(out_wav).write_bytes(b"wav")
+            return Path(out_wav)
+
+    class Ctx:
+        params = CloneParams(text="hi")
+        workdir = tmp_path
+
+        def step(self, *a, **kw):
+            pass
+
+        def log(self, *a, **kw):
+            pass
+
+        def check_cancel(self):
+            pass
+
+    pipeline._clone(Ctx(), Models(voice=Voice(), lipsync=None))
+    assert seen and seen[0][0] != seen[0][1]
