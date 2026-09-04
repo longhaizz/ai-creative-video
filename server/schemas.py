@@ -72,13 +72,15 @@ class DubParams(BaseModel):
     # None / omitted / "" → server picks 56px at 1920 tall, scaled by height.
     # A number is exact pixels, not scaled.
     subtitle_size: int | None = Field(None, ge=8, le=200)
-    # Where the text sits, as a share of the frame height. 0.75 is still the
-    # lower third, higher than the old 0.85 default.
-    subtitle_position: float = Field(0.75, ge=0.0, le=1.0)
+    # Where the text sits, as a share of the frame height. None / omitted
+    # means the server puts the new text where the old subtitles sat, which
+    # only the subtitle removal step can know; without it, 0.75 -- the lower
+    # third, higher than the old 0.85 default. A number is used as given.
+    subtitle_position: float | None = Field(None, ge=0.0, le=1.0)
 
-    @field_validator("subtitle_size", mode="before")
+    @field_validator("subtitle_size", "subtitle_position", mode="before")
     @classmethod
-    def _blank_size_is_auto(cls, value):
+    def _blank_is_auto(cls, value):
         if value is None or value == "":
             return None
         return value

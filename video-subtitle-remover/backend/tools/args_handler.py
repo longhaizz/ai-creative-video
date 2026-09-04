@@ -24,6 +24,13 @@ def parse_args():
         choices=[mode.name.lower().replace('_','-') for mode in InpaintMode],
         help="Inpaint mode, default is sttn-auto"
     )
+    # PATCH (dub server). The boxes are found anyway to build the mask; the
+    # dub server reads them back to put the new subtitles where the old ones
+    # were, instead of guessing a height. Off unless asked for.
+    parser.add_argument(
+        "--dump-boxes", type=str, default=None,
+        help="Write the detected subtitle boxes to this JSON file"
+    )
     args = parser.parse_args()
     args.inpaint_mode = InpaintMode[args.inpaint_mode.replace('-','_').upper()]
     if args.subtitle_area_coords is None:

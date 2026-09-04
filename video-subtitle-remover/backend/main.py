@@ -1,4 +1,5 @@
 import gc
+import json
 import torch
 import shutil
 import traceback
@@ -49,6 +50,8 @@ class SubtitleRemover:
         self.lock = threading.RLock()
         # 用户指定的字幕区域位置
         self.sub_areas = []
+        # PATCH (dub server). Where to write the detected boxes, or None.
+        self.dump_boxes_path = None
         # 是否为gui运行，gui运行需要显示预览
         self.gui_mode = gui_mode
         self.hardware_accelerator = HardwareAccelerator.instance()
@@ -171,6 +174,7 @@ class SubtitleRemover:
     def propainter_mode(self, tbar):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
+        self.dump_boxes(sub_list)
         if len(sub_list) == 0:
             sys.exit(NO_SUBTITLE_EXIT_CODE)
         continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
@@ -272,6 +276,7 @@ class SubtitleRemover:
     def video_inpaint(self, tbar, model):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
+        self.dump_boxes(sub_list)
         if len(sub_list) == 0:
             sys.exit(NO_SUBTITLE_EXIT_CODE)
         continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
@@ -343,6 +348,22 @@ class SubtitleRemover:
                             self.update_preview_with_comp(np.clip(batch[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
                     self.update_progress(tbar, increment=len(batch))
         reader.stop()
+
+    def dump_boxes(self, sub_list):
+        """Write the detected boxes to the file the caller asked for.
+
+        PATCH (dub server). The boxes are found anyway to build the mask,
+        so this only saves what is already in hand: frame number -> list of
+        (xmin, xmax, ymin, ymax). Writing them must never sink a run that
+        would otherwise finish, hence the broad catch.
+        """
+        if not self.dump_boxes_path:
+            return
+        try:
+            with open(self.dump_boxes_path, 'w', encoding='utf-8') as f:
+                json.dump({str(k): v for k, v in sub_list.items()}, f)
+        except Exception:
+            traceback.print_exc()
 
     def run(self):
         # 记录开始时间
@@ -496,6 +517,7 @@ if __name__ == '__main__':
         exit(-1)
     sr.sub_areas = args.subtitle_area_coords
     sr.video_out_path = args.output
+    sr.dump_boxes_path = args.dump_boxes
     config.inpaintMode.value = args.inpaint_mode
     sr.run()
         

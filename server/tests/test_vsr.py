@@ -7,6 +7,7 @@ wrong part of the picture and nothing crashes to tell you.
 """
 
 import io
+import json
 
 import pytest
 
@@ -16,6 +17,7 @@ from server.steps.vsr import (
     area_to_pixels,
     build_command,
     remove_subtitles,
+    subtitle_position,
 )
 
 
@@ -59,7 +61,8 @@ def test_a_flat_area_still_has_one_row_and_one_column():
 def test_command_matches_the_tool(monkeypatch, tmp_path):
     monkeypatch.setattr("server.config.VSR_PYTHON", "/opt/venv-vsr/bin/python")
     command = build_command(
-        tmp_path / "in.mp4", tmp_path / "out.mp4", "sttn-det", (648, 1036, 57, 1862)
+        tmp_path / "in.mp4", tmp_path / "out.mp4", "sttn-det",
+        (648, 1036, 57, 1862), tmp_path / "boxes.json",
     )
     assert command[0] == "/opt/venv-vsr/bin/python"
     assert command[1] == "backend/main.py"
@@ -69,14 +72,16 @@ def test_command_matches_the_tool(monkeypatch, tmp_path):
 
 def test_the_area_is_given_in_the_order_the_tool_wants():
     """The tool reads YMIN YMAX XMIN XMAX. Any other order paints the wrong box."""
-    command = build_command("in.mp4", "out.mp4", "sttn-det", (10, 20, 30, 40))
+    command = build_command(
+        "in.mp4", "out.mp4", "sttn-det", (10, 20, 30, 40), "boxes.json"
+    )
     start = command.index("--subtitle-area-coords")
     assert command[start + 1 : start + 5] == ["10", "20", "30", "40"]
 
 
 @pytest.mark.parametrize("mode", ["sttn-det", "sttn-auto", "lama", "propainter"])
 def test_every_mode_the_client_may_pick_is_passed_through(mode):
-    command = build_command("in.mp4", "out.mp4", mode, (1, 2, 3, 4))
+    command = build_command("in.mp4", "out.mp4", mode, (1, 2, 3, 4), "boxes.json")
     assert command[command.index("--inpaint-mode") + 1] == mode
 
 
@@ -112,10 +117,58 @@ def test_no_subtitles_is_not_a_failure(monkeypatch, tmp_path):
     The tool leaves with NO_SUBTITLE_EXIT_CODE and writes no file. The step
     hands back the video it was given, so the pipeline carries on with it.
     """
-    video = _run_with_exit_code(NO_SUBTITLE_EXIT_CODE, monkeypatch, tmp_path)
+    video, position = _run_with_exit_code(NO_SUBTITLE_EXIT_CODE, monkeypatch, tmp_path)
     assert video == (tmp_path / "video.mp4").resolve()
+    assert position is None
 
 
 def test_a_real_crash_still_fails(monkeypatch, tmp_path):
     with pytest.raises(PipelineError):
         _run_with_exit_code(1, monkeypatch, tmp_path)
+
+
+# -- where the old subtitles sat --------------------------------------------
+
+
+def _boxes(tmp_path, frames):
+    """Write a boxes file the way the tool writes it: frame no -> boxes."""
+    path = tmp_path / "sub_boxes.json"
+    path.write_text(json.dumps(frames), encoding="utf-8")
+    return path
+
+
+def test_one_block_of_text_gives_its_middle(tmp_path):
+    """Boxes from y=800 to y=860 sit at 830, which is 0.83 of a 1000 frame."""
+    frames = {str(n): [[100, 900, 800, 860]] for n in range(1, 50)}
+    assert subtitle_position(_boxes(tmp_path, frames), 1000) == pytest.approx(0.83)
+
+
+def test_a_logo_in_the_band_does_not_drag_the_answer(tmp_path):
+    """A second block far above must not pull the result into the gap.
+
+    Every frame holds the subtitles at y=830 and a logo at y=630. Their
+    plain middle is 730 -- empty picture between the two. Dropping what
+    sits far from that middle leaves the block with more boxes in it.
+    """
+    frames = {
+        str(n): [[100, 900, 800, 860], [100, 900, 800, 860], [200, 400, 600, 660]]
+        for n in range(1, 50)
+    }
+    assert subtitle_position(_boxes(tmp_path, frames), 1000) == pytest.approx(0.83)
+
+
+def test_one_bad_frame_does_not_move_the_answer(tmp_path):
+    """A single frame where the detector caught the whole band is outvoted."""
+    frames = {str(n): [[100, 900, 800, 860]] for n in range(1, 50)}
+    frames["50"] = [[0, 1000, 100, 900]]
+    assert subtitle_position(_boxes(tmp_path, frames), 1000) == pytest.approx(0.83)
+
+
+def test_no_boxes_means_no_position(tmp_path):
+    assert subtitle_position(_boxes(tmp_path, {}), 1000) is None
+    assert subtitle_position(_boxes(tmp_path, {"1": []}), 1000) is None
+
+
+def test_no_file_means_no_position(tmp_path):
+    """The mode ran no detection, or the run stopped before writing."""
+    assert subtitle_position(tmp_path / "never_written.json", 1000) is None
