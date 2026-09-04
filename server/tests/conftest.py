@@ -16,8 +16,12 @@ def make_runner(tmp_path):
     """Build a JobRunner on a temp folder and always stop it afterwards."""
     started: list[JobRunner] = []
 
-    def build(run_dub, ttl_seconds: int = 3600) -> JobRunner:
-        runner = JobRunner(run_dub, jobs_dir=tmp_path / "jobs", ttl_seconds=ttl_seconds)
+    def build(run_dub, ttl_seconds: int = 3600,
+              sweep_seconds: float = 0.01) -> JobRunner:
+        # The sweep is tiny here: a test must not wait a real minute for the
+        # clean-up thread to take its turn.
+        runner = JobRunner(run_dub, jobs_dir=tmp_path / "jobs",
+                           ttl_seconds=ttl_seconds, sweep_seconds=sweep_seconds)
         runner.start()
         started.append(runner)
         return runner

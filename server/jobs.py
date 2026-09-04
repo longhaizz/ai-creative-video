@@ -27,6 +27,11 @@ DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
 
+# How often the sweeper wakes up to look for expired jobs. A tick while a
+# job runs costs one lock and a walk over a handful of dict entries, so it
+# can be short: the expensive part, deleting the files, is skipped then.
+SWEEP_SECONDS = 60.0
+
 
 class JobCancelled(Exception):
     """The pipeline raises this when the user cancels a running job."""
@@ -103,14 +108,18 @@ class JobRunner:
         run_dub: RunDub,
         jobs_dir: Path | None = None,
         ttl_seconds: int | None = None,
+        sweep_seconds: float = SWEEP_SECONDS,
     ):
         self._run_dub = run_dub
         self._jobs_dir = Path(jobs_dir if jobs_dir is not None else config.JOBS_DIR)
         self._ttl = ttl_seconds if ttl_seconds is not None else config.JOB_TTL_SECONDS
+        self._sweep = sweep_seconds
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
         self._queue: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
+        self._sweeper: threading.Thread | None = None
+        self._stopping = threading.Event()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -131,8 +140,11 @@ class JobRunner:
         self._jobs_dir.mkdir(parents=True, exist_ok=True)
         for path in self._jobs_dir.iterdir():
             _remove(path)
+        self._stopping.clear()
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
+        self._sweeper = threading.Thread(target=self._sweep_forever, daemon=True)
+        self._sweeper.start()
 
     def worker_alive(self) -> bool:
         """Is the one worker still there? /health reports this.
@@ -143,10 +155,14 @@ class JobRunner:
         return self._thread is not None and self._thread.is_alive()
 
     def stop(self, timeout: float = 5.0) -> None:
+        self._stopping.set()  # wakes the sweeper out of its wait
         self._queue.put(None)  # tells the worker to return
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             self._thread = None
+        if self._sweeper is not None:
+            self._sweeper.join(timeout=timeout)
+            self._sweeper = None
 
     # -- public API --------------------------------------------------------
 
@@ -157,7 +173,6 @@ class JobRunner:
         If we queued here, the worker could pick the job up while the video
         is still being uploaded.
         """
-        self.purge_expired()
         job_id = uuid.uuid4().hex
         workdir = self._jobs_dir / job_id
         workdir.mkdir(parents=True, exist_ok=True)
@@ -262,9 +277,10 @@ class JobRunner:
     def purge_expired(self) -> None:
         """Delete jobs that ended more than TTL seconds ago.
 
-        ponytail: called on submit and after each job, not on a timer. On an
-        idle server old files stay a bit longer, which costs disk but never
-        correctness. Add a timer thread only if disk actually fills up.
+        Only the records in memory are read. A folder this store never heard
+        of is never touched, so a job whose folder exists but whose record is
+        not in place yet cannot be deleted from under the thread making it.
+        Folders left by a dead run are wiped by start() instead.
         """
         now = time.time()
         expired = []
@@ -277,6 +293,33 @@ class JobRunner:
                     expired.append(self._jobs.pop(job.id))
         for job in expired:
             _remove(job.workdir)
+
+    def _busy(self) -> bool:
+        """Is any job waiting or running?"""
+        with self._lock:
+            return any(job.status in (QUEUED, RUNNING)
+                       for job in self._jobs.values())
+
+    def _sweep_forever(self) -> None:
+        """Delete expired jobs, but only while nothing else is working.
+
+        Deleting a folder is disk work, and the pipeline is reading and
+        writing wav files on the same disk. So a tick that finds the server
+        busy does nothing and waits for the next one. A job takes minutes and
+        the server is idle between jobs, so the sweep gets its turn.
+
+        ponytail: a server that is never idle is never swept, and the disk
+        fills. Give the skipped ticks a deadline if that day comes.
+        """
+        while not self._stopping.wait(self._sweep):
+            # The same reason as the worker loop: a sweeper that dies stops
+            # cleaning for ever and nothing says so.
+            try:
+                if self._busy():
+                    continue
+                self.purge_expired()
+            except Exception as error:  # noqa: BLE001 - the sweeper must survive
+                print(f"[sweeper] {error!r}", flush=True)
 
     # -- internals ---------------------------------------------------------
 
@@ -317,15 +360,13 @@ class JobRunner:
             if job_id is None:  # sentinel from stop()
                 return
             # Nothing in here may end the loop. _run_one() already turns any
-            # bug into a failed job, but the clean-up after it used to run
-            # bare: one PermissionError from a folder we could not delete
-            # would kill this thread, and from then on every job would sit in
-            # the queue for ever while /health still said "ok".
+            # bug into a failed job, but this thread must survive whatever it
+            # misses: if it dies, every job after it sits in the queue for
+            # ever while /health still says "ok". That cost five days once.
             try:
                 job = self.get(job_id)
                 if job is not None:  # else it was dropped while waiting
                     self._run_one(job)
-                self.purge_expired()
             except Exception as error:  # noqa: BLE001 - the worker must survive
                 print(f"[worker] {error!r}", flush=True)
 

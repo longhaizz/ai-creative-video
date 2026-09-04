@@ -1,3 +1,5 @@
+import time
+
 from server.jobs import DONE, FAILED, RUNNING
 from server.tests.conftest import wait_until
 from server.tests.fake_pipeline import FakePipeline, crashing_pipeline, failing_pipeline
@@ -17,26 +19,46 @@ def test_jobs_run_one_at_a_time_in_order(make_runner):
         assert runner.get(job.id).status == DONE
 
 
-def test_the_worker_survives_a_broken_clean_up(make_runner, monkeypatch):
-    """Clean-up that raises must cost one job, not the whole queue.
+def test_the_sweeper_survives_a_broken_clean_up(make_runner, monkeypatch):
+    """A sweep that raises must cost one tick, not every tick after it.
 
-    This is the five-day freeze: a folder that could not be deleted killed
-    the worker thread, and every job after it waited for ever.
+    This is the five-day freeze, moved: a folder that could not be deleted
+    killed the thread that did the deleting, and from then on nothing was
+    cleaned while /health still said "ok".
     """
-    runner = make_runner(FakePipeline(sleep=0.3))
-
-    # Both are queued before the clean-up breaks, so only the worker meets it.
-    first, second = runner.submit({}), runner.submit({})
+    runner = make_runner(FakePipeline(), ttl_seconds=0)
+    real, calls = runner.purge_expired, []
 
     def boom():
-        raise PermissionError("the folder is busy")
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError("the folder is busy")
+        real()
 
     monkeypatch.setattr(runner, "purge_expired", boom)
+    job = runner.submit({})
 
-    assert wait_until(lambda: runner.get(first.id).status == DONE)
-    assert wait_until(lambda: runner.get(second.id).status == DONE), \
-        "the second job proves the worker is still there"
-    assert runner.worker_alive()
+    assert wait_until(lambda: runner.get(job.id) is None),         "the sweeper kept sweeping after the first tick raised"
+
+
+def test_a_running_job_holds_the_sweeper_off(make_runner):
+    """The sweep may not touch the disk while the pipeline is using it."""
+    runner = make_runner(FakePipeline(sleep=0.3), ttl_seconds=0)
+    real, swept = runner.purge_expired, []
+
+    def counted():
+        swept.append(1)
+        real()
+
+    runner.purge_expired = counted
+
+    job = runner.submit({})
+    assert wait_until(lambda: runner.get(job.id).status == RUNNING)
+    before = len(swept)
+    time.sleep(0.15)  # many ticks at the 0.01s sweep the fixture uses
+    assert len(swept) == before, "the sweeper worked while a job was running"
+
+    assert wait_until(lambda: runner.get(job.id) is None, timeout=10),         "and it sweeps again once the job is done"
 
 
 def test_queue_position_counts_jobs_in_front(make_runner):
