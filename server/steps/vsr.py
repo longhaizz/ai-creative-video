@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import statistics
 import subprocess
 import time
 from pathlib import Path
@@ -33,6 +34,13 @@ TAIL_LINES = 25
 # the video is simply already clean. The number is set in
 # video-subtitle-remover/backend/main.py; the two must stay in step.
 NO_SUBTITLE_EXIT_CODE = 3
+
+# A box whose middle sits further than this share of the frame height from
+# the middle of all the boxes is not part of the same line of subtitles. It
+# is a logo, a price tag, a call to action -- something else caught inside
+# the band we were told to scan. 10% of a 1920 tall frame is ~190px, more
+# than a line of subtitles is tall and less than the gap to another block.
+OUTLIER_SHARE = 0.10
 
 
 # ffprobe only reads the header. A minute is a broken file, not a slow one.
@@ -99,6 +107,7 @@ def build_command(
     out_path: Path,
     mode: str,
     area: tuple[int, int, int, int],
+    dump_boxes: Path,
 ) -> list[str]:
     ymin, ymax, xmin, xmax = area
     return [
@@ -108,7 +117,36 @@ def build_command(
         "--output", str(out_path),
         "--subtitle-area-coords", str(ymin), str(ymax), str(xmin), str(xmax),
         "--inpaint-mode", mode,
+        "--dump-boxes", str(dump_boxes),
     ]
+
+
+def subtitle_position(dump_path: Path, height: int) -> float | None:
+    """Where the old subtitles sat, as a share of the frame height.
+
+    The tool writes one entry per frame, each a list of boxes, so a clip
+    gives hundreds of samples. Their middle is taken twice: once over
+    everything, then again over what is left after dropping the boxes that
+    sit far from that middle. One pass alone would land halfway between two
+    blocks of text when the band holds both a logo and the subtitles.
+
+    Returns None when there is nothing to go on -- no file (the mode ran no
+    detection, or the run stopped early), or no boxes in it.
+    """
+    try:
+        raw = json.loads(Path(dump_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    middles = [
+        (ymin + ymax) / 2
+        for boxes in raw.values()
+        for _xmin, _xmax, ymin, ymax in boxes
+    ]
+    if not middles or height <= 0:
+        return None
+    rough = statistics.median(middles)
+    kept = [y for y in middles if abs(y - rough) <= OUTLIER_SHARE * height]
+    return statistics.median(kept or middles) / height
 
 
 def _child_env() -> dict:
@@ -130,18 +168,21 @@ def remove_subtitles(
     left: float,
     right: float,
     ctx=None,
-) -> Path:
+) -> tuple[Path, float | None]:
     """Paint over the burned-in subtitles.
 
-    Returns out_path, or the video that came in when there was nothing to
-    paint over.
+    Returns (video, position): out_path, or the video that came in when
+    there was nothing to paint over; and where the old subtitles sat as a
+    share of the frame height, or None when the run found none. The caller
+    puts the new subtitles at that height instead of guessing one.
     """
     video = Path(video).resolve()
     out_path = Path(out_path).resolve()
 
     width, height = probe_size(video)
     area = area_to_pixels(width, height, top, bottom, left, right)
-    command = build_command(video, out_path, mode, area)
+    dump_boxes = out_path.with_name("sub_boxes.json")
+    command = build_command(video, out_path, mode, area, dump_boxes)
 
     if ctx is not None:
         ctx.log(
@@ -189,7 +230,7 @@ def remove_subtitles(
         # later step works on it and the job still counts as done.
         if ctx is not None:
             ctx.log("No subtitles found in the video, skipping this step")
-        return video
+        return video, None
 
     if process.returncode != 0:
         raise PipelineError(
@@ -198,7 +239,11 @@ def remove_subtitles(
         )
     if not out_path.is_file() or out_path.stat().st_size == 0:
         raise PipelineError("Subtitle removal produced no video")
-    return out_path
+
+    position = subtitle_position(dump_boxes, height)
+    if ctx is not None and position is not None:
+        ctx.log(f"Old subtitles sat at {position:.2f} of the frame height")
+    return out_path, position
 
 
 def _cancelled(ctx) -> bool:

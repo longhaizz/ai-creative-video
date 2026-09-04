@@ -75,11 +75,14 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     params = ctx.params
     work = ctx.workdir
     video = _source_video(work)
+    # Where the old subtitles sat, once step 1 has looked. Step 9 puts the
+    # new ones there unless the client asked for a height of its own.
+    detected_position = None
 
     # 1. Take the old subtitles off the picture.
     if params.remove_subtitle:
         ctx.step("Removing the old subtitles")
-        video = vsr.remove_subtitles(
+        video, detected_position = vsr.remove_subtitles(
             video, work / "no_subs.mp4", params.vsr_mode,
             params.vsr_top, params.vsr_bottom, params.vsr_left, params.vsr_right,
             ctx=ctx,
@@ -227,12 +230,29 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             result, lines, work / "result_subbed.mp4", width, height,
             font=params.subtitle_font,
             size=params.subtitle_size,
-            position=params.subtitle_position,
+            position=_subtitle_position(params.subtitle_position, detected_position),
             ctx=ctx,
         )
 
     ctx.step("Done")
     return result
+
+
+DEFAULT_SUBTITLE_POSITION = 0.75
+
+
+def _subtitle_position(asked: float | None, detected: float | None) -> float:
+    """Where to put the new subtitles, as a share of the frame height.
+
+    What the client asked for wins, so the slider in the desktop tool still
+    does what it says. With nothing asked, the new text goes where the old
+    text was; with no old text found either, the lower third.
+    """
+    if asked is not None:
+        return asked
+    if detected is not None:
+        return detected
+    return DEFAULT_SUBTITLE_POSITION
 
 
 def _subtitle_cues(work: Path, cues: list[dict]) -> list[dict]:

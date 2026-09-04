@@ -470,7 +470,7 @@ def _stub_pipeline(monkeypatch, tmp_path, cues, vocals, music, refs_out):
     def fake_vsr(src, dest, *args, **kwargs):
         order.append("vsr")
         dest.write_bytes(b"clean")
-        return dest
+        return dest, None
 
     def fake_extract(src, dest):
         Path(dest).write_bytes(b"mix")

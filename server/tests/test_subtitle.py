@@ -13,6 +13,7 @@ import pytest
 
 from pydantic import ValidationError
 
+from server.pipeline import _subtitle_position
 from server.schemas import DubParams
 from server.steps.subtitle import (
     AUTO_SIZE,
@@ -146,8 +147,17 @@ def test_schema_rejects_a_size_below_eight():
         DubParams(subtitle_size=7)
 
 
-def test_schema_default_position_is_three_quarters_down():
-    assert DubParams().subtitle_position == 0.75
+def test_schema_default_position_is_left_to_the_server():
+    """No position asked for means "where the old subtitles were"."""
+    assert DubParams().subtitle_position is None
+    assert DubParams(subtitle_position="").subtitle_position is None
+    assert DubParams(subtitle_position=0.5).subtitle_position == 0.5
+
+
+def test_position_falls_back_from_asked_to_detected_to_the_lower_third():
+    assert _subtitle_position(0.5, 0.83) == 0.5
+    assert _subtitle_position(None, 0.83) == 0.83
+    assert _subtitle_position(None, None) == 0.75
 
 
 # -- time format ------------------------------------------------------------
