@@ -37,6 +37,12 @@ class DubParams(BaseModel):
 
     job_kind: JobKind = "dub"
 
+    # Off means no new voice at all. The job keeps the sound the video came
+    # with and only redoes the picture: take the old subtitles off, put new
+    # ones on in the language already spoken. Every voice setting below is
+    # then ignored, not rejected, so old clients still work.
+    dub: bool = True
+
     # -- voice -------------------------------------------------------------
     voice_mode: VoiceMode = "original"
     cfg_value: float = Field(2.0, ge=1.0, le=3.0)
@@ -91,6 +97,25 @@ class DubParams(BaseModel):
             raise ValueError("vsr_top must be smaller than vsr_bottom")
         if self.vsr_left >= self.vsr_right:
             raise ValueError("vsr_left must be smaller than vsr_right")
+        return self
+
+    @model_validator(mode="after")
+    def _no_dub_still_has_to_do_something(self):
+        """Catch the two combinations that cannot mean anything.
+
+        Both are caught here, before the job starts, because the work runs
+        on a GPU for minutes. Finding out at the end that a flag was
+        ignored is the expensive way to learn it.
+        """
+        if self.dub:
+            return self
+        if self.lipsync:
+            raise ValueError(
+                "lipsync has no new voice to follow when dub is false")
+        if not (self.remove_subtitle or self.burn_subtitle):
+            raise ValueError(
+                "with dub false, ask for remove_subtitle or burn_subtitle, "
+                "otherwise there is nothing to do")
         return self
 
 

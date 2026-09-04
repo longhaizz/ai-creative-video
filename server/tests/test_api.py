@@ -164,6 +164,26 @@ def test_a_backwards_scan_area_is_refused(client):
         assert post_dub(http, vsr_top=0.9, vsr_bottom=0.2).status_code == 422
 
 
+def test_no_dub_still_does_the_picture_work(client):
+    with client() as http:
+        assert post_dub(
+            http, dub="false", remove_subtitle="true").status_code == 202
+
+
+def test_no_dub_with_lipsync_is_refused(client):
+    """There is no new voice for the mouth to follow."""
+    with client() as http:
+        assert post_dub(
+            http, dub="false", burn_subtitle="true", lipsync="true",
+        ).status_code == 422
+
+
+def test_no_dub_and_no_subtitle_work_is_refused(client):
+    """Nothing left to do: refuse before a GPU spends minutes on it."""
+    with client() as http:
+        assert post_dub(http, dub="false").status_code == 422
+
+
 # -- polling ----------------------------------------------------------------
 
 
