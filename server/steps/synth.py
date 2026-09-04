@@ -351,6 +351,10 @@ def _one_take(line: str, work: Path, name: str, speak, listen, lang: str,
     and not the silence the model padded around it.
     """
     raw = speak(line, work / f"{name}.wav", cue)
+    # Temporary probe: clean_take() has been timing out at 300s and we do not
+    # know yet whether the file handed to it is the normal length. Remove once
+    # the logs answer that.
+    print(f"[probe] raw take {name} = {duration(raw):.1f}s", flush=True)
     wav = clean_take(raw, work / f"{name}_clean.wav")
     length = duration(wav)
     heard = ""
