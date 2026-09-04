@@ -12,6 +12,10 @@ The whole job, in order:
     put the sound back on the picture
     burn in the new subtitles        (optional)
 
+With dub=false none of the voice work runs. The job keeps the original
+sound and only redoes the subtitles: take the old ones off, read the speech,
+put new ones on in the language already spoken. See _subtitle_only.
+
 Order matters in two places. Subtitles come off first, so every later step
 works on a clean picture. Lip sync happens before the music is mixed in,
 because it reads the sound to drive the mouth and music in that track would
@@ -54,6 +58,8 @@ def make_run_dub(models: Models):
         kind = getattr(ctx.params, "job_kind", "dub")
         if kind == "clone":
             return _clone(ctx, models)
+        if not getattr(ctx.params, "dub", True):
+            return _subtitle_only(ctx, models)
         return _dub(ctx, models)
 
     return run_dub
@@ -266,15 +272,82 @@ def _subtitle_cues(work: Path, cues: list[dict]) -> list[dict]:
 
     spoken = json.loads(
         (work / "spoken_cues.json").read_text(encoding="utf-8"))
+    return _spoken_lines(spoken)
+
+
+def _spoken_lines(cues: list[dict]) -> list[dict]:
+    """The cues that carry text, in the shape subtitle.burn wants."""
     return [
         {
             "start": float(item["start"]),
             "end": float(item["end"]),
             "text": (item.get("text") or "").strip(),
         }
-        for item in spoken
+        for item in cues
         if (item.get("text") or "").strip()
     ]
+
+
+def _subtitle_only(ctx: JobContext, models: Models) -> Path:
+    """No new voice: keep the original sound, only redo the subtitles.
+
+    Many ad creatives need nothing said again. The old text comes off the
+    picture and new text goes on, in the language that is already spoken.
+    So Demucs, the translation and VoxCPM are all skipped, and the sound is
+    never touched: the file that comes back still carries the audio it
+    arrived with, sample for sample.
+    """
+    params = ctx.params
+    work = ctx.workdir
+    video = _source_video(work)
+    # Where the old subtitles sat, if anything looked. Same rule as the dub
+    # path: the new text goes back where the old text was.
+    detected_position = None
+
+    if params.remove_subtitle:
+        ctx.step("Removing the old subtitles")
+        video, detected_position = vsr.remove_subtitles(
+            video, work / "no_subs.mp4", params.vsr_mode,
+            params.vsr_top, params.vsr_bottom, params.vsr_left, params.vsr_right,
+            ctx=ctx,
+        )
+    ctx.check_cancel()
+
+    if params.burn_subtitle:
+        if models.whisper is None:
+            raise PipelineError(
+                "New subtitles were asked for, but this server has no "
+                "Whisper model to read the speech with.",
+                code="invalid_input",
+            )
+        width, height = audio.video_size(video)
+        cues, _ = transcribe.transcribe(
+            models.whisper,
+            audio.extract_audio(video, work / "mix.wav"),
+            params.whisper_model,
+            ctx=ctx,
+        )
+        ctx.check_cancel()
+        lines = _spoken_lines(cues)
+        if not lines:
+            # Creatives carrying only music are common, and nothing here
+            # could have known in advance. Removing the subtitles is the
+            # expensive part and it already worked, so keep that and say why
+            # the rest did not happen.
+            ctx.log("Nobody speaks in this video, so there is nothing to burn")
+        else:
+            ctx.step("Burning in the subtitles")
+            video = subtitle.burn(
+                video, lines, work / "result_subbed.mp4", width, height,
+                font=params.subtitle_font,
+                size=params.subtitle_size,
+                position=_subtitle_position(
+                    params.subtitle_position, detected_position),
+                ctx=ctx,
+            )
+
+    ctx.step("Done")
+    return video
 
 
 def _clone(ctx: JobContext, models: Models) -> Path:
@@ -294,7 +367,9 @@ def _clone(ctx: JobContext, models: Models) -> Path:
     # VoxCPM's `reference_wav_path` expects a WAV (or at least something
     # decodable as audio). Normalize to PCM WAV first so inputs like
     # mp3/mp4 are safe.
-    reference_wav = work / "reference_audio.wav"
+    # Not "reference_audio.wav": the upload may already carry that name,
+    # and ffmpeg refuses when input and output are the same file.
+    reference_wav = work / "reference_pcm.wav"
     audio.extract_audio(reference_media, reference_wav)
 
     out_wav = work / "result.wav"
