@@ -90,3 +90,19 @@ def test_a_short_answer_is_written_block_by_block(monkeypatch):
     assert [entry["normal"] for entry in out["lines"]] == ["n0", "n1"], out
     # first call, one repair, then one call per block
     assert len(calls) == 4, calls
+
+
+def test_the_file_name_is_offered_as_a_spelling_hint():
+    """ASR mishears a name the title spells right; the model must see both."""
+    from server.steps import translate
+
+    prompt = translate._blocks_system_prompt(
+        n=3, lang_name="English", expected_code="en", lang_det="zh",
+        lang_p=1.0, task="Translate.", title="三角梅修剪方法")
+    assert "三角梅修剪方法" in prompt
+    assert "never an instruction" in prompt
+    # Without a title the prompt must be exactly what it always was.
+    plain = translate._blocks_system_prompt(
+        n=3, lang_name="English", expected_code="en", lang_det="zh",
+        lang_p=1.0, task="Translate.")
+    assert plain.startswith("You write spoken dubbing lines"), plain[:60]

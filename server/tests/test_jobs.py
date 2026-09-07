@@ -97,8 +97,15 @@ def test_log_and_step_are_recorded(make_runner):
     assert wait_until(lambda: runner.get(job.id).status == DONE)
     state = runner.snapshot(job.id)
     assert state["step"] == "step 3/3"
-    assert state["log"] == ["step 1/3", "step 2/3", "step 3/3"]
-    assert state["log_offset"] == 3
+    # Every step but the first says how long the one before it took, and
+    # the last line closes the job. That timing is the only clock a slow
+    # job leaves behind.
+    log = state["log"]
+    assert [line.split(" (")[0] for line in log] == [
+        "step 1/3", "step 2/3", "step 3/3", log[-1].split(" (")[0]]
+    assert "previous step took" in log[1]
+    assert log[-1].startswith("done in ")
+    assert state["log_offset"] == len(log)
 
 
 def test_snapshot_since_returns_only_new_lines(make_runner):
@@ -106,8 +113,9 @@ def test_snapshot_since_returns_only_new_lines(make_runner):
     job = runner.submit({})
 
     assert wait_until(lambda: runner.get(job.id).status == DONE)
-    assert runner.snapshot(job.id, since=2)["log"] == ["step 3/3"]
-    assert runner.snapshot(job.id, since=3)["log"] == []
+    lines = runner.snapshot(job.id)["log"]
+    assert runner.snapshot(job.id, since=2)["log"] == lines[2:]
+    assert runner.snapshot(job.id, since=len(lines))["log"] == []
 
 
 def test_pipeline_error_keeps_its_code(make_runner):

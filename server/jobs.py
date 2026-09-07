@@ -65,6 +65,7 @@ class Job:
     cancelled: bool = False
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    step_started: float | None = None
 
 
 class JobContext:
@@ -335,12 +336,23 @@ class JobRunner:
         print(f"[{job_id[:8]}] {message}", flush=True)
 
     def _set_step(self, job_id: str, name: str) -> None:
+        """Name the step, and say how long the one before it took.
+
+        Steps are the only clock this job has. Without them a slow job is
+        six minutes of log with nothing to point at, and the guess about
+        which step to make faster is exactly that.
+        """
+        now = time.time()
         with self._lock:
             job = self._jobs.get(job_id)
-            if job is not None:
-                job.step = name
+            if job is None:
+                return
+            done, started = job.step, job.step_started
+            job.step, job.step_started = name, now
         # Outside the lock: _append_log takes it too, and self._lock is a
         # plain Lock, so taking it twice in one thread would hang.
+        if done and started is not None:
+            name = f"{name} (previous step took {now - started:.1f}s)"
         self._append_log(job_id, name)
 
     def _is_cancelled(self, job_id: str) -> bool:
@@ -349,11 +361,21 @@ class JobRunner:
             return job is not None and job.cancelled
 
     def _finish(self, job: Job, status: str, **fields) -> None:
+        now = time.time()
         with self._lock:
             job.status = status
-            job.finished_at = time.time()
+            job.finished_at = now
+            # The last step has no step after it to close it, so it is
+            # closed here — otherwise the slowest one is the one missing.
+            last, started = job.step, job.step_started
+            job.step_started = None
             for key, value in fields.items():
                 setattr(job, key, value)
+        if last and started is not None:
+            self._append_log(
+                job.id,
+                f"{status} in {now - job.created_at:.1f}s "
+                f"(last step took {now - started:.1f}s)")
 
     def _worker(self) -> None:
         while True:
