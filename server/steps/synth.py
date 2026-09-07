@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -45,19 +46,17 @@ SCENE_DRIFT_CAP = 0.0
 # A block must start and stop with the speaker, so the speed is always
 # changed by the little that is left over. These are the two bands.
 #
-# Inside the first one a line is kept. Outside it the line is written again
-# instead — a shorter or longer wording of the same thing costs an API call,
-# while a rushed voice costs the viewer. Only when four tries have not found
-# one does the wide band run, and that block is logged: it is a translation
-# the wrong size, not a tempo problem.
+# Inside the first one nobody hears the change, so a line that lands here is
+# kept. Outside it the line is written again instead — a shorter or longer
+# wording of the same thing costs an API call, while a rushed voice costs
+# the viewer. Only when four tries have not found one does the wide band
+# run, and that block is logged: it is a translation the wrong size, not a
+# tempo problem.
 #
-# The band was 0.98-1.03, which was narrower than what this job actually
-# ships: seven blocks of eleven ran out of tries and went out at 1.05-1.13x
-# anyway. Refusing 1.03x and then publishing 1.11x buys nothing — it spends
-# four takes and three rewrites to end up further from the target than the
-# first take was. The band now says what is really accepted. Widening it
-# past the wide band would be the real change, and this is not that.
-FIT_LOW, FIT_HIGH = 0.94, 1.08
+# Widening this to 0.94-1.08 was tried and put back: it saved 6 takes of 42
+# and 13 seconds of 196, which is not worth a voice allowed to run 8% fast
+# on every block instead of 3%.
+FIT_LOW, FIT_HIGH = 0.98, 1.03
 LAST_LOW, LAST_HIGH = 0.85, 1.25
 # A change smaller than this is not worth an ffmpeg pass. 0.2% of a five
 # second block is 10ms, which is the accuracy we are promising.
@@ -349,6 +348,16 @@ def _score(take: dict) -> float:
     return take["error"] + penalty
 
 
+# Where the seconds of a take go, added up over one job and logged at the
+# end. A take costs about five seconds and a job makes dozens of them, so
+# this is the whole speed question; the three numbers say which of the
+# three programs to argue with.
+# ponytail: module-level totals. One worker runs one job at a time, so
+# there is nothing to race with. Per-job accounting would mean threading a
+# dict through four calls for a number nobody reads twice.
+TAKE_SECONDS = {"speak": 0.0, "clean": 0.0, "listen": 0.0}
+
+
 def _one_take(line: str, work: Path, name: str, speak, listen, lang: str,
               expected: float, cue=None) -> dict:
     """Speak the line once, clean it, and listen to what came out.
@@ -356,13 +365,21 @@ def _one_take(line: str, work: Path, name: str, speak, listen, lang: str,
     Cleaning happens before the length is measured, so the length is speech
     and not the silence the model padded around it.
     """
+    clock = time.monotonic()
     raw = speak(line, work / f"{name}.wav", cue)
+    TAKE_SECONDS["speak"] += time.monotonic() - clock
+
+    clock = time.monotonic()
     wav = clean_take(raw, work / f"{name}_clean.wav")
     length = duration(wav)
+    TAKE_SECONDS["clean"] += time.monotonic() - clock
+
     heard = ""
     words: list[dict] = []
     if listen is not None:
+        clock = time.monotonic()
         result = listen(wav, lang) or {}
+        TAKE_SECONDS["listen"] += time.monotonic() - clock
         heard = (result.get("text") or "").strip()
         words = list(result.get("words") or [])
     error = text_error(line, heard) if heard else 0.0
@@ -459,6 +476,8 @@ def timed_speech(
 
     if ctx is not None:
         ctx.step(f"Making the voice ({len(blocks)} blocks)")
+    # Totals belong to this job, not to every job since the server started.
+    TAKE_SECONDS.update(speak=0.0, clean=0.0, listen=0.0)
 
     clips: list[tuple[float, Path]] = []
     spoken: list[dict] = []
@@ -585,6 +604,11 @@ def timed_speech(
             f"Blocks: {len(clips)} spoken, {report['takes']} takes, "
             f"longest {report['longest_block']:.1f}s "
             f"(ceiling {MAX_BLOCK_SECONDS:.0f}s)"
+        )
+        ctx.log(
+            f"Take time: voice {TAKE_SECONDS['speak']:.0f}s, "
+            f"ffmpeg {TAKE_SECONDS['clean']:.0f}s, "
+            f"listen-back {TAKE_SECONDS['listen']:.0f}s"
         )
     return place_clips(clips, video_seconds, work / "speech_timed.wav")
 
