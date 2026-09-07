@@ -723,3 +723,34 @@ def test_the_word_budget_steps_over_a_take_that_babbled():
     speed = duration_model.Speed()
     said = [(" ".join(["từ"] * 12), 2.7), (" ".join(["từ"] * 12), 8.1)]
     assert synth._word_budget(said, 3.28, model, speed, "vi") == 15
+
+
+def test_a_take_is_kept_at_a_speed_the_job_would_ship_anyway(monkeypatch):
+    """The fit band must not refuse what the wide band then publishes.
+
+    These are the tempos eleven real blocks went out at. A take landing on
+    one of them is good enough to keep: rewriting it three more times ended
+    with the same stretch or a worse one, and cost three API calls.
+    """
+    from server.steps import synth
+
+    shipped = [0.988, 1.109, 1.010, 0.996, 1.048, 1.018, 1.073, 0.980]
+    kept = [t for t in shipped if synth.FIT_LOW <= t <= synth.FIT_HIGH]
+    assert len(kept) >= 6, f"the band refuses what it ships: {kept}"
+    # It is still a band, not the wide one: that would be a real change to
+    # how the voice sounds, and it is not this.
+    assert synth.LAST_LOW < synth.FIT_LOW and synth.FIT_HIGH < synth.LAST_HIGH
+
+
+def test_the_narrow_band_is_used_when_the_take_almost_fits(monkeypatch):
+    """A take just outside 1.03x must no longer be called a wide-band block."""
+    from server.steps import synth
+
+    said = []
+    monkeypatch.setattr(
+        synth, "match_tempo",
+        lambda *a, slowest, fastest, deadband: (a[2], 1.05))
+    take = {"path": "x.wav", "length": 2.1}
+    synth.fit_tempo(take, target=2.0, ceiling=9.0, work=Path("."), index=0,
+                    log=said.append)
+    assert not any("wide band" in line for line in said), said
