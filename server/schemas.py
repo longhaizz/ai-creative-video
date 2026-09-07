@@ -6,6 +6,7 @@ one, and the server must not trust the client to send only good values.
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import Literal
 
 from fastapi import UploadFile
@@ -84,6 +85,12 @@ class DubParams(BaseModel):
     # third, higher than the old 0.85 default. A number is used as given.
     subtitle_position: float | None = Field(None, ge=0.0, le=1.0)
 
+    # The name of the file the client sent, without its folder. It is a hint
+    # for the translator, not a setting: an ASR that mishears a word usually
+    # still has it spelled right in the title. Filled in from the upload, so
+    # a client never sends it.
+    source_title: str = Field("", max_length=200)
+
     @field_validator("subtitle_size", "subtitle_position", mode="before")
     @classmethod
     def _blank_is_auto(cls, value):
@@ -133,9 +140,23 @@ class DubRequest(DubParams):
 
     def settings(self) -> DubParams:
         """The settings alone. The pipeline must not see open file handles."""
-        return DubParams(
+        out = DubParams(
             **{name: getattr(self, name) for name in DubParams.model_fields}
         )
+        out.source_title = _clean_title(self.video.filename)
+        return out
+
+
+def _clean_title(filename: str | None) -> str:
+    """The file name, safe to put in a prompt.
+
+    The client picks this name, so it is untrusted text that ends up inside
+    an instruction to a model. Only one line of it is kept, and only a
+    title's worth: a name cannot carry a paragraph of its own orders.
+    """
+    stem = PurePosixPath((filename or "").replace("\\", "/")).stem
+    stem = " ".join(stem.replace("_", " ").split())
+    return stem[:120]
 
 
 class CloneParams(BaseModel):

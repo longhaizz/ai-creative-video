@@ -115,6 +115,10 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     cues, meta = transcribe.transcribe(
         models.whisper, mix, params.whisper_model, ctx=ctx
     )
+    # The file name travels with what Whisper heard, because both are what
+    # the translator knows about the source. A title written by a person is
+    # the one word in the job spelled the way it was meant.
+    meta = {**meta, "source_title": params.source_title}
     cues = open_dubbing.attach_refs(cues, vocals, work / "od")
     ctx.check_cancel()
 

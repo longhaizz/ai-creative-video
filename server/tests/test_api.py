@@ -193,11 +193,13 @@ def test_since_returns_only_new_log_lines(client):
         assert wait_for_status(http, job_id, "done")
 
         body = http.get(f"/jobs/{job_id}", headers=AUTH).json()
-        assert body["log"] == ["step 1/3", "step 2/3", "step 3/3"]
-        assert body["log_offset"] == 3
+        log = body["log"]
+        assert [line.split(" (")[0] for line in log[:3]] == [
+            "step 1/3", "step 2/3", "step 3/3"]
+        assert body["log_offset"] == len(log)
 
         later = http.get(f"/jobs/{job_id}?since=2", headers=AUTH).json()
-        assert later["log"] == ["step 3/3"]
+        assert later["log"] == log[2:]
 
 
 def test_queue_position_is_reported(client):
@@ -224,3 +226,13 @@ def test_a_failed_job_reports_its_code(client):
         assert "no face" in body["error"]
 
 # Cancelling has its own file: server/tests/test_cancel.py
+
+
+def test_the_video_file_name_reaches_the_pipeline():
+    """The title is a hint the client never sends; it comes off the upload."""
+    from server.schemas import DubRequest, _clean_title
+
+    assert _clean_title("C:\videos\三角梅_修剪 方法.mp4") == "三角梅 修剪 方法"
+    assert _clean_title(None) == ""
+    assert len(_clean_title("x" * 300)) == 120
+    assert "source_title" in DubRequest.model_fields
