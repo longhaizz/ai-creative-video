@@ -119,7 +119,8 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     # the translator knows about the source. A title written by a person is
     # the one word in the job spelled the way it was meant.
     meta = {**meta, "source_title": params.source_title}
-    cues = open_dubbing.attach_refs(cues, vocals, work / "od")
+    cues = open_dubbing.attach_refs(
+        cues, vocals, work / "od", one_speaker=params.speakers == 1)
     ctx.check_cancel()
 
     ctx.step("Cleaning the music track")

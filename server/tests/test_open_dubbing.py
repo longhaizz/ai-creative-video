@@ -514,7 +514,7 @@ def _stub_pipeline(monkeypatch, tmp_path, cues, vocals, music, refs_out):
     monkeypatch.setattr("server.pipeline.transcribe.transcribe", fake_transcribe)
     monkeypatch.setattr(
         "server.pipeline.open_dubbing.attach_refs",
-        lambda cues, vocals, out_dir: cues,
+        lambda cues, vocals, out_dir, one_speaker=False: cues,
     )
     monkeypatch.setattr("server.pipeline.audio.duration", lambda path: 10.0)
     monkeypatch.setattr("server.pipeline.audio.video_size", lambda path: (640, 360))
@@ -586,3 +586,37 @@ def test_uploaded_reference_wins_over_cue_ref(monkeypatch, tmp_path):
     ctx = Ctx(DubParams(voice_mode="original"))
     _dub(ctx, Models(voice=Voice(), lipsync=None))
     assert refs == [str(uploaded)] or refs == [str(uploaded.resolve())]
+
+
+def test_one_speaker_takes_the_longest_piece_whole(monkeypatch, tmp_path):
+    """Told there is one voice, the clone gets a piece of it, not a stitch.
+
+    Every span here is under MIN_REF_SECONDS, so the default is to glue them
+    all into one reference. That bet is only safe while nobody knows how
+    many people talk; a caller who has counted them beats the guess.
+    """
+    vocals = tmp_path / "vocals.wav"
+    vocals.write_bytes(b"v")
+    written = []
+
+    def fake_pad(src, start, end, dest):
+        written.append((start, end))
+        Path(dest).write_bytes(b"r")
+        return Path(dest)
+
+    joined = []
+    monkeypatch.setattr("server.steps.open_dubbing.pad_reference", fake_pad)
+    monkeypatch.setattr("server.steps.open_dubbing._concat_wavs",
+                        lambda parts, dest: joined.append(parts) or Path(dest))
+
+    cues = [_cue(start=0.0, end=1.0, text="a"),
+            _cue(start=2.0, end=4.0, text="b"),
+            _cue(start=5.0, end=5.5, text="c")]
+    attach_refs([dict(c) for c in cues], vocals, tmp_path, one_speaker=True)
+    assert written == [(2.0, 4.0)], "the longest span, and only that one"
+    assert not joined, "nothing may be glued when one voice is promised"
+
+    # Without the promise, the old bet still runs.
+    written.clear()
+    attach_refs([dict(c) for c in cues], vocals, tmp_path / "auto")
+    assert len(written) == 3 and joined

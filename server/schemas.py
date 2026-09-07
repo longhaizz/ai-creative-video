@@ -52,6 +52,14 @@ class DubParams(BaseModel):
     target_lang: str = Field("same", max_length=16)
     whisper_model: WhisperModel = "medium"
 
+    # How many people talk in the video. Left out means nobody counted, and
+    # the reference is cut the way it always was. 1 says a person watched it
+    # and heard one voice, which lets the clone take a single clean piece of
+    # that voice instead of a join of every scrap of speech in the clip.
+    # Only 1 is accepted: telling the pipeline there are two would promise a
+    # voice per speaker, and it has none.
+    speakers: int | None = Field(None, ge=1, le=1)
+
     # -- remove the burned-in subtitles ------------------------------------
     remove_subtitle: bool = False
     vsr_mode: VsrMode = "sttn-det"
@@ -92,7 +100,8 @@ class DubParams(BaseModel):
     # a client never sends it.
     source_title: str = Field("", max_length=200)
 
-    @field_validator("subtitle_size", "subtitle_position", mode="before")
+    @field_validator("speakers", "subtitle_size", "subtitle_position",
+                     mode="before")
     @classmethod
     def _blank_is_auto(cls, value):
         if value is None or value == "":
