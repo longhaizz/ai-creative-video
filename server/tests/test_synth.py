@@ -667,11 +667,14 @@ def test_the_take_that_says_the_words_wins_over_the_one_that_fits():
 
 
 def test_a_wording_of_the_wrong_size_is_not_spoken_at_all(monkeypatch):
-    """Four tries is the whole budget; a third of the room does not earn one.
+    """Two tries are the whole budget; a third of the room does not earn one.
 
     The first block of a real job spent three of its four tries on wordings
     measured at 1.30x, 1.35x and 0.39x, and the one rewrite that had the
-    speed to work with ran out of tries at 1.09x.
+    speed to work with ran out of tries at 1.09x. The budget is smaller now,
+    which only makes the rule matter more: what is left has to go on a line
+    written against what was measured, never on a guess made before the
+    voice was heard.
     """
     entry = {"short": "một.", "normal": "hai câu ở đây.",
              "long": "ba câu dài hơn nhiều so với hai câu ở đây."}
@@ -694,7 +697,8 @@ def test_a_wording_of_the_wrong_size_is_not_spoken_at_all(monkeypatch):
         None, lambda message: None,
     )
     assert take["tries"] == MAX_FIT_TRIES
-    assert len(asked) >= 2, "the budget went on written lines, not guesses"
+    assert len(asked) >= MAX_FIT_TRIES - 1, (
+        "the budget went on written lines, not guesses")
 
 
 def test_the_word_budget_comes_from_the_line_that_was_spoken():
