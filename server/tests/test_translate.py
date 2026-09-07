@@ -63,3 +63,30 @@ def test_a_bad_request_is_raised_at_once(monkeypatch):
     else:
         raise AssertionError("it should have raised")
     assert len(calls) == 1
+
+
+def test_a_short_answer_is_written_block_by_block(monkeypatch):
+    """The repair call may also fail. Then each block is written on its own."""
+    import json
+
+    from server.steps import translate
+
+    calls = []
+
+    def fake_chat(system, user, api_key, model):
+        calls.append(system)
+        if "ONE spoken dubbing line" in system:
+            index = user.rsplit("[", 1)[1].split("]")[0]
+            return json.dumps({"short": f"s{index}", "normal": f"n{index}",
+                               "long": f"l{index}"})
+        # Both the first call and the repair come back one line short.
+        return json.dumps({"lines": [{"short": "a", "normal": "a",
+                                      "long": "a"}]})
+
+    monkeypatch.setattr(translate, "_chat", fake_chat)
+    blocks = [{"start": 0.0, "end": 1.0, "words": 5, "text": "one"},
+              {"start": 1.0, "end": 2.0, "words": 5, "text": "two"}]
+    out = translate.translate_blocks(blocks, "VI", "key")
+    assert [entry["normal"] for entry in out["lines"]] == ["n0", "n1"], out
+    # first call, one repair, then one call per block
+    assert len(calls) == 4, calls
