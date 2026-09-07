@@ -311,7 +311,8 @@ def translate_blocks(blocks, target_lang: str, api_key: str,
         body, api_key, model,
     )
     data = _extract_json(raw)
-    lines = _block_variants(data, n, body, api_key, model)
+    lines = _block_variants(data, n, body, blocks, lang_name,
+                            task, api_key, model)
     lines = _repair_block_languages(
         lines, expected_code, lang_name, api_key, model)
 
@@ -392,13 +393,20 @@ def _one_entry(item) -> dict | None:
     return out
 
 
-def _block_variants(data: dict, n: int, body: str, api_key: str,
+def _block_variants(data: dict, n: int, body: str, blocks: list,
+                    lang_name: str, task: str, api_key: str,
                     model: str) -> list:
-    """Exactly n entries of three lengths, or one repair call, or a failure.
+    """Exactly n entries of three lengths, or a repair, or block by block.
 
     There is no guessing here on purpose. The old code padded a short list
     with empty strings at a place it picked by word overlap, which silently
     shifted every later line by one block.
+
+    When the repair call also comes back the wrong length, every block is
+    written on its own instead. One block per call cannot come back with
+    the wrong number of blocks, so the count stops being something the
+    model can get wrong. It costs n small calls, which is cheap next to
+    losing a job that has already spent ten minutes on the GPU.
     """
     entries = _entries_or_none(data.get("lines"), n)
     if entries is not None:
@@ -420,10 +428,43 @@ def _block_variants(data: dict, n: int, body: str, api_key: str,
         api_key, model,
     )
     entries = _entries_or_none(_extract_json(out).get("lines"), n)
-    if entries is None:
+    if entries is not None:
+        return entries
+
+    entries = [_one_block(i, blocks[i], body, lang_name, task, api_key, model)
+               for i in range(n)]
+    missing = [i for i, entry in enumerate(entries) if entry is None]
+    if missing:
         raise OpenAIError(
-            f"Ban dich phai co dung {n} dong day du cho {n} block")
+            f"Ban dich phai co dung {n} dong day du cho {n} block "
+            f"(lan dau {got}, viet rieng van thieu block {missing})")
     return entries
+
+
+def _one_block(index: int, block, body: str, lang_name: str, task: str,
+               api_key: str, model: str) -> dict | None:
+    """Write one block on its own, with the whole transcript for context."""
+    words = int(block.get("words") or 0) or 12
+    system = (
+        f"You write ONE spoken dubbing line in {lang_name}. {task} "
+        f"You are given the whole transcript, then the number of the one "
+        f"block to write. Write only that block. Do not invent products, "
+        f"prices, numbers, names or calls to action that are not in the "
+        f"transcript, and never use an idea from a later block. "
+        f"THREE LENGTHS: \"short\", \"normal\" and \"long\" all say the "
+        f"same thing; aim about {words} words for \"normal\", about 60% of "
+        f"that for \"short\" and about 130% for \"long\". "
+        f"Everything in {lang_name} only. Return ONLY JSON with keys "
+        f"short, normal, long."
+    )
+    try:
+        out = _chat(system, f"{body}\n\nWrite block [{index}] only.",
+                    api_key, model)
+        return _one_entry(_extract_json(out))
+    except OpenAIError:
+        # One block that will not come out must not hide the others: the
+        # caller names every block still missing in one message.
+        return None
 
 
 def _entries_or_none(raw, n: int) -> list | None:
