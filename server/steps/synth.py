@@ -62,7 +62,16 @@ LAST_LOW, LAST_HIGH = 0.85, 1.25
 # second block is 10ms, which is the accuracy we are promising.
 FIT_DEADBAND = 0.002
 # Takes one block may cost before the closest one so far is kept.
-MAX_FIT_TRIES = 4
+#
+# Four was the number until a job was measured: ten blocks of eleven spent
+# all four tries and still went out on the wide band, so the last two were
+# 22 seconds of the voice model and a handful of API calls buying a wording
+# nobody used. Two tries keep the choice that matters — something spoken,
+# then one answer to what it measured — and drop the two that only happen
+# after the block has already been given up on. A block that needs more
+# than two is a translation the wrong size, and the wide band is what that
+# case is for.
+MAX_FIT_TRIES = 2
 # A wording already written is only worth speaking when it is roughly the
 # right size. The three that come with a block are guesses made before the
 # voice was heard, and a guess that is a third of the room does not become
