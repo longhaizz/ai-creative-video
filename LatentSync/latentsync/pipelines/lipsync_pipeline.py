@@ -4,6 +4,8 @@ import inspect
 import math
 import os
 import shutil
+import sys
+import time
 from typing import Callable, List, Optional, Union
 import subprocess
 
@@ -38,6 +40,15 @@ import tqdm
 import soundfile as sf
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+def _since(start: float) -> float:
+    """Seconds since `start`, after the GPU has really finished.
+
+    Without the wait this only measures how long it took to queue the work.
+    """
+    torch.cuda.synchronize()
+    return time.perf_counter() - start
 
 
 class LipsyncPipeline(DiffusionPipeline):
@@ -361,6 +372,7 @@ class LipsyncPipeline(DiffusionPipeline):
         # 4. Prepare extra step kwargs.
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
+        _t0 = time.perf_counter()
         whisper_feature = self.audio_encoder.audio2feat(audio_path)
         whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
 
@@ -368,8 +380,10 @@ class LipsyncPipeline(DiffusionPipeline):
         video_frames = read_video(video_path, use_decord=False)
 
         video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
+        _prep = _since(_t0)
 
         synced_video_frames = []
+        _unet = _decode = 0.0
 
         num_channels_latents = self.vae.config.latent_channels
 
@@ -386,6 +400,7 @@ class LipsyncPipeline(DiffusionPipeline):
 
         num_inferences = math.ceil(len(whisper_chunks) / num_frames)
         for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
+            _s = time.perf_counter()
             if self.unet.add_audio_layer:
                 audio_embeds = torch.stack(whisper_chunks[i * num_frames : (i + 1) * num_frames])
                 audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
@@ -450,13 +465,18 @@ class LipsyncPipeline(DiffusionPipeline):
                         if callback is not None and j % callback_steps == 0:
                             callback(j, t, latents)
 
+            _unet += _since(_s)
+            _s = time.perf_counter()
+
             # Recover the pixel values
             decoded_latents = self.decode_latents(latents)
             decoded_latents = self.paste_surrounding_pixels_back(
                 decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
             )
             synced_video_frames.append(decoded_latents)
+            _decode += _since(_s)
 
+        _s = time.perf_counter()
         synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
 
         audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
@@ -475,3 +495,12 @@ class LipsyncPipeline(DiffusionPipeline):
 
         command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
         subprocess.run(command, shell=True)
+
+        # Where the time really went. Only the UNet line moves when the steps
+        # or the guidance change; the other three are the fixed cost.
+        print(
+            f"[lipsync] {num_inferences} chunks of {num_frames} frames | "
+            f"audio+faces {_prep:.1f}s | unet {_unet:.1f}s | "
+            f"vae decode {_decode:.1f}s | restore+write {_since(_s):.1f}s",
+            file=sys.stderr, flush=True,
+        )
