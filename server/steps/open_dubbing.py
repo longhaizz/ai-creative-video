@@ -26,8 +26,15 @@ SHORT_CTA_GAP_SECONDS = 0.5
 SHORT_CTA_WORDS = (2, 5)
 
 
-def attach_refs(cues: list[dict], vocals: Path, out_dir: Path) -> list[dict]:
-    """Glue crumbs, force SPEAKER_00, cut one clone wav for the clip."""
+def attach_refs(cues: list[dict], vocals: Path, out_dir: Path,
+                one_speaker: bool = False) -> list[dict]:
+    """Glue crumbs, force SPEAKER_00, cut one clone wav for the clip.
+
+    With `one_speaker` the caller is saying it has listened to the video and
+    there is a single voice in it. That is worth more than any guess we can
+    make: the reference is then one unbroken piece of that voice, never a
+    join of every scrap in the clip.
+    """
     cues = glue_prefix_crumbs(cues)
     if not cues:
         raise PipelineError("No speech was found in the video", code="invalid_input")
@@ -36,7 +43,8 @@ def attach_refs(cues: list[dict], vocals: Path, out_dir: Path) -> list[dict]:
     for cue in cues:
         cue["speaker_id"] = SPEAKER_00
     spans = [(float(c["start"]), float(c["end"])) for c in cues]
-    ref = reference_for_spans(vocals, spans, out_dir / "ref_SPEAKER_00.wav")
+    ref = reference_for_spans(
+        vocals, spans, out_dir / "ref_SPEAKER_00.wav", single=one_speaker)
     for cue in cues:
         cue["ref_wav"] = str(ref)
     return cues
@@ -155,16 +163,24 @@ def glue_prefix_crumbs(cues: list[dict]) -> list[dict]:
 
 def reference_for_spans(
     vocals: Path, spans: list[tuple[float, float]], dest: Path,
+    single: bool = False,
 ) -> Path:
     """One clone wav for a speaker: longest clip, or concat if all are short.
 
     Never grows a short cue into a neighbour's time.
+
+    The concat is a bet: that every scrap of speech in the clip is the same
+    person, so gluing them makes a longer sample of one voice. It is the
+    right bet when nobody knows how many people talk, and the wrong one
+    when two do — the clone then learns a voice that is in the video
+    nowhere. `single` is the caller saying it knows there is one speaker,
+    and a short clean piece of that one voice beats a long stitched one.
     """
     cleaned = [(float(s), float(e)) for s, e in spans if e > s]
     if not cleaned:
         raise PipelineError("No speech to clone from", code="internal")
     longest = max(cleaned, key=lambda pair: pair[1] - pair[0])
-    if longest[1] - longest[0] >= MIN_REF_SECONDS or len(cleaned) == 1:
+    if single or longest[1] - longest[0] >= MIN_REF_SECONDS or len(cleaned) == 1:
         return pad_reference(vocals, longest[0], longest[1], dest)
     parts = []
     for index, (start, end) in enumerate(sorted(cleaned)):

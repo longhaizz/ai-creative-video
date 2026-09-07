@@ -246,3 +246,16 @@ def test_the_video_file_name_reaches_the_pipeline():
     # One real word is enough to be worth passing on.
     assert _clean_title("VID_20240115_bougainvillea.mp4") == (
         "VID 20240115 bougainvillea")
+
+
+def test_speakers_only_accepts_one_or_nothing():
+    """Two speakers would promise a voice each, and there is only one."""
+    from pydantic import ValidationError
+
+    from server.schemas import DubParams
+
+    assert DubParams().speakers is None
+    assert DubParams(speakers="").speakers is None
+    assert DubParams(speakers=1).speakers == 1
+    with pytest.raises(ValidationError):
+        DubParams(speakers=2)
