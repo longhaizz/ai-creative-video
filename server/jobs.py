@@ -14,6 +14,7 @@ import queue
 import shutil
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -385,8 +386,15 @@ class JobRunner:
         except JobCancelled:
             self._cancel_and_clean(job)
         except PipelineError as error:
+            # The reason also goes to stdout. The job itself is gone an hour
+            # later, and with it the only copy of why it failed: the client
+            # may be closed by then, and a failure nobody wrote down cannot
+            # be looked at.
+            print(f"[{job.id[:8]}] FAILED ({error.code}): {error}", flush=True)
             self._finish(job, FAILED, error=str(error), error_code=error.code)
         except Exception as error:  # noqa: BLE001 - any bug must land in the job
+            print(f"[{job.id[:8]}] FAILED (internal): {error!r}", flush=True)
+            traceback.print_exc()
             self._finish(job, FAILED, error=str(error), error_code="internal")
         else:
             if self._is_cancelled(job.id):

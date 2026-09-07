@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 import requests
 
@@ -24,6 +25,12 @@ from server.jobs import PipelineError
 
 API_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "gpt-4o-mini"
+
+# How many times one call is made before the job fails, and how long
+# to wait between them. The wait grows with each try: a rate limit
+# does not clear in the same second it was hit.
+RETRIES = 3
+RETRY_WAIT = 2.0
 
 # Mã UI → tên ngôn ngữ cho prompt
 LANG_NAMES = {
@@ -71,6 +78,38 @@ def word_count(text: str) -> int:
 
 
 def _chat(system: str, user: str, api_key: str, model: str) -> str:
+    """Ask the model once, and try again when the failure is a passing one.
+
+    A dub calls this many times per job, so a single 429 or a dropped
+    connection used to kill a job that was minutes from done. Only the
+    failures worth repeating are retried: a rate limit, a server-side error,
+    or a broken connection. A 400 or a bad key comes back the same however
+    often it is asked, so it is raised at once.
+    """
+    last: OpenAIError | None = None
+    for attempt in range(RETRIES):
+        try:
+            return _chat_once(system, user, api_key, model)
+        except OpenAIError as error:
+            if not _worth_retrying(error):
+                raise
+            last = error
+        except requests.RequestException as error:
+            last = OpenAIError(f"OpenAI request failed: {error}")
+        if attempt + 1 < RETRIES:
+            time.sleep(RETRY_WAIT * (attempt + 1))
+    assert last is not None
+    raise last
+
+
+def _worth_retrying(error: OpenAIError) -> bool:
+    text = str(error)
+    return "OpenAI HTTP 429" in text or any(
+        f"OpenAI HTTP {code}" in text for code in (500, 502, 503, 504)
+    )
+
+
+def _chat_once(system: str, user: str, api_key: str, model: str) -> str:
     key = (api_key or "").strip()
     if not key:
         raise OpenAIError("Chưa có OpenAI API key")
