@@ -227,6 +227,10 @@ def build_production_app() -> FastAPI:
             config.LATENTSYNC_DIR,
             config.LATENTSYNC_CONFIG,
             config.LATENTSYNC_CHECKPOINT,
+            # DeepCache reuses the deep UNet blocks and only recomputes them
+            # every third step. Lip sync is the slowest step by far: 11 of the
+            # 12 minutes of a job. Turn this off again if mouths look soft.
+            enable_deepcache=True,
         )
     models = Models(
         voice=VoxCPMModel(),
