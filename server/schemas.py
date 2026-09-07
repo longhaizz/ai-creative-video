@@ -6,6 +6,7 @@ one, and the server must not trust the client to send only good values.
 
 from __future__ import annotations
 
+import re
 from pathlib import PurePosixPath
 from typing import Literal
 
@@ -147,16 +148,53 @@ class DubRequest(DubParams):
         return out
 
 
+# What a camera, a phone or a download names a file. A title made only of
+# these says nothing about what is in the video, and a wrong hint is worse
+# than none: it would have the translator rename the subject after it.
+_EMPTY_TITLE_WORDS = {
+    "img", "image", "vid", "video", "movie", "clip", "final", "copy", "new",
+    "edit", "edited", "export", "output", "out", "draft", "test", "temp",
+    "untitled", "download", "downloaded", "raw", "mp4", "full", "version",
+    "v", "ver", "screen", "recording", "screenrecording", "whatsapp", "tiktok",
+}
+
+
 def _clean_title(filename: str | None) -> str:
-    """The file name, safe to put in a prompt.
+    """The file name, safe to put in a prompt, or nothing.
 
     The client picks this name, so it is untrusted text that ends up inside
     an instruction to a model. Only one line of it is kept, and only a
     title's worth: a name cannot carry a paragraph of its own orders.
+
+    A name is only worth passing on when a person wrote it about the video.
+    "VID_20240115_final2" is what a phone wrote, and handing that over as a
+    hint about the subject is worse than handing over nothing. Whether the
+    words that survive really describe this video is left to the model,
+    which reads them; here we only drop the names that say nothing to
+    anybody.
     """
     stem = PurePosixPath((filename or "").replace("\\", "/")).stem
-    stem = " ".join(stem.replace("_", " ").split())
-    return stem[:120]
+    stem = " ".join(re.split(r"[_\-.]+", stem))
+    stem = " ".join(stem.split())[:120]
+
+    told = [w for w in stem.lower().split() if _says_something(w)]
+    return stem if told else ""
+
+
+def _says_something(word: str) -> bool:
+    """Is this one word of a file name about the video at all?
+
+    The counters a phone hangs on a name are dropped with the word they
+    sit on, so "final2" is as empty as "final". Two letters are asked of an
+    alphabet that spells a word in several; one character is enough where
+    it is already a word, which is why any letter outside ASCII counts.
+    """
+    bare = re.sub(r"\d+", "", word)
+    if bare in _EMPTY_TITLE_WORDS:
+        return False
+    if any(c.isalpha() and ord(c) > 127 for c in bare):
+        return True
+    return sum(c.isalpha() for c in bare) >= 2
 
 
 class CloneParams(BaseModel):
