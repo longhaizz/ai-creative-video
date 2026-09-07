@@ -189,6 +189,15 @@ def clean_take(src, dest) -> Path:
     trim = ("silenceremove=start_periods=1:start_silence=0.05:"
             "start_threshold=-45dB:detection=peak")
     fade = f"afade=t=in:st=0:d={EDGE_FADE}"
+    # Two runs, not one. In one graph this deadlocks: ffmpeg 6.1 stops
+    # halfway through a five-second take and never returns, every time, on
+    # a file that plays fine. It takes all three together — the two
+    # areverse, which hold the whole take until end of stream, loudnorm
+    # after them, and any change of sample rate after that. Drop the rate
+    # change and it runs; split it in two and it runs. Neither half is
+    # slow, so the second process costs milliseconds and buys a step that
+    # cannot hang. Do not join these back together.
+    cut = dest.with_name(f"{dest.stem}_cut.wav")
     run_ffmpeg([
         config.FFMPEG_BIN, "-y", "-loglevel", "error", "-i", str(src),
         "-af", ",".join([
@@ -198,13 +207,20 @@ def clean_take(src, dest) -> Path:
             fade,           # which is the fade-out, we are reversed
             "areverse",
             fade,           # the fade-in
-            f"loudnorm=I={TAKE_LUFS}:TP=-2:LRA=11",
+        ]),
+        "-c:a", "pcm_s16le", str(cut),
+    ])
+    try:
+        run_ffmpeg([
+            config.FFMPEG_BIN, "-y", "-loglevel", "error", "-i", str(cut),
+            "-af", f"loudnorm=I={TAKE_LUFS}:TP=-2:LRA=11",
             # loudnorm hands back 192kHz. Come straight back to the rate the
             # mix runs at, so nothing downstream carries four times the data.
-            "aresample=44100",
-        ]),
-        "-c:a", "pcm_s16le", str(dest),
-    ])
+            "-ar", "44100", "-c:a", "pcm_s16le", str(dest),
+        ])
+    finally:
+        # One of these per take, and a job has dozens.
+        cut.unlink(missing_ok=True)
     return dest
 
 

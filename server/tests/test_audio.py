@@ -20,3 +20,35 @@ def test_a_command_that_never_ends_is_stopped():
             timeout=0.5,
         )
     assert "longer than" in str(error.value), "the user should read why"
+
+
+def test_clean_take_never_runs_one_ffmpeg(tmp_path, monkeypatch):
+    """The graph deadlocks in one run, so it must stay in two.
+
+    Reversing a take, then loudnorm, then any rate change hangs ffmpeg 6.1
+    for good. The split is the fix, so a later tidy-up that joins the two
+    filter lists back into one has to fail here.
+    """
+    from pathlib import Path
+
+    from server.steps import audio
+
+    seen = []
+
+    def fake_ffmpeg(command, timeout=None):
+        seen.append(command)
+        # Stand in for the file the first run writes.
+        Path(command[-1]).write_bytes(b"")
+        return ""
+
+    monkeypatch.setattr(audio, "run_ffmpeg", fake_ffmpeg)
+    audio.clean_take(tmp_path / "take.wav", tmp_path / "take_clean.wav")
+
+    assert len(seen) == 2, "clean_take must stay two ffmpeg runs"
+    first, second = (" ".join(cmd) for cmd in seen)
+    assert "areverse" in first and "loudnorm" not in first
+    assert "loudnorm" in second and "areverse" not in second
+    # Nothing may resample in the same run as the reversing.
+    assert "aresample" not in first
+    # The scratch file must not be left behind for the next take.
+    assert not (tmp_path / "take_clean_cut.wav").exists()

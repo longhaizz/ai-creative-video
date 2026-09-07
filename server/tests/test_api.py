@@ -234,5 +234,15 @@ def test_the_video_file_name_reaches_the_pipeline():
 
     assert _clean_title("C:\videos\三角梅_修剪 方法.mp4") == "三角梅 修剪 方法"
     assert _clean_title(None) == ""
-    assert len(_clean_title("x" * 300)) == 120
+    assert len(_clean_title("xy" * 150)) == 120
     assert "source_title" in DubRequest.model_fields
+
+    # A name a phone or a download wrote says nothing about the video, and
+    # a wrong hint is worse than none.
+    assert _clean_title("VID_20240115_final2.mp4") == ""
+    assert _clean_title("IMG_0123.mov") == ""
+    assert _clean_title("8823741.mp4") == ""
+    assert _clean_title("video copy (1).mp4") == ""
+    # One real word is enough to be worth passing on.
+    assert _clean_title("VID_20240115_bougainvillea.mp4") == (
+        "VID 20240115 bougainvillea")
