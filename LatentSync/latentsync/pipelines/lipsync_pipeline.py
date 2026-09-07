@@ -375,12 +375,16 @@ class LipsyncPipeline(DiffusionPipeline):
         _t0 = time.perf_counter()
         whisper_feature = self.audio_encoder.audio2feat(audio_path)
         whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
+        _audio = _since(_t0)
+        _s = time.perf_counter()
 
         audio_samples = read_audio(audio_path)
         video_frames = read_video(video_path, use_decord=False)
+        _read = _since(_s)
+        _s = time.perf_counter()
 
         video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
-        _prep = _since(_t0)
+        _faces = _since(_s)
 
         synced_video_frames = []
         _unet = _decode = 0.0
@@ -500,7 +504,8 @@ class LipsyncPipeline(DiffusionPipeline):
         # or the guidance change; the other three are the fixed cost.
         print(
             f"[lipsync] {num_inferences} chunks of {num_frames} frames | "
-            f"audio+faces {_prep:.1f}s | unet {_unet:.1f}s | "
-            f"vae decode {_decode:.1f}s | restore+write {_since(_s):.1f}s",
+            f"whisper {_audio:.1f}s | read {_read:.1f}s | faces {_faces:.1f}s | "
+            f"unet {_unet:.1f}s | vae decode {_decode:.1f}s | "
+            f"restore+write {_since(_s):.1f}s",
             file=sys.stderr, flush=True,
         )
