@@ -78,7 +78,7 @@ class DubParams(BaseModel):
     #   50 steps    the default; the pipeline has no ceiling of its own, and
     #               time grows almost linearly, so 100 is our own stop sign
     #   1.5         the same guidance upstream uses for 512
-    #   DeepCache   on, in LipsyncModel, so a step costs less than it reads
+    #   DeepCache   off, in LipsyncModel: it froze the mouth on still shots
     latentsync_steps: int = Field(50, ge=1, le=100)
     latentsync_guidance: float = Field(1.5, ge=1.0, le=3.0)
 

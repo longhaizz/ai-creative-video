@@ -228,9 +228,16 @@ def build_production_app() -> FastAPI:
             config.LATENTSYNC_CONFIG,
             config.LATENTSYNC_CHECKPOINT,
             # DeepCache reuses the deep UNet blocks and only recomputes them
-            # every third step. Lip sync is the slowest step by far: 11 of the
-            # 12 minutes of a job. Turn this off again if mouths look soft.
-            enable_deepcache=True,
+            # every third step, which makes lip sync — by far the slowest
+            # step — cheaper. It was turned on, and turned off again the day
+            # after: in a shot where the speaker sits still, the mouth is the
+            # only thing moving, and reusing the deep blocks flattened it
+            # until the whole frame stopped. freezedetect found 4.9s of dead
+            # frames in a 25s ad that had 0.5s of them to begin with, all of
+            # it while somebody was talking. Soft mouths were the risk we
+            # wrote down; a mouth that stops moving is the same fault, all
+            # the way.
+            enable_deepcache=False,
         )
     models = Models(
         voice=VoxCPMModel(),
