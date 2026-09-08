@@ -415,6 +415,41 @@ def test_a_real_burn_takes_the_hook_style(tmp_path):
     assert out.stat().st_size > 0
 
 
+def test_the_hook_lines_up_with_the_edge_it_was_told_to():
+    """Left and right hang the text off the box edge, not off the centre."""
+    left = hook_dialogue(_hook(align="left"), 1080, 1920)
+    middle = hook_dialogue(_hook(align="center"), 1080, 1920)
+    right = hook_dialogue(_hook(align="right"), 1080, 1920)
+    assert "\\pos(108,240)" in left     # left edge: 0.10 of 1080
+    assert "\\pos(540,240)" in middle   # centre, as before
+    assert "\\pos(972,240)" in right    # right edge: 0.90 of 1080
+
+
+def test_an_unknown_alignment_falls_back_to_the_centre():
+    assert "\\pos(540,240)" in hook_dialogue(_hook(align="sideways"), 1080, 1920)
+    assert "\\pos(540,240)" in hook_dialogue(_hook(), 1080, 1920)
+
+
+def test_the_style_alignment_follows_the_same_choice(tmp_path):
+    """The ASS Alignment field has to agree with where \\pos was put."""
+    for align, wanted in (("left", "4"), ("center", "5"), ("right", "6")):
+        ass = write_ass([], tmp_path / f"{align}.ass", 1080, 1920, "Noto Sans",
+                        40, 0.75, hook=_hook(align=align))
+        style = next(line for line in ass.read_text(encoding="utf-8").splitlines()
+                     if line.startswith("Style: Hook,"))
+        assert style.split(",")[18] == wanted, align
+
+
+def test_schema_refuses_an_alignment_it_cannot_draw():
+    with pytest.raises(ValidationError):
+        DubParams(hook_text="Mua ngay", hook_top=0.05, hook_bottom=0.2,
+                  hook_left=0.1, hook_right=0.9, hook_align="justified")
+
+
+def test_schema_defaults_the_hook_to_the_centre():
+    assert DubParams().hook_align == "center"
+
+
 def test_schema_refuses_a_hook_without_a_box():
     with pytest.raises(ValidationError):
         DubParams(hook_text="Mua ngay")
