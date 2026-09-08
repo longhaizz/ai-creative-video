@@ -205,3 +205,22 @@ def test_the_pieces_of_a_block_are_lettered_for_the_model():
         "parts": ["Butuh pinjaman?"],
     })
     assert plain.endswith("Butuh pinjaman?") and "(a)" not in plain
+
+
+def test_words_after_the_json_do_not_kill_the_job():
+    """The real failure: a good answer with something written after it."""
+    import pytest
+
+    from server.steps import translate
+
+    good = '{"lines": [{"short": "a", "normal": "b", "long": "c"}]}'
+    assert translate._extract_json(good + "\nHope this helps!")["lines"]
+    assert translate._extract_json(good + '{"lines": []}')["lines"]
+    assert translate._extract_json("```json\n" + good + "\n```")["lines"]
+    assert translate._extract_json("Here you go:\n" + good)["lines"]
+
+    # A failure has to hand over the text, or the only copy of what the
+    # model said is gone before anyone can read it.
+    with pytest.raises(translate.OpenAIError) as bad:
+        translate._extract_json('{"lines": [oops')
+    assert "oops" in str(bad.value)

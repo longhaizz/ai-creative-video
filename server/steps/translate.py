@@ -211,22 +211,33 @@ def _lines_wrong_language(cues, expected_code: str) -> list:
 
 
 def _extract_json(raw: str) -> dict:
-    """Lấy object JSON đầu tiên từ response (có thể có ```fence)."""
+    """Lấy object JSON đầu tiên từ response (có thể có ```fence).
+
+    raw_decode reads one object and stops, so a model that writes a word
+    after its JSON — or a second object — costs nothing. The old regex took
+    from the first brace to the last one, which glued the answer to whatever
+    followed it and threw both away: a 20 second ad died a hundred seconds
+    into the job over an answer that was perfectly good.
+
+    A failure now carries the text with it. The last one did not, and the
+    only copy of what the model actually said was gone before anyone could
+    read it.
+    """
     import json
     text = (raw or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
+    start = text.find("{")
+    if start < 0:
+        raise OpenAIError(f"OpenAI không trả JSON: {text[:300]}")
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        m = re.search(r"\{[\s\S]*\}", text)
-        if not m:
-            raise OpenAIError(f"OpenAI không trả JSON: {text[:200]}")
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError as e:
-            raise OpenAIError(f"OpenAI JSON lỗi: {e}") from e
+        found, _end = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError as e:
+        raise OpenAIError(f"OpenAI JSON lỗi: {e} | {text[:300]}") from e
+    if not isinstance(found, dict):
+        raise OpenAIError(f"OpenAI không trả JSON: {text[:300]}")
+    return found
 
 
 def _blocks_system_prompt(*, n: int, lang_name: str, expected_code: str,
