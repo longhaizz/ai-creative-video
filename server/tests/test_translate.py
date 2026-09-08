@@ -106,3 +106,102 @@ def test_the_file_name_is_offered_as_a_spelling_hint():
         n=3, lang_name="English", expected_code="en", lang_det="zh",
         lang_p=1.0, task="Translate.")
     assert plain.startswith("You write spoken dubbing lines"), plain[:60]
+
+
+def test_a_block_that_lost_its_call_to_action_is_asked_again():
+    """The real failure: two things said, one line, and the click is gone."""
+    import json
+
+    from server.steps import translate
+
+    blocks = [{
+        "start": 3.6, "end": 11.08, "words": 22,
+        "text": "Pakai aplikasi ini... Klik tombol di bawah sekarang.",
+        "parts": ["Pakai aplikasi ini untuk menghitung bunga pinjamanmu "
+                  "hanya dalam 3 menit.",
+                  "Klik tombol di bawah sekarang."],
+    }]
+    lines = [{"short": "Use this app.", "long": "Use this app to work it out.",
+              "normal": "Use this app to calculate your loan interest."}]
+    seen = []
+
+    def fake_chat(system, user, api_key, model):
+        seen.append(json.loads(user))
+        return json.dumps({"lines": {"0": {
+            "short": "Use this app. Tap below.",
+            "normal": "Use this app to calculate your interest. "
+                      "Tap the button below now.",
+            "long": "Use this app to work out your interest in three "
+                    "minutes. Tap the button below right now.",
+        }}})
+
+    monkey = translate._chat
+    translate._chat = fake_chat
+    try:
+        out = translate._fill_dropped_parts(lines, blocks, "English", "key", "m")
+    finally:
+        translate._chat = monkey
+
+    assert "Tap the button below now." in out[0]["normal"]
+    assert seen[0]["0"]["said"][1] == "Klik tombol di bawah sekarang."
+
+
+def test_a_line_that_says_everything_is_left_alone():
+    """One sentence for one cue is not a loss, and must cost no API call."""
+    from server.steps import translate
+
+    blocks = [{"start": 0.0, "end": 2.5, "words": 8, "text": "one thing",
+               "parts": ["Butuh pinjaman tapi takut bunganya besar?"]}]
+    lines = [{"short": "a", "normal": "Need a loan?", "long": "c"}]
+
+    def boom(*args, **kwargs):
+        raise AssertionError("nothing to ask about")
+
+    monkey = translate._chat
+    translate._chat = boom
+    try:
+        assert translate._fill_dropped_parts(
+            lines, blocks, "English", "key", "m") == lines
+    finally:
+        translate._chat = monkey
+
+
+def test_a_shorter_answer_is_not_taken():
+    """The repair must not replace a line with the same loss written again."""
+    import json
+
+    from server.steps import translate
+
+    blocks = [{"start": 0.0, "end": 5.0, "words": 12, "text": "two things",
+               "parts": ["Satu kalimat.", "Dua kalimat."]}]
+    lines = [{"short": "a", "normal": "One sentence only.", "long": "c"}]
+
+    monkey = translate._chat
+    translate._chat = lambda system, user, api_key, model: json.dumps(
+        {"lines": {"0": {"short": "x", "normal": "Still one.", "long": "z"}}})
+    try:
+        out = translate._fill_dropped_parts(
+            lines, blocks, "English", "key", "m")
+    finally:
+        translate._chat = monkey
+    assert out[0]["normal"] == "One sentence only."
+
+
+def test_the_pieces_of_a_block_are_lettered_for_the_model():
+    """A block of three cues must not reach the model as one paragraph."""
+    from server.steps import translate
+
+    body = translate._block_body(2, {
+        "start": 3.6, "end": 11.08, "words": 22, "text": "joined up",
+        "parts": ["Pakai aplikasi ini.", "Klik tombol di bawah sekarang."],
+    })
+    assert "(a) Pakai aplikasi ini." in body
+    assert "(b) Klik tombol di bawah sekarang." in body
+    assert "2 things said" in body
+
+    # One cue is written the way it always was.
+    plain = translate._block_body(0, {
+        "start": 0.0, "end": 2.5, "words": 8, "text": "Butuh pinjaman?",
+        "parts": ["Butuh pinjaman?"],
+    })
+    assert plain.endswith("Butuh pinjaman?") and "(a)" not in plain
