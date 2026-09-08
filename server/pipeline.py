@@ -279,6 +279,7 @@ def _hook(params, seconds: float) -> dict | None:
         "font": params.hook_font,
         "size": params.hook_size,
         "colour": params.hook_colour,
+        "align": params.hook_align,
         "end": seconds,
     }
 

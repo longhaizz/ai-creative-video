@@ -52,6 +52,11 @@ HOOK_OUTLINE = "&H00000000"
 HOOK_OUTLINE_WIDTH = 3
 HOOK_COLOUR = "&H00FFFFFF"
 
+# Where the \pos point sits on the hook: 4 is the middle of its left edge,
+# 5 the centre, 6 the middle of the right edge. The x that goes with each
+# is the matching edge of the box, so the text grows away from that edge.
+HOOK_ALIGNMENTS = {"left": 4, "center": 5, "right": 6}
+
 
 def ass_colour(value: str | None, fallback: str = HOOK_COLOUR) -> str:
     """Turn #RRGGBB into the &HAABBGGRR that ASS wants."""
@@ -177,12 +182,13 @@ def _ass_style(
     outline: int,
     text_colour: str = TEXT_COLOUR,
     border_style: int = 3,
+    alignment: int = ALIGNMENT,
 ) -> str:
     """One style line. border_style 3 is a filled box, 1 is an outline."""
     return (
         f"Style: {name},{_clean_font(font)},{size},{text_colour},&H000000FF,"
         f"{fill},{fill},0,0,0,0,100,100,0,0,"
-        f"{border_style},{outline},{SHADOW},{ALIGNMENT},0,0,0,1"
+        f"{border_style},{outline},{SHADOW},{alignment},0,0,0,1"
     )
 
 
@@ -198,21 +204,29 @@ def _hook_style(hook: dict | None, height: int) -> str:
         HOOK_OUTLINE_WIDTH,
         text_colour=ass_colour(hook.get("colour")),
         border_style=1,
+        alignment=HOOK_ALIGNMENTS.get(hook.get("align"), ALIGNMENT),
     )
 
 
 def hook_dialogue(hook: dict, width: int, height: int) -> str | None:
-    """The hook line, centred in the box the client drew.
+    """The hook line, placed in the box the client drew.
 
     It wraps to the width of that box, not to the width of the frame, so
-    the new hook stays inside the area the old one was painted out of.
+    the new hook stays inside the area the old one was painted out of, and
+    it sits against the edge the client asked to line it up with.
     """
     size = resolve_font_size(hook.get("size"), height)
     box_width = max(1, int(width * (hook["right"] - hook["left"])))
     lines = wrap_text_lines(hook.get("text") or "", chars_per_line(box_width, size))
     if not lines:
         return None
-    x = int(round(width * (hook["left"] + hook["right"]) / 2))
+    # The x follows the alignment: text laid out from the left edge, from
+    # the centre, or back from the right edge of the box that was drawn.
+    share = {
+        "left": hook["left"],
+        "right": hook["right"],
+    }.get(hook.get("align"), (hook["left"] + hook["right"]) / 2)
+    x = int(round(width * share))
     y = int(round(height * (hook["top"] + hook["bottom"]) / 2))
     end = _ass_time(float(hook.get("end") or 0))
     return (

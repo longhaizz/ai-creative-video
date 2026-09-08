@@ -33,6 +33,9 @@ VsrMode = Literal["sttn-det", "sttn-auto", "lama", "propainter"]
 
 JobKind = Literal["dub", "clone"]
 
+# Which edge of the drawn box the hook lines up with.
+HookAlign = Literal["left", "center", "right"]
+
 
 class DubParams(BaseModel):
     """One dub job. Files are sent next to this, not inside it."""
@@ -113,6 +116,7 @@ class DubParams(BaseModel):
     # None means the subtitle rule: 56px on a 1920 tall frame, scaled.
     hook_size: int | None = Field(None, ge=8, le=200)
     hook_colour: str = Field("#FFFFFF", max_length=7)
+    hook_align: HookAlign = "center"
 
     @field_validator("hook_text", mode="before")
     @classmethod
