@@ -100,7 +100,28 @@ class DubParams(BaseModel):
     # a client never sends it.
     source_title: str = Field("", max_length=200)
 
+    # -- replace the hook --------------------------------------------------
+    # The headline the video came with is painted out of the box below, and
+    # this text is written in its place. Empty text means no hook work at
+    # all. The box is where the client drew it, as a share of the frame.
+    hook_text: str = Field("", max_length=200)
+    hook_top: float | None = Field(None, ge=0.0, le=1.0)
+    hook_bottom: float | None = Field(None, ge=0.0, le=1.0)
+    hook_left: float | None = Field(None, ge=0.0, le=1.0)
+    hook_right: float | None = Field(None, ge=0.0, le=1.0)
+    hook_font: str = Field("Noto Sans", max_length=64)
+    # None means the subtitle rule: 56px on a 1920 tall frame, scaled.
+    hook_size: int | None = Field(None, ge=8, le=200)
+    hook_colour: str = Field("#FFFFFF", max_length=7)
+
+    @field_validator("hook_text", mode="before")
+    @classmethod
+    def _strip_hook_text(cls, value):
+        return (value or "").strip()
+
     @field_validator("speakers", "subtitle_size", "subtitle_position",
+                     "hook_size", "hook_top", "hook_bottom", "hook_left",
+                     "hook_right",
                      mode="before")
     @classmethod
     def _blank_is_auto(cls, value):
@@ -117,6 +138,29 @@ class DubParams(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _a_hook_needs_a_box(self):
+        """Text and box come together, or neither comes at all.
+
+        Text without a box has nowhere to go, and a box without text would
+        pay for an inpainting pass that leaves a blank hole in the frame.
+        """
+        sides = (self.hook_top, self.hook_bottom, self.hook_left, self.hook_right)
+        drawn = [side for side in sides if side is not None]
+        if not self.hook_text and not drawn:
+            return self
+        if not self.hook_text:
+            raise ValueError("a hook box was sent without any hook text")
+        if len(drawn) != 4:
+            raise ValueError(
+                "hook_text needs hook_top, hook_bottom, hook_left and "
+                "hook_right to say where it goes")
+        if self.hook_top >= self.hook_bottom:
+            raise ValueError("hook_top must be smaller than hook_bottom")
+        if self.hook_left >= self.hook_right:
+            raise ValueError("hook_left must be smaller than hook_right")
+        return self
+
+    @model_validator(mode="after")
     def _no_dub_still_has_to_do_something(self):
         """Catch the two combinations that cannot mean anything.
 
@@ -129,10 +173,10 @@ class DubParams(BaseModel):
         if self.lipsync:
             raise ValueError(
                 "lipsync has no new voice to follow when dub is false")
-        if not (self.remove_subtitle or self.burn_subtitle):
+        if not (self.remove_subtitle or self.burn_subtitle or self.hook_text):
             raise ValueError(
-                "with dub false, ask for remove_subtitle or burn_subtitle, "
-                "otherwise there is nothing to do")
+                "with dub false, ask for remove_subtitle, burn_subtitle or "
+                "hook_text, otherwise there is nothing to do")
         return self
 
 

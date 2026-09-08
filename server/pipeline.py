@@ -95,6 +95,13 @@ def _dub(ctx: JobContext, models: Models) -> Path:
         )
     ctx.check_cancel()
 
+    # 1b. Take the old hook off too, in the box the client drew. Its own
+    # pass: the hook sits far from the subtitles, and one box around both
+    # would send the remover over the middle of the picture as well.
+    if params.hook_text:
+        video = _remove_hook(video, work, params, ctx)
+    ctx.check_cancel()
+
     video_seconds = audio.duration(video)
     width, height = audio.video_size(video)
     ctx.log(f"{video_seconds:.1f}s, {width}x{height}")
@@ -233,15 +240,18 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     ctx.log("Normalized the mix so the output is clearly audible")
     result = audio.mux_audio(picture, mixed, work / "result.mp4")
 
-    # 9. Burn the new subtitles on last, so they sit on the final picture.
-    if params.burn_subtitle:
+    # 9. Burn the new subtitles and the new hook on last, in one encode, so
+    # they sit on the final picture.
+    hook = _hook(params, video_seconds)
+    if params.burn_subtitle or hook is not None:
         ctx.step("Burning in the subtitles")
-        lines = _subtitle_cues(work, cues)
+        lines = _subtitle_cues(work, cues) if params.burn_subtitle else []
         result = subtitle.burn(
             result, lines, work / "result_subbed.mp4", width, height,
             font=params.subtitle_font,
             size=params.subtitle_size,
             position=_subtitle_position(params.subtitle_position, detected_position),
+            hook=hook,
             ctx=ctx,
         )
 
@@ -250,6 +260,44 @@ def _dub(ctx: JobContext, models: Models) -> Path:
 
 
 DEFAULT_SUBTITLE_POSITION = 0.75
+
+
+def _hook(params, seconds: float) -> dict | None:
+    """What subtitle.burn needs to draw the new hook, or None for no hook.
+
+    It runs from the first frame to the last, because the hook it replaces
+    was on screen the whole time.
+    """
+    if not params.hook_text:
+        return None
+    return {
+        "text": params.hook_text,
+        "top": params.hook_top,
+        "bottom": params.hook_bottom,
+        "left": params.hook_left,
+        "right": params.hook_right,
+        "font": params.hook_font,
+        "size": params.hook_size,
+        "colour": params.hook_colour,
+        "end": seconds,
+    }
+
+
+def _remove_hook(video: Path, work: Path, params, ctx) -> Path:
+    """Paint the old hook out of the box the client drew.
+
+    The same remover as the subtitles, pointed at another box. Finding no
+    text there is not a failure: it hands the video back untouched, and the
+    new hook is written over a frame that was already clean.
+    """
+    ctx.step("Removing the old hook")
+    cleaned, _ = vsr.remove_subtitles(
+        video, work / "no_hook.mp4", params.vsr_mode,
+        params.hook_top, params.hook_bottom,
+        params.hook_left, params.hook_right,
+        ctx=ctx,
+    )
+    return cleaned
 
 
 def _subtitle_position(asked: float | None, detected: float | None) -> float:
@@ -318,6 +366,11 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
         )
     ctx.check_cancel()
 
+    if params.hook_text:
+        video = _remove_hook(video, work, params, ctx)
+    ctx.check_cancel()
+
+    lines: list[dict] = []
     if params.burn_subtitle:
         if models.whisper is None:
             raise PipelineError(
@@ -325,7 +378,6 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
                 "Whisper model to read the speech with.",
                 code="invalid_input",
             )
-        width, height = audio.video_size(video)
         cues, _ = transcribe.transcribe(
             models.whisper,
             audio.extract_audio(video, work / "mix.wav"),
@@ -340,16 +392,21 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
             # expensive part and it already worked, so keep that and say why
             # the rest did not happen.
             ctx.log("Nobody speaks in this video, so there is nothing to burn")
-        else:
-            ctx.step("Burning in the subtitles")
-            video = subtitle.burn(
-                video, lines, work / "result_subbed.mp4", width, height,
-                font=params.subtitle_font,
-                size=params.subtitle_size,
-                position=_subtitle_position(
-                    params.subtitle_position, detected_position),
-                ctx=ctx,
-            )
+
+    # The length is only read when there is a hook to hold for it.
+    hook = _hook(params, audio.duration(video)) if params.hook_text else None
+    if lines or hook is not None:
+        ctx.step("Burning in the subtitles")
+        width, height = audio.video_size(video)
+        video = subtitle.burn(
+            video, lines, work / "result_subbed.mp4", width, height,
+            font=params.subtitle_font,
+            size=params.subtitle_size,
+            position=_subtitle_position(
+                params.subtitle_position, detected_position),
+            hook=hook,
+            ctx=ctx,
+        )
 
     ctx.step("Done")
     return video
