@@ -42,6 +42,7 @@ def params(**changes):
         subtitle_font="Noto Sans",
         subtitle_size=None,
         subtitle_position=None,
+        hook_text="",
     )
     base.update(changes)
     return SimpleNamespace(**base)

@@ -45,6 +45,25 @@ BOX_BORDER_WIDTH = 2
 SHADOW = 0
 ALIGNMENT = 5  # 5 means the \pos point is the middle of the text
 
+# The hook is drawn straight onto the picture: the old hook was painted out
+# first, so a box behind the new one would hide the clean frame we paid a
+# whole inpainting pass for. A black outline keeps it readable anyway.
+HOOK_OUTLINE = "&H00000000"
+HOOK_OUTLINE_WIDTH = 3
+HOOK_COLOUR = "&H00FFFFFF"
+
+
+def ass_colour(value: str | None, fallback: str = HOOK_COLOUR) -> str:
+    """Turn #RRGGBB into the &HAABBGGRR that ASS wants."""
+    text = (value or "").strip().lstrip("#")
+    if len(text) != 6:
+        return fallback
+    try:
+        red, green, blue = (int(text[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return fallback
+    return f"&H00{blue:02X}{green:02X}{red:02X}"
+
 
 def resolve_font_size(size: int | None, height: int) -> int:
     """None → scale from 56px at 1920 tall. A number is used as-is."""
@@ -144,11 +163,61 @@ def _ass_time(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{whole:02d}.{centis:02d}"
 
 
-def _ass_style(name: str, font: str, size: int, fill: str, outline: int) -> str:
+def _clean_font(font: str) -> str:
+    """A font name with a quote, colon or comma would break its ASS line."""
+    font = (font or "Arial").replace("'", "").replace(":", "").replace(",", " ").strip()
+    return font or "Arial"
+
+
+def _ass_style(
+    name: str,
+    font: str,
+    size: int,
+    fill: str,
+    outline: int,
+    text_colour: str = TEXT_COLOUR,
+    border_style: int = 3,
+) -> str:
+    """One style line. border_style 3 is a filled box, 1 is an outline."""
     return (
-        f"Style: {name},{font},{size},{TEXT_COLOUR},&H000000FF,"
+        f"Style: {name},{_clean_font(font)},{size},{text_colour},&H000000FF,"
         f"{fill},{fill},0,0,0,0,100,100,0,0,"
-        f"3,{outline},{SHADOW},{ALIGNMENT},0,0,0,1"
+        f"{border_style},{outline},{SHADOW},{ALIGNMENT},0,0,0,1"
+    )
+
+
+def _hook_style(hook: dict | None, height: int) -> str:
+    """The Hook style line, or nothing when this job has no hook."""
+    if hook is None:
+        return ""
+    return _ass_style(
+        "Hook",
+        hook.get("font") or "Noto Sans",
+        resolve_font_size(hook.get("size"), height),
+        HOOK_OUTLINE,
+        HOOK_OUTLINE_WIDTH,
+        text_colour=ass_colour(hook.get("colour")),
+        border_style=1,
+    )
+
+
+def hook_dialogue(hook: dict, width: int, height: int) -> str | None:
+    """The hook line, centred in the box the client drew.
+
+    It wraps to the width of that box, not to the width of the frame, so
+    the new hook stays inside the area the old one was painted out of.
+    """
+    size = resolve_font_size(hook.get("size"), height)
+    box_width = max(1, int(width * (hook["right"] - hook["left"])))
+    lines = wrap_text_lines(hook.get("text") or "", chars_per_line(box_width, size))
+    if not lines:
+        return None
+    x = int(round(width * (hook["left"] + hook["right"]) / 2))
+    y = int(round(height * (hook["top"] + hook["bottom"]) / 2))
+    end = _ass_time(float(hook.get("end") or 0))
+    return (
+        f"Dialogue: 2,{_ass_time(0)},{end},Hook,,0,0,0,,"
+        f"{{\\pos({x},{y})}}" + "\\N".join(lines)
     )
 
 
@@ -160,12 +229,15 @@ def write_ass(
     font: str,
     size: int,
     position: float,
+    hook: dict | None = None,
 ) -> Path:
-    """Write the subtitle file. `position` is a share of the frame height."""
-    # A font name with a quote, colon or comma would break the ASS line it
-    # sits on, so those characters go.
-    font = (font or "Arial").replace("'", "").replace(":", "").replace(",", " ").strip()
-    font = font or "Arial"
+    """Write the subtitle file. `position` is a share of the frame height.
+
+    `hook` is the one headline that sits over the box the client drew, in
+    its own font, size and colour. It shares the file so both are drawn in
+    the single encode the burn already does.
+    """
+    font = _clean_font(font)
     x = width // 2
     y = int(round(height * position))
     border = BOX_PADDING + BOX_BORDER_WIDTH
@@ -183,13 +255,18 @@ def write_ass(
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"{_ass_style('Box', font, size, BOX_BORDER, border)}\n"
-        f"{_ass_style('Default', font, size, BOX_FILL, BOX_PADDING)}\n\n"
+        f"{_ass_style('Default', font, size, BOX_FILL, BOX_PADDING)}\n"
+        f"{_hook_style(hook, height)}\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
         "Effect, Text\n"
     )
 
     body = []
+    if hook is not None:
+        line = hook_dialogue(hook, width, height)
+        if line:
+            body.append(line)
     for cue in cues:
         text = (cue.get("text") or "").strip().replace("\n", "\\N")
         if not text:
@@ -247,14 +324,15 @@ def burn(
     font: str = "Noto Sans",
     size: int | None = None,
     position: float = 0.75,
+    hook: dict | None = None,
     ctx=None,
 ) -> Path:
-    """Draw the cues onto the video for good. Returns out_path."""
+    """Draw the cues and the hook onto the video for good. Returns out_path."""
     video = Path(video)
     out_path = Path(out_path)
     size = resolve_font_size(size, height)
     cues = normalize_cues(cues, max_chars=chars_per_line(width, size))
-    if not cues:
+    if not cues and hook is None:
         raise PipelineError("There is no text to burn", code="invalid_input")
 
     if ctx is not None:
@@ -262,10 +340,13 @@ def burn(
             f"Burning {len(cues)} subtitles [{font} {size}px at "
             f"{position:.0%} of {width}x{height}]"
         )
+        if hook is not None:
+            ctx.log(f"Hook: {hook.get('text', '')[:60]}")
 
     with tempfile.TemporaryDirectory() as work:
         ass = write_ass(
-            cues, Path(work) / "burn.ass", width, height, font, size, position
+            cues, Path(work) / "burn.ass", width, height, font, size, position,
+            hook=hook,
         )
         result = _burn_once([
             config.FFMPEG_BIN, "-y", "-loglevel", "error",

@@ -8,6 +8,7 @@ in pixels somewhere.
 
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -17,10 +18,13 @@ from server.pipeline import _subtitle_position
 from server.schemas import DubParams
 from server.steps.subtitle import (
     AUTO_SIZE,
+    HOOK_COLOUR,
     MAX_CHARS_PER_LINE,
     MAX_LINES_PER_CUE,
     _ass_time,
+    ass_colour,
     burn,
+    hook_dialogue,
     chars_per_line,
     normalize_cues,
     resolve_font_size,
@@ -314,3 +318,121 @@ def test_a_stalled_burn_gives_up(monkeypatch):
     with pytest.raises(PipelineError) as error:
         subtitle._burn_once([sys.executable, "-c", "import time; time.sleep(30)"])
     assert "was stopped" in str(error.value)
+
+
+# -- the hook ---------------------------------------------------------------
+
+
+def _hook(**over):
+    hook = {
+        "text": "Mua ngay hom nay", "top": 0.05, "bottom": 0.20,
+        "left": 0.10, "right": 0.90, "font": "Noto Sans", "size": 60,
+        "colour": "#FF0000", "end": 12.0,
+    }
+    hook.update(over)
+    return hook
+
+
+def test_a_colour_becomes_the_ass_bgr_form():
+    assert ass_colour("#FF0000") == "&H000000FF"
+    assert ass_colour("#112233") == "&H00332211"
+
+
+def test_a_broken_colour_falls_back_to_white():
+    assert ass_colour("red") == HOOK_COLOUR
+    assert ass_colour(None) == HOOK_COLOUR
+    assert ass_colour("#12345") == HOOK_COLOUR
+
+
+def test_the_hook_sits_in_the_middle_of_the_box():
+    line = hook_dialogue(_hook(), 1080, 1920)
+    # x from (0.10 + 0.90) / 2, y from (0.05 + 0.20) / 2.
+    assert "\\pos(540,240)" in line
+
+
+def test_the_hook_runs_to_the_end_of_the_video():
+    line = hook_dialogue(_hook(end=12.0), 1080, 1920)
+    assert line.startswith("Dialogue: 2,0:00:00.00,0:00:12.00,Hook,")
+
+
+def test_the_hook_wraps_to_the_box_not_the_frame():
+    """A narrow box has to break the line sooner than a wide one."""
+    wide = hook_dialogue(_hook(text="mot hai ba bon nam sau bay tam"), 1080, 1920)
+    narrow = hook_dialogue(
+        _hook(text="mot hai ba bon nam sau bay tam", left=0.1, right=0.3),
+        1080, 1920)
+    assert narrow.count("\\N") > wide.count("\\N")
+
+
+def test_an_empty_hook_writes_no_line():
+    assert hook_dialogue(_hook(text="  "), 1080, 1920) is None
+
+
+def test_the_hook_style_is_an_outline_not_a_box(tmp_path):
+    ass = write_ass([], tmp_path / "a.ass", 1080, 1920, "Noto Sans", 40, 0.75,
+                    hook=_hook())
+    style = next(
+        line for line in ass.read_text(encoding="utf-8").splitlines()
+        if line.startswith("Style: Hook,")
+    )
+    fields = style.split(",")
+    assert fields[3] == "&H000000FF"  # PrimaryColour: the red that was asked
+    assert fields[15] == "1"  # BorderStyle 1 draws an outline, 3 draws a box
+
+
+def test_a_video_with_only_a_hook_still_burns(tmp_path, monkeypatch):
+    """No spoken line does not mean nothing to draw."""
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        Path(command[-1]).write_bytes(b"video")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    out = burn(tmp_path / "in.mp4", [], tmp_path / "out.mp4", 1080, 1920,
+               hook=_hook())
+    assert out.is_file()
+
+
+def test_burning_nothing_at_all_is_still_refused(tmp_path):
+    with pytest.raises(Exception):
+        burn(tmp_path / "in.mp4", [], tmp_path / "out.mp4", 1080, 1920)
+
+
+@needs_ffmpeg
+def test_a_real_burn_takes_the_hook_style(tmp_path):
+    """libass has to accept the Hook style line, not just our own parser."""
+    source = tmp_path / "in.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=25:duration=2",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)],
+        check=True, capture_output=True,
+    )
+    out = burn(source, [], tmp_path / "out.mp4", width=1280, height=720,
+               hook=_hook(end=2.0))
+    assert out.stat().st_size > 0
+
+
+def test_schema_refuses_a_hook_without_a_box():
+    with pytest.raises(ValidationError):
+        DubParams(hook_text="Mua ngay")
+
+
+def test_schema_refuses_a_box_the_wrong_way_round():
+    with pytest.raises(ValidationError):
+        DubParams(hook_text="Mua ngay", hook_top=0.4, hook_bottom=0.2,
+                  hook_left=0.1, hook_right=0.9)
+
+
+def test_schema_takes_a_hook_with_its_box():
+    params = DubParams(hook_text="Mua ngay", hook_top=0.05, hook_bottom=0.2,
+                       hook_left=0.1, hook_right=0.9)
+    assert params.hook_colour == "#FFFFFF"
+
+
+def test_a_hook_alone_is_enough_work_without_dub():
+    params = DubParams(dub=False, hook_text="Mua ngay", hook_top=0.05,
+                       hook_bottom=0.2, hook_left=0.1, hook_right=0.9)
+    assert params.hook_text == "Mua ngay"
