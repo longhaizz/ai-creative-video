@@ -462,6 +462,13 @@ def timed_speech(
                 "start": block["start"],
                 "end": block["end"],
                 "text": block["text"],
+                # What the speaker said, still in the pieces Whisper heard
+                # them in. A block is often more than one sentence, and a
+                # translator handed one lump of text drops the last of them
+                # without noticing.
+                "parts": [(cue.get("text") or "").strip()
+                          for cue in block["cues"]
+                          if (cue.get("text") or "").strip()],
                 # The room is the speech itself, not the pause after it.
                 "words": model.words_for(
                     block["end"] - block["start"], lang_code),

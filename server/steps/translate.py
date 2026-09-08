@@ -258,6 +258,11 @@ def _blocks_system_prompt(*, n: int, lang_name: str, expected_code: str,
         f"HARD RULE: return exactly {n} entries, one per block, in order. "
         f"Entry i is spoken while block i plays. Never merge two blocks into "
         f"one entry, never move an entry to another index, never drop one. "
+        f"A block written as (a) (b) (c) is more than one thing said in one "
+        f"breath, and your line for it must say all of them. Dropping "
+        f"(b) is not shortening, it is losing what the speaker came to "
+        f"say — the last piece of a block is often the one that asks "
+        f"for the click. "
         f"EVERY block was built from real speech, so EVERY block must have "
         f"words. An empty string is never a valid answer: when the ASR of a "
         f"block is unclear, write what the speaker must have been saying "
@@ -281,6 +286,31 @@ def _blocks_system_prompt(*, n: int, lang_name: str, expected_code: str,
     )
 
 
+def _block_body(index: int, block) -> str:
+    """One block for the prompt, with its sentences still apart.
+
+    A block that came from three cues is written as (a) (b) (c). Handed the
+    three as one paragraph, the model writes a line for the first and drops
+    the rest — that is how "Klik tombol di bawah sekarang", the only line in
+    an ad that asks for the click, went missing.
+    """
+    head = (f"[{index}] {float(block['start']):.2f}-{float(block['end']):.2f} "
+            f"({float(block['end']) - float(block['start']):.1f}s, "
+            f"~{int(block['words'])} words)")
+    parts = _parts_of(block)
+    if len(parts) < 2:
+        return f"{head}\n{(block.get('text') or '').strip()}"
+    lettered = "\n".join(
+        f"  ({chr(ord('a') + i)}) {part}" for i, part in enumerate(parts))
+    return (f"{head}  <- {len(parts)} things said, all of them must be in "
+            f"your line\n{lettered}")
+
+
+def _parts_of(block) -> list:
+    """The pieces of speech a block was built from, if the caller kept them."""
+    return [str(p).strip() for p in (block.get("parts") or []) if str(p).strip()]
+
+
 def translate_blocks(blocks, target_lang: str, api_key: str,
                      asr_meta=None, model: str = DEFAULT_MODEL) -> dict:
     """Translate whole blocks, three lengths each, one line per block.
@@ -299,12 +329,7 @@ def translate_blocks(blocks, target_lang: str, api_key: str,
         target_lang, asr_meta)
     n = len(blocks)
 
-    body = "\n\n".join(
-        f"[{i}] {float(b['start']):.2f}-{float(b['end']):.2f} "
-        f"({float(b['end']) - float(b['start']):.1f}s, ~{int(b['words'])} words)\n"
-        f"{(b.get('text') or '').strip()}"
-        for i, b in enumerate(blocks)
-    )
+    body = "\n\n".join(_block_body(i, b) for i, b in enumerate(blocks))
     if same_mode:
         task = (
             "Lightly repair the ASR errors and keep the original wording "
@@ -326,6 +351,7 @@ def translate_blocks(blocks, target_lang: str, api_key: str,
     data = _extract_json(raw)
     lines = _block_variants(data, n, body, blocks, lang_name,
                             task, api_key, model)
+    lines = _fill_dropped_parts(lines, blocks, lang_name, api_key, model)
     lines = _repair_block_languages(
         lines, expected_code, lang_name, api_key, model)
 
@@ -485,6 +511,81 @@ def _entries_or_none(raw, n: int) -> list | None:
         return None
     entries = [_one_entry(item) for item in raw]
     return None if any(entry is None for entry in entries) else entries
+
+
+# What ends a sentence in the languages we write out. Every target language
+# here punctuates, whatever the source did — Whisper leaves Chinese unpunctuated,
+# but the English or Vietnamese written from it always has full stops.
+_SENTENCE_MARK = re.compile(r"[.!?…。！？]+")
+
+
+def _sentence_count(text: str) -> int:
+    """How many sentences a line says. A line with no full stop still says one."""
+    body = (text or "").strip()
+    if not body:
+        return 0
+    return max(len([p for p in _SENTENCE_MARK.split(body) if p.strip()]), 1)
+
+
+def _fill_dropped_parts(lines, blocks, lang_name: str, api_key: str,
+                        model: str) -> list:
+    """Ask again for the blocks whose line looks like it lost a sentence.
+
+    Being told to keep every piece is not the same as keeping it. A block
+    built from two cues whose line is one sentence has probably dropped one
+    of them, and the one dropped is the last — in an ad that is the line
+    asking for the click, which is the whole point of the video.
+
+    Counting sentences is a suspicion, not proof: two cues can be one
+    sentence Whisper cut in half, and then the line is right as it is. So
+    this asks rather than insists, and keeps what comes back only when it
+    says more than what it replaces. One call for every suspect block in
+    the job, not one each.
+    """
+    suspect = [
+        i for i, block in enumerate(blocks)
+        if i < len(lines) and len(_parts_of(block)) >= 2
+        and _sentence_count(lines[i].get("normal")) < len(_parts_of(block))
+    ]
+    if not suspect or not api_key:
+        return lines
+
+    asked = {
+        str(i): {"said": _parts_of(blocks[i]), "your_line": lines[i]["normal"]}
+        for i in suspect
+    }
+    out = _chat(
+        (
+            f"Each entry is one block of an ad: \"said\" is every separate "
+            f"thing the speaker said in it, and \"your_line\" is the "
+            f"{lang_name} line you wrote for the whole block. Check each one: "
+            f"if your line leaves out anything from \"said\", write it again "
+            f"so that nothing is missing, keeping it natural and about as "
+            f"long as the speech it replaces. If your line already says "
+            f"everything, return it unchanged. Answer in {lang_name} only. "
+            f"Return ONLY JSON: {{\"lines\": {{\"<index>\": {{\"short\": ..., "
+            f"\"normal\": ..., \"long\": ...}}}}}}, with the same indexes you "
+            f"were given."
+        ),
+        json.dumps(asked, ensure_ascii=False),
+        api_key, model,
+    )
+    fixed = _extract_json(out).get("lines") or {}
+    repaired = [dict(entry) for entry in lines]
+    for tag, value in fixed.items():
+        try:
+            index = int(str(tag))
+        except (TypeError, ValueError):
+            continue
+        if index not in suspect:
+            continue
+        entry = _one_entry(value)
+        # A shorter answer is the same loss written twice. Only a line that
+        # says more than the one it replaces is worth taking.
+        if entry and _sentence_count(entry["normal"]) > _sentence_count(
+                repaired[index]["normal"]):
+            repaired[index] = entry
+    return repaired
 
 
 def _repair_block_languages(lines, expected_code: str, lang_name: str,
