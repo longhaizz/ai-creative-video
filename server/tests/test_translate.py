@@ -11,7 +11,7 @@ def test_the_rewrite_prompt_carries_the_misses(monkeypatch):
 
     seen = {}
 
-    def fake_chat(system, user, api_key, model):
+    def fake_chat(system, user, api_key, model, json_mode=False, **_):
         seen["system"], seen["user"] = system, user
         return "câu mới."
 
@@ -32,7 +32,7 @@ def test_a_rate_limit_is_tried_again(monkeypatch):
 
     calls = []
 
-    def fake_once(system, user, api_key, model):
+    def fake_once(system, user, api_key, model, json_mode=False, **_):
         calls.append(1)
         if len(calls) < 3:
             raise translate.OpenAIError("OpenAI HTTP 429: slow down")
@@ -50,7 +50,7 @@ def test_a_bad_request_is_raised_at_once(monkeypatch):
 
     calls = []
 
-    def fake_once(system, user, api_key, model):
+    def fake_once(system, user, api_key, model, json_mode=False, **_):
         calls.append(1)
         raise translate.OpenAIError("OpenAI HTTP 400: bad model")
 
@@ -73,7 +73,7 @@ def test_a_short_answer_is_written_block_by_block(monkeypatch):
 
     calls = []
 
-    def fake_chat(system, user, api_key, model):
+    def fake_chat(system, user, api_key, model, json_mode=False, **_):
         calls.append(system)
         if "ONE spoken dubbing line" in system:
             index = user.rsplit("[", 1)[1].split("]")[0]
@@ -125,7 +125,7 @@ def test_a_block_that_lost_its_call_to_action_is_asked_again():
               "normal": "Use this app to calculate your loan interest."}]
     seen = []
 
-    def fake_chat(system, user, api_key, model):
+    def fake_chat(system, user, api_key, model, json_mode=False, **_):
         seen.append(json.loads(user))
         return json.dumps({"lines": {"0": {
             "short": "Use this app. Tap below.",
@@ -177,7 +177,7 @@ def test_a_shorter_answer_is_not_taken():
     lines = [{"short": "a", "normal": "One sentence only.", "long": "c"}]
 
     monkey = translate._chat
-    translate._chat = lambda system, user, api_key, model: json.dumps(
+    translate._chat = lambda system, user, api_key, model, json_mode=False: json.dumps(
         {"lines": {"0": {"short": "x", "normal": "Still one.", "long": "z"}}})
     try:
         out = translate._fill_dropped_parts(
@@ -224,3 +224,87 @@ def test_words_after_the_json_do_not_kill_the_job():
     with pytest.raises(translate.OpenAIError) as bad:
         translate._extract_json('{"lines": [oops')
     assert "oops" in str(bad.value)
+
+
+# -- the shape the model must answer in -------------------------------------
+
+
+def test_the_schema_names_every_block_so_none_can_be_merged():
+    """The count is enforced by the API, not asked for in the prompt.
+
+    Strict mode ignores minItems, so a list of blocks has no length the
+    schema can pin down. One required key per block does pin it down.
+    """
+    from server.steps.translate import _blocks_schema
+
+    schema = _blocks_schema(7)["schema"]
+    blocks = schema["properties"]["blocks"]
+    assert blocks["required"] == [str(i) for i in range(7)]
+    assert blocks["additionalProperties"] is False
+    assert sorted(blocks["properties"]["3"]["required"]) == [
+        "long", "normal", "short"]
+
+
+def test_the_schema_follows_the_strict_rules():
+    """Strict mode refuses an object whose keys are not all required, or
+    that allows extra ones. A 400 here would kill the job."""
+    from server.steps.translate import _blocks_schema
+
+    def check(node):
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "object":
+            assert node.get("additionalProperties") is False
+            assert sorted(node["required"]) == sorted(node["properties"])
+        for child in node.get("properties", {}).values():
+            check(child)
+
+    schema = _blocks_schema(3)
+    assert schema["strict"] is True
+    check(schema["schema"])
+
+
+def test_a_numbered_answer_lands_on_the_right_block():
+    from server.steps.translate import _entries_from_blocks
+
+    data = {"blocks": {
+        "0": {"short": "a", "normal": "aa", "long": "aaa"},
+        "1": {"short": "b", "normal": "bb", "long": "bbb"},
+    }}
+    assert [e["normal"] for e in _entries_from_blocks(data, 2)] == ["aa", "bb"]
+
+
+def test_a_missing_number_is_not_quietly_shifted():
+    """Block 1 absent must not slide block 2 into its place."""
+    from server.steps.translate import _entries_from_blocks
+
+    data = {"blocks": {
+        "0": {"short": "a", "normal": "aa", "long": "aaa"},
+        "2": {"short": "c", "normal": "cc", "long": "ccc"},
+    }}
+    assert _entries_from_blocks(data, 3) is None
+
+
+def test_the_old_array_answer_is_still_read():
+    """A gateway that refuses json_schema falls back to plain JSON."""
+    from server.steps.translate import _block_variants
+
+    data = {"lines": [{"short": "a", "normal": "aa", "long": "aaa"}]}
+    assert _block_variants(data, 1, "", [{}], "Vietnamese", "task",
+                           "key", "model")[0]["normal"] == "aa"
+
+
+def test_the_fallbacks_say_what_happened(monkeypatch):
+    """The count going wrong used to be silent: the only clue in the log
+    was the step taking twice as long."""
+    from server.steps import translate
+
+    said = []
+    monkeypatch.setattr(
+        translate, "_chat",
+        lambda *a, **k: '{"lines": [{"short": "x", "normal": "y", "long": "z"}]}')
+    translate._block_variants({"lines": []}, 1, "", [{}], "Vietnamese",
+                              "task", "key", "model", said.append)
+
+    assert any("0 entries" in line and "1 are needed" in line for line in said), said
+    assert any("right count" in line for line in said), said

@@ -191,7 +191,7 @@ def run_blocks(monkeypatch, tmp_path, cues, lines, lengths, scenes=(),
     entries = variants(lines)
     monkeypatch.setattr(
         synth, "translate_blocks",
-        lambda blocks, lang, key, asr_meta=None: {
+        lambda blocks, lang, key, asr_meta=None, **_: {
             "lines": entries,
             "master_meaning": "meaning",
             "master_translation": " ".join(e["normal"] for e in entries),
@@ -440,7 +440,7 @@ def test_a_stumbling_take_loses_to_a_fluent_one(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         synth, "translate_blocks",
-        lambda blocks, lang, key, asr_meta=None: {
+        lambda blocks, lang, key, asr_meta=None, **_: {
             "lines": variants(["câu một ở đây."]),
             "master_meaning": "m",
             "master_translation": "câu một ở đây.",
@@ -514,7 +514,7 @@ def test_silence_is_counted_only_while_the_speaker_talks(monkeypatch, tmp_path):
     entries = variants(["câu một ở đây."])
     monkeypatch.setattr(
         synth, "translate_blocks",
-        lambda blocks, lang, key, asr_meta=None: {
+        lambda blocks, lang, key, asr_meta=None, **_: {
             "lines": entries, "master_meaning": "m",
             "master_translation": "m", "output_lang_code": "vi",
             "output_lang_name": "Vietnamese",
@@ -537,7 +537,7 @@ def test_a_block_left_half_silent_is_reported(monkeypatch, tmp_path):
     entries = variants(["ngắn."])
     monkeypatch.setattr(
         synth, "translate_blocks",
-        lambda blocks, lang, key, asr_meta=None: {
+        lambda blocks, lang, key, asr_meta=None, **_: {
             "lines": entries, "master_meaning": "m",
             "master_translation": "m", "output_lang_code": "vi",
             "output_lang_name": "Vietnamese",

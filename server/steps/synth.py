@@ -476,6 +476,7 @@ def timed_speech(
             for block in blocks
         ],
         target_lang, openai_key, asr_meta=meta or {},
+        log=(ctx.log if ctx is not None else None),
     )
     lines = list(script["lines"])
     lang_code = script.get("output_lang_code") or lang_code

@@ -77,7 +77,8 @@ def word_count(text: str) -> int:
     return len((text or "").split())
 
 
-def _chat(system: str, user: str, api_key: str, model: str) -> str:
+def _chat(system: str, user: str, api_key: str, model: str,
+          json_mode: bool = False, schema: dict | None = None) -> str:
     """Ask the model once, and try again when the failure is a passing one.
 
     A dub calls this many times per job, so a single 429 or a dropped
@@ -89,7 +90,12 @@ def _chat(system: str, user: str, api_key: str, model: str) -> str:
     last: OpenAIError | None = None
     for attempt in range(RETRIES):
         try:
-            return _chat_once(system, user, api_key, model)
+            text = _chat_once(system, user, api_key, model, json_mode, schema=schema)
+            if json_mode:
+                # Parse it here, so a broken answer is asked again instead
+                # of killing a job that is minutes from done.
+                _extract_json(text)
+            return text
         except OpenAIError as error:
             if not _worth_retrying(error):
                 raise
@@ -102,14 +108,62 @@ def _chat(system: str, user: str, api_key: str, model: str) -> str:
     raise last
 
 
+def _response_format(json_mode: bool, schema: dict | None) -> dict:
+    """What to send as response_format: nothing, JSON, or a fixed shape."""
+    if schema is not None:
+        return {"response_format": {"type": "json_schema", "json_schema": schema}}
+    if json_mode:
+        return {"response_format": {"type": "json_object"}}
+    return {}
+
+
+def _blocks_schema(n: int) -> dict:
+    """A shape the model cannot return the wrong number of blocks in.
+
+    Written as an object with one required key per block, not as an array:
+    strict mode ignores minItems and maxItems, so a list is the one thing
+    whose length cannot be pinned down. A numbered key also says which
+    block a line belongs to, so a merged or reordered answer is impossible
+    rather than merely forbidden in the prompt -- which is what kept
+    happening, and what sent three blocks to the voice still in Hindi.
+    """
+    entry = {
+        "type": "object",
+        "properties": {name: {"type": "string"} for name in VARIANTS},
+        "required": list(VARIANTS),
+        "additionalProperties": False,
+    }
+    keys = [str(i) for i in range(n)]
+    return {
+        "name": "dub_blocks",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "master_translation": {"type": "string"},
+                "master_meaning": {"type": "string"},
+                "blocks": {
+                    "type": "object",
+                    "properties": {key: entry for key in keys},
+                    "required": keys,
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["master_translation", "master_meaning", "blocks"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def _worth_retrying(error: OpenAIError) -> bool:
     text = str(error)
-    return "OpenAI HTTP 429" in text or any(
+    return "OpenAI HTTP 429" in text or "JSON" in text or any(
         f"OpenAI HTTP {code}" in text for code in (500, 502, 503, 504)
     )
 
 
-def _chat_once(system: str, user: str, api_key: str, model: str) -> str:
+def _chat_once(system: str, user: str, api_key: str, model: str,
+               json_mode: bool = False, schema: dict | None = None) -> str:
     key = (api_key or "").strip()
     if not key:
         raise OpenAIError("Chưa có OpenAI API key")
@@ -126,6 +180,7 @@ def _chat_once(system: str, user: str, api_key: str, model: str) -> str:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            **_response_format(json_mode, schema),
         },
         timeout=120,
     )
@@ -292,8 +347,11 @@ def _blocks_system_prompt(*, n: int, lang_name: str, expected_code: str,
         f"Everything must be in {lang_name} only, never mixed. "
         f"Return ONLY valid JSON (no markdown) with keys: master_meaning "
         f"(one sentence, in English), master_translation (the full spoken "
-        f"script in {lang_name}, using the \"normal\" lines), lines (array "
-        f"of exactly {n} objects with keys short, normal, long)."
+        f"script in {lang_name}, using the \"normal\" lines), blocks (an "
+        f"object whose keys are the block numbers \"0\" to \"{n - 1}\", "
+        f"each holding short, normal and long). The key is the block "
+        f"number, so a line put under the wrong key is a line spoken over "
+        f"the wrong picture."
     )
 
 
@@ -323,7 +381,8 @@ def _parts_of(block) -> list:
 
 
 def translate_blocks(blocks, target_lang: str, api_key: str,
-                     asr_meta=None, model: str = DEFAULT_MODEL) -> dict:
+                     asr_meta=None, model: str = DEFAULT_MODEL,
+                     log=None) -> dict:
     """Translate whole blocks, three lengths each, one line per block.
 
     Blocks are built from word timestamps by the caller, so the mapping
@@ -335,6 +394,7 @@ def translate_blocks(blocks, target_lang: str, api_key: str,
     blocks = list(blocks or [])
     if not blocks:
         raise OpenAIError("Khong co block nao de dich")
+    log = log or (lambda _message: None)
     asr_meta = asr_meta or {}
     expected_code, lang_name, same_mode = _resolve_output_lang(
         target_lang, asr_meta)
@@ -350,18 +410,26 @@ def translate_blocks(blocks, target_lang: str, api_key: str,
     else:
         task = f"Write a natural spoken translation into {lang_name}."
 
-    raw = _chat(
-        _blocks_system_prompt(
-            n=n, lang_name=lang_name, expected_code=expected_code,
-            lang_det=asr_meta.get("language") or "unknown",
-            lang_p=float(asr_meta.get("language_probability") or 0.0),
-            task=task, title=str(asr_meta.get("source_title") or "").strip(),
-        ),
-        body, api_key, model,
+    system = _blocks_system_prompt(
+        n=n, lang_name=lang_name, expected_code=expected_code,
+        lang_det=asr_meta.get("language") or "unknown",
+        lang_p=float(asr_meta.get("language_probability") or 0.0),
+        task=task, title=str(asr_meta.get("source_title") or "").strip(),
     )
+    try:
+        raw = _chat(system, body, api_key, model, json_mode=True,
+                    schema=_blocks_schema(n))
+    except OpenAIError as error:
+        # A model or a gateway that does not know json_schema answers 400.
+        # Asking again for plain JSON is the old road, and the two repair
+        # steps below still stand behind it.
+        if "HTTP 400" not in str(error):
+            raise
+        log(f"Structured output refused ({error}); asking for plain JSON")
+        raw = _chat(system, body, api_key, model, json_mode=True)
     data = _extract_json(raw)
     lines = _block_variants(data, n, body, blocks, lang_name,
-                            task, api_key, model)
+                            task, api_key, model, log)
     lines = _fill_dropped_parts(lines, blocks, lang_name, api_key, model)
     lines = _repair_block_languages(
         lines, expected_code, lang_name, api_key, model)
@@ -443,9 +511,22 @@ def _one_entry(item) -> dict | None:
     return out
 
 
+def _entries_from_blocks(data: dict, n: int) -> list | None:
+    """Read the numbered object the schema asks for: {"0": {...}, "1": ...}.
+
+    A number for a key is the point of the shape: a line cannot end up
+    against the wrong block by being in the wrong place in a list.
+    """
+    found = data.get("blocks")
+    if not isinstance(found, dict):
+        return None
+    entries = [_one_entry(found.get(str(i))) for i in range(n)]
+    return None if any(entry is None for entry in entries) else entries
+
+
 def _block_variants(data: dict, n: int, body: str, blocks: list,
                     lang_name: str, task: str, api_key: str,
-                    model: str) -> list:
+                    model: str, log=None) -> list:
     """Exactly n entries of three lengths, or a repair, or block by block.
 
     There is no guessing here on purpose. The old code padded a short list
@@ -458,12 +539,17 @@ def _block_variants(data: dict, n: int, body: str, blocks: list,
     model can get wrong. It costs n small calls, which is cheap next to
     losing a job that has already spent ten minutes on the GPU.
     """
+    log = log or (lambda _message: None)
+    entries = _entries_from_blocks(data, n)
+    if entries is not None:
+        return entries
     entries = _entries_or_none(data.get("lines"), n)
     if entries is not None:
         return entries
 
     given = data.get("lines")
     got = len(given) if isinstance(given, list) else type(given).__name__
+    log(f"The translator returned {got} entries, {n} are needed: asking again")
     out = _chat(
         (
             f"You returned {got} usable entries; exactly {n} are needed, one "
@@ -475,12 +561,16 @@ def _block_variants(data: dict, n: int, body: str, blocks: list,
             f"short, normal, long]}}."
         ),
         body + "\n\nYour lines:\n" + json.dumps(given, ensure_ascii=False),
-        api_key, model,
+        api_key, model, json_mode=True,
     )
-    entries = _entries_or_none(_extract_json(out).get("lines"), n)
+    repaired = _extract_json(out)
+    entries = (_entries_from_blocks(repaired, n)
+               or _entries_or_none(repaired.get("lines"), n))
     if entries is not None:
+        log("The second answer had the right count")
         return entries
 
+    log(f"Still the wrong count: writing all {n} blocks one at a time")
     entries = [_one_block(i, blocks[i], body, lang_name, task, api_key, model)
                for i in range(n)]
     missing = [i for i, entry in enumerate(entries) if entry is None]
@@ -509,7 +599,7 @@ def _one_block(index: int, block, body: str, lang_name: str, task: str,
     )
     try:
         out = _chat(system, f"{body}\n\nWrite block [{index}] only.",
-                    api_key, model)
+                    api_key, model, json_mode=True)
         return _one_entry(_extract_json(out))
     except OpenAIError:
         # One block that will not come out must not hide the others: the
@@ -579,7 +669,7 @@ def _fill_dropped_parts(lines, blocks, lang_name: str, api_key: str,
             f"were given."
         ),
         json.dumps(asked, ensure_ascii=False),
-        api_key, model,
+        api_key, model, json_mode=True,
     )
     fixed = _extract_json(out).get("lines") or {}
     repaired = [dict(entry) for entry in lines]
@@ -613,7 +703,7 @@ def _repair_block_languages(lines, expected_code: str, lang_name: str,
         ),
         json.dumps({f"{i}.{key}": lines[i][key] for i, key in wrong},
                    ensure_ascii=False),
-        api_key, model,
+        api_key, model, json_mode=True,
     )
     fixed = _extract_json(out).get("lines") or {}
     repaired = [dict(entry) for entry in lines]
@@ -649,7 +739,7 @@ def _selfcheck():
     """The block path, with the network replaced by canned answers."""
     replies = []
 
-    def fake_chat(system, user, api_key, model):
+    def fake_chat(system, user, api_key, model, json_mode=False):
         return replies.pop(0)
 
     global _chat
@@ -694,6 +784,8 @@ def _selfcheck():
         # A block left empty is a failure, not something to paper over.
         replies.append(json.dumps({"lines": [entry("dòng một ở đây"), ""]}))
         replies.append(json.dumps({"lines": [entry("dòng một ở đây"), ""]}))
+        # Then each block is written on its own, and both come back empty.
+        replies += [json.dumps({"short": "", "normal": "", "long": ""})] * 2
         try:
             translate_blocks(blocks, "vi", "key")
         except OpenAIError:
