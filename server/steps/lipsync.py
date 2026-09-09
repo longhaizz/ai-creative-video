@@ -11,6 +11,7 @@ must keep running on a laptop with no GPU and no model files.
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -54,6 +55,38 @@ def _inside(repo_dir: Path):
         yield
     finally:
         os.chdir(old)
+
+
+class _Tee(io.TextIOBase):
+    """Pass stderr through to the console, and keep a copy for the caller.
+
+    The pipeline prints where its time went on stderr. Redirecting that
+    stream would hide the progress bars for the whole shot, so the writes
+    are copied instead of moved.
+    """
+
+    def __init__(self, real):
+        self.real = real
+        self.parts: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.parts.append(text)
+        return self.real.write(text)
+
+    def flush(self) -> None:
+        self.real.flush()
+
+    def value(self) -> str:
+        return "".join(self.parts)
+
+
+def _log_timing(text: str, ctx) -> None:
+    """Put the pipeline's own timing line into the job log."""
+    if ctx is None:
+        return
+    for line in text.splitlines():
+        if line.startswith("[lipsync]"):
+            ctx.log(line)
 
 
 class LipsyncModel:
@@ -101,6 +134,7 @@ class LipsyncModel:
         steps: int,
         guidance: float,
         seed: int = 1247,
+        ctx=None,
     ) -> Path:
         """Lip-sync one video. The paths must be absolute."""
         if self._pipeline is None:
@@ -110,8 +144,9 @@ class LipsyncModel:
 
         set_seed(seed)
         config = self._config
+        tee = _Tee(sys.stderr)
         try:
-            with _inside(self.repo_dir):
+            with _inside(self.repo_dir), contextlib.redirect_stderr(tee):
                 self._pipeline(
                     video_path=str(video),
                     audio_path=str(audio),
@@ -135,6 +170,8 @@ class LipsyncModel:
                     "talking head, and a face in every frame."
                 ) from error
             raise
+        finally:
+            _log_timing(tee.value(), ctx)
 
         if not out_path.is_file() or out_path.stat().st_size == 0:
             raise PipelineError("Lip sync produced no video")
@@ -164,7 +201,8 @@ class LipsyncModel:
         total = audio.duration(video)
         ranges = shot_ranges(total, detect_scenes(video))
         if len(ranges) <= 1:
-            return self.run(video, audio_path, out_path, steps, guidance)
+            return self.run(
+                video, audio_path, out_path, steps, guidance, ctx=ctx)
 
         width, height = audio.video_size(video)
         if ctx is not None:
@@ -182,7 +220,7 @@ class LipsyncModel:
             try:
                 self.run(
                     clip.resolve(), wav.resolve(), synced.resolve(),
-                    steps, guidance,
+                    steps, guidance, ctx=ctx,
                 )
                 piece = synced
             except PipelineError as error:
