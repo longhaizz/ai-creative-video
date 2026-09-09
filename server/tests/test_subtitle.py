@@ -24,7 +24,9 @@ from server.steps.subtitle import (
     _ass_time,
     ass_colour,
     burn,
+    hook_body,
     hook_dialogue,
+    hook_lines,
     chars_per_line,
     normalize_cues,
     resolve_font_size,
@@ -440,6 +442,35 @@ def test_the_style_alignment_follows_the_same_choice(tmp_path):
         assert style.split(",")[18] == wanted, align
 
 
+def test_lines_the_client_measured_are_kept_as_they_came():
+    """The client had the real font; chars_per_line only has an average."""
+    hook = _hook(text="Giam gia hom nay", prewrapped=True)
+    assert hook_lines(hook, 1080, 110) == ["Giam gia hom nay"]
+    # The same text without the flag is an old client, and gets wrapped.
+    assert len(hook_lines(_hook(text="Giam gia hom nay"), 1080, 110)) > 1
+
+
+def test_the_client_can_say_where_the_break_goes():
+    hook = _hook(text="Giam gia\nhom nay", prewrapped=True)
+    assert hook_lines(hook, 1080, 72) == ["Giam gia", "hom nay"]
+
+
+def test_blank_lines_from_the_client_are_dropped():
+    hook = _hook(text="\n Giam gia \n\n hom nay \n", prewrapped=True)
+    assert hook_lines(hook, 1080, 72) == ["Giam gia", "hom nay"]
+
+
+def test_a_prewrapped_hook_draws_the_break_it_was_given():
+    line = hook_dialogue(_hook(text="Giam gia\nhom nay", prewrapped=True),
+                         1080, 1920)
+    assert line.endswith("Giam gia\\Nhom nay")
+
+
+def test_schema_defaults_to_wrapping_on_the_server():
+    """An old client sends no flag, and must keep the old behaviour."""
+    assert DubParams().hook_prewrapped is False
+
+
 def test_schema_refuses_an_alignment_it_cannot_draw():
     with pytest.raises(ValidationError):
         DubParams(hook_text="Mua ngay", hook_top=0.05, hook_bottom=0.2,
@@ -471,3 +502,33 @@ def test_a_hook_alone_is_enough_work_without_dub():
     params = DubParams(dub=False, hook_text="Mua ngay", hook_top=0.05,
                        hook_bottom=0.2, hook_left=0.1, hook_right=0.9)
     assert params.hook_text == "Mua ngay"
+
+
+def test_each_line_can_carry_its_own_colour():
+    body = hook_body(["Giam gia", "hom nay"], ["#FFFFFF", "#FFCC00"])
+    # \c wants &HBBGGRR& -- six digits, no alpha byte, markers both ends.
+    assert body == "{\\c&HFFFFFF&}Giam gia\\N{\\c&H00CCFF&}hom nay"
+
+
+def test_a_line_without_a_colour_keeps_the_style_one():
+    body = hook_body(["Giam gia", "hom nay"], ["#FFCC00"])
+    assert body == "{\\c&H00CCFF&}Giam gia\\Nhom nay"
+
+
+def test_no_colours_at_all_writes_no_tags():
+    assert hook_body(["Giam gia", "hom nay"]) == "Giam gia\\Nhom nay"
+
+
+def test_the_hook_dialogue_carries_the_colours(tmp_path):
+    hook = _hook(text="Giam gia\nhom nay", prewrapped=True,
+                 colours=["#FFFFFF", "#FFCC00"])
+    line = hook_dialogue(hook, 1080, 1920)
+    assert line.endswith("{\\c&HFFFFFF&}Giam gia\\N{\\c&H00CCFF&}hom nay")
+
+
+def test_schema_takes_a_colour_per_line():
+    params = DubParams(hook_text="Mua ngay", hook_top=0.05, hook_bottom=0.2,
+                       hook_left=0.1, hook_right=0.9,
+                       hook_colours="#FFFFFF,#FFCC00")
+    assert params.hook_colours == "#FFFFFF,#FFCC00"
+    assert DubParams().hook_colours == ""

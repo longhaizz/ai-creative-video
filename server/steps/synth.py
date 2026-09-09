@@ -25,7 +25,9 @@ from server import config
 from server.jobs import PipelineError
 from server.steps import duration as duration_model
 from server.steps.audio import clean_take, duration, match_tempo, place_clips
-from server.steps.translate import VARIANTS, rewrite_line, translate_blocks
+from server.steps.translate import (
+    VARIANTS, lines_wrong_language, rewrite_line, translate_blocks,
+)
 
 # A pause this long at the end of a sentence ends a block. Ads are spoken
 # without real breaks — the sample clip never pauses longer than 0.22s — so a
@@ -476,6 +478,7 @@ def timed_speech(
             for block in blocks
         ],
         target_lang, openai_key, asr_meta=meta or {},
+        log=(ctx.log if ctx is not None else None),
     )
     lines = list(script["lines"])
     lang_code = script.get("output_lang_code") or lang_code
@@ -736,6 +739,15 @@ def _next_line(entry: dict, spoken_lines: list, target: float, model, speed,
     text = rewrite_line(source, spoken_lines, target, words,
                         lang_name, api_key).strip()
     if not text or text in tried:
+        return None
+    # The first translation is checked and repaired before it leaves the
+    # translator, but a line written here goes straight to the voice. One
+    # answer in the source language would be spoken as it stands, and the
+    # dub would say a sentence in a language nobody asked for. Dropping it
+    # costs the block nothing: the take already spoken is kept.
+    if lines_wrong_language([text], lang):
+        log(f"the rewrite came back in the wrong language, keeping the "
+            f"line already spoken: {text[:60]}")
         return None
     log(f"asked for a line of about {words} words")
     return text, "rewrite", model.seconds(text, lang) * speed.value

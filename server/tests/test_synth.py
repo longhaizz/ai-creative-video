@@ -191,7 +191,7 @@ def run_blocks(monkeypatch, tmp_path, cues, lines, lengths, scenes=(),
     entries = variants(lines)
     monkeypatch.setattr(
         synth, "translate_blocks",
-        lambda blocks, lang, key, asr_meta=None: {
+        lambda blocks, lang, key, asr_meta=None, **_: {
             "lines": entries,
             "master_meaning": "meaning",
             "master_translation": " ".join(e["normal"] for e in entries),
@@ -440,7 +440,7 @@ def test_a_stumbling_take_loses_to_a_fluent_one(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         synth, "translate_blocks",
-        lambda blocks, lang, key, asr_meta=None: {
+        lambda blocks, lang, key, asr_meta=None, **_: {
             "lines": variants(["câu một ở đây."]),
             "master_meaning": "m",
             "master_translation": "câu một ở đây.",
@@ -514,7 +514,7 @@ def test_silence_is_counted_only_while_the_speaker_talks(monkeypatch, tmp_path):
     entries = variants(["câu một ở đây."])
     monkeypatch.setattr(
         synth, "translate_blocks",
-        lambda blocks, lang, key, asr_meta=None: {
+        lambda blocks, lang, key, asr_meta=None, **_: {
             "lines": entries, "master_meaning": "m",
             "master_translation": "m", "output_lang_code": "vi",
             "output_lang_name": "Vietnamese",
@@ -537,7 +537,7 @@ def test_a_block_left_half_silent_is_reported(monkeypatch, tmp_path):
     entries = variants(["ngắn."])
     monkeypatch.setattr(
         synth, "translate_blocks",
-        lambda blocks, lang, key, asr_meta=None: {
+        lambda blocks, lang, key, asr_meta=None, **_: {
             "lines": entries, "master_meaning": "m",
             "master_translation": "m", "output_lang_code": "vi",
             "output_lang_name": "Vietnamese",
@@ -590,6 +590,28 @@ def test_a_new_line_is_asked_for_when_no_wording_fits(monkeypatch, tmp_path):
     )
     assert asked, "a line this far off must be written again"
     assert spoken[0]["text"] == "câu vừa in đúng chỗ trống này."
+
+
+def test_a_rewrite_in_the_wrong_language_is_thrown_away(monkeypatch, tmp_path):
+    """The dub must not say a sentence in a language nobody asked for.
+
+    The first translation is checked before it leaves the translator, but a
+    line written mid-job to fix its length used to go straight to the voice.
+    """
+    entry = {"short": "quá ngắn.", "normal": "quá ngắn.", "long": "quá ngắn."}
+
+    def rewrite(line, attempts, seconds, words, lang_name, api_key,
+                model=None):
+        return "रात के, 11.46 पर खर्राटे लिये और गैस छोड़ी"
+
+    monkeypatch.setattr(synth, "rewrite_line", rewrite)
+    out, spoken, _ = run_blocks(
+        monkeypatch, tmp_path, [cue(0.0, 3.0), cue(4.0, 5.0)],
+        lines=[entry, "câu hai."],
+        lengths={"quá ngắn.": 0.5, "câu hai.": 1.0},
+    )
+    assert spoken[0]["text"] == "quá ngắn.", "the take already spoken is kept"
+    assert all("रात" not in item["text"] for item in spoken), spoken
 
 
 def test_the_loop_stops_when_there_is_nothing_new_to_say(monkeypatch, tmp_path):

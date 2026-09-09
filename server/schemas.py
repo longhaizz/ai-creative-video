@@ -117,6 +117,13 @@ class DubParams(BaseModel):
     hook_size: int | None = Field(None, ge=8, le=200)
     hook_colour: str = Field("#FFFFFF", max_length=7)
     hook_align: HookAlign = "center"
+    # The client measured the hook with the real font and broke the lines
+    # itself, so hook_text arrives with newlines in it and is drawn as sent.
+    # Off means an older client sent one blob, and the server wraps it.
+    hook_prewrapped: bool = False
+    # One colour per line, comma separated, in the order the lines are drawn.
+    # Shorter than the hook, or empty, and the rest keep hook_colour.
+    hook_colours: str = Field("", max_length=200)
 
     @field_validator("hook_text", mode="before")
     @classmethod
