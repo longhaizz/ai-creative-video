@@ -41,7 +41,7 @@ def test_run_shots_keeps_the_shot_when_there_is_no_face(monkeypatch, tmp_path):
     model = LipsyncModel(tmp_path, tmp_path / "c.yaml", tmp_path / "w.pt")
     called = []
 
-    def fake_run(video, audio, out, steps, guidance, seed=1247):
+    def fake_run(video, audio, out, steps, guidance, seed=1247, ctx=None):
         called.append(Path(video).name)
         if "shot_001" in Path(video).name:
             raise NoFaceError("no face")
@@ -85,7 +85,7 @@ def test_run_shots_keeps_the_shot_when_there_is_no_face(monkeypatch, tmp_path):
 def test_run_shots_with_one_scene_uses_the_whole_video(monkeypatch, tmp_path):
     model = LipsyncModel(tmp_path, tmp_path / "c.yaml", tmp_path / "w.pt")
 
-    def fake_run(video, audio, out, steps, guidance, seed=1247):
+    def fake_run(video, audio, out, steps, guidance, seed=1247, ctx=None):
         Path(out).write_bytes(b"lip")
         return Path(out)
 
@@ -103,3 +103,39 @@ def test_run_shots_with_one_scene_uses_the_whole_video(monkeypatch, tmp_path):
     result = model.run_shots(video, audio, out, tmp_path / "shots", 20, 1.5)
     assert result == out
     assert out.read_bytes() == b"lip"
+
+
+def test_the_timing_line_reaches_the_job_log():
+    """The pipeline prints its timing on stderr; the job log must get it."""
+    from server.steps.lipsync import _log_timing
+
+    class FakeCtx:
+        def __init__(self):
+            self.lines = []
+
+        def log(self, message):
+            self.lines.append(message)
+
+    ctx = FakeCtx()
+    _log_timing(
+        "Doing inference: 100%|####| 4/4\n"
+        "[lipsync] 4 chunks of 16 frames | unet 12.0s\n"
+        "some other noise\n",
+        ctx,
+    )
+    assert ctx.lines == ["[lipsync] 4 chunks of 16 frames | unet 12.0s"]
+
+    _log_timing("[lipsync] dropped when nobody is listening", None)
+
+
+def test_the_tee_keeps_a_copy_and_still_writes_through():
+    import io as _io
+
+    from server.steps.lipsync import _Tee
+
+    console = _io.StringIO()
+    tee = _Tee(console)
+    tee.write("[lipsync] unet 1.0s\n")
+    tee.flush()
+    assert console.getvalue() == "[lipsync] unet 1.0s\n"
+    assert tee.value() == "[lipsync] unet 1.0s\n"
