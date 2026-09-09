@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 import time
 
 import requests
@@ -239,15 +240,73 @@ def _resolve_output_lang(target_lang: str, asr_meta=None) -> tuple:
     return code, lang_name, False
 
 
-def _lines_wrong_language(cues, expected_code: str) -> list:
+# Which writing system each target language is written in. A line that uses
+# another one is not a translation at all -- it is the source copied over --
+# and that is true however short it is, so this check has no length floor.
+# Everything not named here is written in the Latin alphabet.
+LANG_SCRIPTS = {
+    "ar": "ARABIC",
+    "el": "GREEK",
+    "he": "HEBREW",
+    "hi": "DEVANAGARI",
+    "ja": ("CJK", "HIRAGANA", "KATAKANA"),
+    "ko": "HANGUL",
+    "ru": "CYRILLIC",
+    "th": "THAI",
+    "zh": "CJK",
+}
+DEFAULT_SCRIPT = "LATIN"
+
+# Not one letter of another script is allowed. A name that survives into
+# the dub is written in the alphabet of the language being spoken, so even
+# a single foreign letter means the line came back untranslated. Nothing is
+# tolerated because the failure was two letters long: "बोले 3.45" carries
+# two, and the whole block was Hindi.
+FOREIGN_LETTERS_ALLOWED = 0
+
+
+def _script_of(letter: str) -> str:
+    """The writing system one letter belongs to, e.g. LATIN, DEVANAGARI."""
+    try:
+        name = unicodedata.name(letter)
+    except ValueError:                      # a letter Unicode has no name for
+        return ""
+    # Names read "DEVANAGARI LETTER RA", "CJK UNIFIED IDEOGRAPH-4E00".
+    return name.split()[0].split("-")[0]
+
+
+def _lines_in_another_script(cues, expected_code: str) -> list:
+    """Indices of lines written in a script the target language never uses.
+
+    This is the check that catches a block handed back untranslated. The
+    diacritic heuristic below cannot: it only measures Vietnamese marks, so
+    Hindi in an English dub scores zero the same way English does.
+    """
+    expected = _normalize_lang_code(expected_code)
+    wanted = LANG_SCRIPTS.get(expected, DEFAULT_SCRIPT)
+    wanted = (wanted,) if isinstance(wanted, str) else wanted
+    bad = []
+    for index, text in enumerate(cues or []):
+        foreign = sum(
+            1 for c in (text or "")
+            if c.isalpha() and _script_of(c) not in wanted
+        )
+        if foreign > FOREIGN_LETTERS_ALLOWED:
+            bad.append(index)
+    return bad
+
+
+def lines_wrong_language(cues, expected_code: str) -> list:
     """Indices cue lệch ngôn ngữ so với expected (heuristic dấu Việt).
 
     - expected vi: dòng Latin dài gần như không dấu → nghi không phải VI
     - expected khác vi (id/en/...): mật độ dấu Việt cao → nghi nhảy sang VI
     """
     expected = _normalize_lang_code(expected_code)
-    bad = []
+    bad = list(_lines_in_another_script(cues, expected_code))
     for i, t in enumerate(cues or []):
+        if i in bad:
+            continue
         text = (t or "").strip()
         if not text:
             continue
@@ -730,7 +789,7 @@ def _wrong_language_keys(lines, expected_code: str) -> list:
     out = []
     for index, entry in enumerate(lines):
         for key in VARIANTS:
-            if _lines_wrong_language([entry[key]], expected_code):
+            if lines_wrong_language([entry[key]], expected_code):
                 out.append((index, key))
     return out
 
@@ -811,8 +870,8 @@ def _selfcheck():
 
     assert word_count("một hai ba") == 3
     assert _resolve_output_lang("vi", {})[0] == "vi"
-    assert _lines_wrong_language(["hello there friend"], "vi") == [0]
-    assert _lines_wrong_language(["xin chào các bạn ơi"], "vi") == []
+    assert lines_wrong_language(["hello there friend"], "vi") == [0]
+    assert lines_wrong_language(["xin chào các bạn ơi"], "vi") == []
     print("translate.py self-check OK")
 
 

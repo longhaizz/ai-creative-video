@@ -226,6 +226,65 @@ def test_words_after_the_json_do_not_kill_the_job():
     assert "oops" in str(bad.value)
 
 
+# -- a block handed back untranslated ---------------------------------------
+
+
+HINDI_LONG = "सुप्रभात आपको देखकर अच्छा लगा कल रात आपकी नींद अच्छी थी"
+# The three lines a real job came back with: times of day, a couple of Hindi
+# words each. Too short for the diacritic heuristic to look at.
+HINDI_SHORT = ["11.26.", "रात के, 11.46.", "बोले 3.45."]
+
+
+def test_a_short_untranslated_line_is_caught():
+    """The bug: two Hindi words in a Vietnamese dub went through unseen."""
+    from server.steps.translate import lines_wrong_language
+
+    assert lines_wrong_language(HINDI_SHORT, "vi") == [1, 2]
+
+
+def test_every_target_language_is_watched_not_only_vietnamese():
+    """The old check only measured Vietnamese marks, so an English dub
+    scored the same for Hindi as it did for English."""
+    from server.steps.translate import lines_wrong_language
+
+    for target in ("en", "id", "th", "tr", "vi"):
+        assert lines_wrong_language([HINDI_LONG], target) == [0], target
+
+
+def test_a_line_in_the_right_script_is_left_alone():
+    from server.steps.translate import lines_wrong_language
+
+    fine = {
+        "vi": "Chào buổi sáng, rất vui được gặp bạn",
+        "en": "Good morning, nice to see you",
+        "th": "สวัสดีตอนเช้า ยินดีที่ได้พบคุณ",
+        "zh": "早上好，很高兴见到你",
+        "ja": "おはようございます、お会いできて嬉しいです",
+        "ko": "좋은 아침입니다, 만나서 반갑습니다",
+        "ru": "Доброе утро, рад вас видеть",
+        "ar": "صباح الخير، سعيد برؤيتك",
+    }
+    for code, line in fine.items():
+        assert lines_wrong_language([line], code) == [], code
+
+
+def test_numbers_and_names_do_not_count_as_another_language():
+    """A time or a brand name is not a translation failure."""
+    from server.steps.translate import lines_wrong_language
+
+    assert lines_wrong_language(["11.26"], "vi") == []
+    assert lines_wrong_language(["Lúc 11 giờ 26."], "vi") == []
+    assert lines_wrong_language(["Hãy thử Shatai miễn phí"], "vi") == []
+
+
+def test_drifting_into_vietnamese_is_still_caught():
+    """The diacritic heuristic still does the job the script check cannot:
+    English and Vietnamese are written in the same alphabet."""
+    from server.steps.translate import lines_wrong_language
+
+    assert lines_wrong_language(["Chào buổi sáng rất vui được gặp bạn"], "en") == [0]
+
+
 # -- the shape the model must answer in -------------------------------------
 
 

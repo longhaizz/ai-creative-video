@@ -592,6 +592,28 @@ def test_a_new_line_is_asked_for_when_no_wording_fits(monkeypatch, tmp_path):
     assert spoken[0]["text"] == "câu vừa in đúng chỗ trống này."
 
 
+def test_a_rewrite_in_the_wrong_language_is_thrown_away(monkeypatch, tmp_path):
+    """The dub must not say a sentence in a language nobody asked for.
+
+    The first translation is checked before it leaves the translator, but a
+    line written mid-job to fix its length used to go straight to the voice.
+    """
+    entry = {"short": "quá ngắn.", "normal": "quá ngắn.", "long": "quá ngắn."}
+
+    def rewrite(line, attempts, seconds, words, lang_name, api_key,
+                model=None):
+        return "रात के, 11.46 पर खर्राटे लिये और गैस छोड़ी"
+
+    monkeypatch.setattr(synth, "rewrite_line", rewrite)
+    out, spoken, _ = run_blocks(
+        monkeypatch, tmp_path, [cue(0.0, 3.0), cue(4.0, 5.0)],
+        lines=[entry, "câu hai."],
+        lengths={"quá ngắn.": 0.5, "câu hai.": 1.0},
+    )
+    assert spoken[0]["text"] == "quá ngắn.", "the take already spoken is kept"
+    assert all("रात" not in item["text"] for item in spoken), spoken
+
+
 def test_the_loop_stops_when_there_is_nothing_new_to_say(monkeypatch, tmp_path):
     """A translator with no other wording must not be paid four times."""
     entry = {"short": "một câu.", "normal": "một câu.", "long": "một câu."}
