@@ -208,6 +208,25 @@ def _hook_style(hook: dict | None, height: int) -> str:
     )
 
 
+def hook_lines(hook: dict, width: int, size: int) -> list[str]:
+    """The hook, one entry per line on screen.
+
+    A client that says `prewrapped` has already broken the text where it
+    breaks, measured with the real font on the picture the user was looking
+    at. Nothing here can do better than that -- chars_per_line only knows an
+    average letter width -- so those lines are kept as they came, and a
+    single line that the client found room for stays a single line.
+
+    Without that flag the text is one blob from an older client, and it is
+    wrapped here the way subtitles are.
+    """
+    text = hook.get("text") or ""
+    if hook.get("prewrapped"):
+        return [line.strip() for line in text.split("\n") if line.strip()]
+    box_width = max(1, int(width * (hook["right"] - hook["left"])))
+    return wrap_text_lines(text, chars_per_line(box_width, size))
+
+
 def hook_dialogue(hook: dict, width: int, height: int) -> str | None:
     """The hook line, placed in the box the client drew.
 
@@ -216,8 +235,7 @@ def hook_dialogue(hook: dict, width: int, height: int) -> str | None:
     it sits against the edge the client asked to line it up with.
     """
     size = resolve_font_size(hook.get("size"), height)
-    box_width = max(1, int(width * (hook["right"] - hook["left"])))
-    lines = wrap_text_lines(hook.get("text") or "", chars_per_line(box_width, size))
+    lines = hook_lines(hook, width, size)
     if not lines:
         return None
     # The x follows the alignment: text laid out from the left edge, from
@@ -231,8 +249,27 @@ def hook_dialogue(hook: dict, width: int, height: int) -> str | None:
     end = _ass_time(float(hook.get("end") or 0))
     return (
         f"Dialogue: 2,{_ass_time(0)},{end},Hook,,0,0,0,,"
-        f"{{\\pos({x},{y})}}" + "\\N".join(lines)
+        f"{{\\pos({x},{y})}}" + hook_body(lines, hook.get("colours"))
     )
+
+
+def hook_body(lines: list[str], colours=None) -> str:
+    """The lines as one ASS field, each in its own colour.
+
+    ASS changes colour mid-text with a \\c tag, so two colours need neither a
+    second style nor a second Dialogue -- the whole hook stays one line in
+    the file and one pass of the encoder. A line with no colour of its own
+    keeps the style's, which is the colour every line had before.
+    """
+    colours = list(colours or [])
+    parts = []
+    for index, line in enumerate(lines):
+        colour = colours[index] if index < len(colours) else None
+        # A \c tag wants &HBBGGRR& -- six digits between the markers, with
+        # no alpha byte. ass_colour() writes the style form, &HAABBGGRR.
+        tag = f"{{\\c&H{ass_colour(colour)[4:]}&}}" if colour else ""
+        parts.append(tag + line)
+    return "\\N".join(parts)
 
 
 def write_ass(

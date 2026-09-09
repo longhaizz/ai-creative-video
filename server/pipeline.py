@@ -280,6 +280,8 @@ def _hook(params, seconds: float) -> dict | None:
         "size": params.hook_size,
         "colour": params.hook_colour,
         "align": params.hook_align,
+        "prewrapped": params.hook_prewrapped,
+        "colours": [c.strip() for c in params.hook_colours.split(",") if c.strip()],
         "end": seconds,
     }
 
