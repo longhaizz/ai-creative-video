@@ -365,6 +365,9 @@ def test_transcribe_does_not_retry_large_v3(tmp_path):
     assert payload["model"] == "medium"
     assert payload["segments"] == [{
         "id": 0, "start": 0.0, "end": 1.2, "text": "hello there.",
+        # The fake segment has no temperature or compression_ratio.
+        "temperature": None, "avg_logprob": -0.2, "no_speech_prob": 0.97,
+        "compression_ratio": None,
     }]
     logs = []
 
@@ -376,7 +379,44 @@ def test_transcribe_does_not_retry_large_v3(tmp_path):
             return None
 
     transcribe(FakeModels(), wav, "medium", ctx=Ctx())
-    assert any(line.startswith("0.00-1.20  hello there.") for line in logs)
+    assert any(line.startswith("0.00-1.20  t=? logprob=-0.20 no_speech=0.97 ratio=?")
+               and line.endswith("  hello there.") for line in logs), logs
+
+
+def test_the_log_shows_how_sure_whisper_was_of_each_segment(tmp_path):
+    """The same Arabic ad lost its last 6 lines on one run of two: the log
+    must say whether a line was a random retry or nearly taken for silence."""
+    wav = tmp_path / "mix.wav"
+    wav.write_bytes(b"x")
+
+    class FakeModels:
+        def get(self, size):
+            class Model:
+                def transcribe(self, path, **kwargs):
+                    seg = _Segment("hello there.", 0.0, 1.2, [
+                        _Word("hello", 0.0, 0.5), _Word(" there.", 0.5, 1.2),
+                    ], avg_logprob=-1.123, no_speech_prob=0.587)
+                    seg.temperature = 0.4
+                    seg.compression_ratio = 2.61
+                    info = type("Info", (), {
+                        "language": "ar", "language_probability": 0.96, "duration": 1.2,
+                    })()
+                    return [seg], info
+            return Model()
+
+    class Ctx:
+        logs = []
+
+        def log(self, message):
+            self.logs.append(message)
+
+        def step(self, name):
+            self.logs.append(name)
+
+    ctx = Ctx()
+    transcribe(FakeModels(), wav, "large-v3", ctx=ctx)
+    assert ("0.00-1.20  t=0.40 logprob=-1.12 no_speech=0.59 ratio=2.61  hello there."
+            in ctx.logs), ctx.logs
 
 
 def test_a_short_line_is_not_split():
