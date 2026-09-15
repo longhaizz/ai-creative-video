@@ -589,6 +589,25 @@ def test_uploaded_reference_wins_over_cue_ref(monkeypatch, tmp_path):
     assert refs == [str(uploaded)] or refs == [str(uploaded.resolve())]
 
 
+def test_lipsync_asked_but_not_loaded_runs_as_if_not_ticked(monkeypatch, tmp_path):
+    """LOAD_LIPSYNC is off by default: the job must finish, not fail at the end."""
+    from server.pipeline import Models
+
+    vocals = tmp_path / "vocals.wav"
+    music = tmp_path / "no_vocals.wav"
+    vocals.write_bytes(b"v")
+    music.write_bytes(b"m")
+    _dub, Ctx, Voice, _Lipsync, order = _stub_pipeline(
+        monkeypatch, tmp_path, cues=[_cue(text="a")],
+        vocals=vocals, music=music, refs_out=[],
+    )
+    ctx = Ctx()
+    assert ctx.params.lipsync is True
+    result = _dub(ctx, Models(voice=Voice(), lipsync=None))
+    assert order == ["asr", "vsr", "separate", "tts"]
+    assert result.is_file()
+
+
 def test_one_speaker_takes_the_longest_piece_whole(monkeypatch, tmp_path):
     """Told there is one voice, the clone gets a piece of it, not a stitch.
 

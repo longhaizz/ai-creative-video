@@ -211,13 +211,11 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     # short track silently cuts the end off the picture. place_clips() pads
     # to video_seconds for this reason; do not remove that.
     picture = video
-    if params.lipsync:
-        if models.lipsync is None:
-            raise PipelineError(
-                "Lip sync was requested but LatentSync is not loaded. "
-                "Start with LOAD_LIPSYNC=1, or send lipsync=false.",
-                code="invalid_input",
-            )
+    if params.lipsync and models.lipsync is None:
+        # Lip sync is off on this server (LOAD_LIPSYNC). The job goes on as
+        # if the box was not ticked, instead of failing after minutes of work.
+        ctx.log("Lip sync skipped: LatentSync is not loaded on this server")
+    elif params.lipsync:
         ctx.step("Matching the mouth to the new voice")
         # Log the numbers the model really got, and how long they cost. Both
         # come from the request, so a job that looks slow can be told apart

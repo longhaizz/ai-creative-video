@@ -37,6 +37,12 @@ REC_MODELS = {
     **{code: "latin_PP-OCRv5_mobile_rec" for code in (
         "vi", "id", "ms", "tl", "fr", "de", "es", "pt", "it", "nl", "pl",
         "tr", "ro", "cs", "sk", "hu", "sv", "da", "no", "fi",
+        "hr", "bs", "sl", "sq", "et", "lv", "lt", "ca", "is", "ga", "cy",
+        "mt", "sw", "af", "az", "uz", "eu", "gl",
+    )},
+    # Whisper writes Serbian in Cyrillic.
+    **{code: "cyrillic_PP-OCRv5_mobile_rec" for code in (
+        "sr", "bg", "mk", "mn", "kk",
     )},
 }
 
