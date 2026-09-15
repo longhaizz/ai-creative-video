@@ -90,11 +90,18 @@ class SubtitleDetect:
     def read_boxes(self, img, boxes):
         """Return (text, score) for each box, ("", 0.0) where there is nothing to read."""
         texts = [("", 0.0)] * len(boxes)
-        crops = {
-            i: img[ymin:ymax, xmin:xmax]
-            for i, (xmin, xmax, ymin, ymax) in enumerate(boxes)
-            if xmax > xmin and ymax > ymin
-        }
+        img_h, img_w = img.shape[:2]
+        crops = {}
+        for i, (xmin, xmax, ymin, ymax) in enumerate(boxes):
+            if xmax <= xmin or ymax <= ymin:
+                continue
+            # The box is cut tight around the letters. Arabic, Thai and
+            # Vietnamese put dots and marks above and below them, and without
+            # those the reader mixes up letters (ح خ ج). Only the crop to read
+            # grows; the mask to paint over stays as it is.
+            pad_y, pad_x = (ymax - ymin) // 4, (ymax - ymin) // 2
+            crops[i] = img[max(0, ymin - pad_y):min(img_h, ymax + pad_y),
+                           max(0, xmin - pad_x):min(img_w, xmax + pad_x)]
         if not crops:
             return texts
         results = self.text_recognizer.predict(list(crops.values()), batch_size=len(crops))

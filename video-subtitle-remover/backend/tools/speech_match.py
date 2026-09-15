@@ -51,6 +51,10 @@ MIN_CHARS = 3
 # Shorter runs of shared letters are chance: any long sentence holds the
 # letters of "SALE" somewhere, in order, one by one.
 MIN_RUN = 3
+# Fewer shared letters than this is chance, whatever the share. A short word
+# that starts with the Arabic article (ال) shares three letters with half the
+# words said, and 3 of 5 is already 0.6.
+MIN_MATCHED_LETTERS = 6
 
 # The log shows one line per piece of text while it stays on screen. Reads
 # of the same text this close in place and time are one line.
@@ -101,7 +105,10 @@ def contained(read, spoken):
     if len(a) < MIN_CHARS or not b:
         return 0.0
     blocks = SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks()
-    return sum(m.size for m in blocks if m.size >= MIN_RUN) / len(a)
+    shared = sum(m.size for m in blocks if m.size >= MIN_RUN)
+    if shared < MIN_MATCHED_LETTERS:
+        return 0.0
+    return shared / len(a)
 
 
 def spoken_at(cues, seconds):
@@ -140,9 +147,25 @@ def subtitle_band(reads, cues, fps):
     near = [b for b in matched if abs((b[2] + b[3]) / 2 - middle) <= 2 * height]
     if not near:
         return None
-    top = min(b[2] for b in near) - height / 2
-    bottom = max(b[3] for b in near) + height / 2
-    return top, bottom, height
+    top = min(b[2] for b in near)
+    bottom = max(b[3] for b in near)
+
+    # A subtitle of several lines often matches on one line only: OCR reads
+    # the others badly. Grow the band over the lines right above and below,
+    # as long as they are on screen in a frame where a line matched. A logo
+    # that sits just under the subtitles but shows at other times stays out.
+    together = [box for n in frames for box, _text, _score in reads[n]]
+    grown = True
+    while grown:
+        grown = False
+        for _, _, ymin, ymax in together:
+            if not height / 2 <= ymax - ymin <= height * 2:
+                continue
+            touches = ymin <= bottom + height / 2 and ymax >= top - height / 2
+            if touches and (ymin < top or ymax > bottom):
+                top, bottom = min(top, ymin), max(bottom, ymax)
+                grown = True
+    return top - height / 2, bottom + height / 2, height
 
 
 def on_the_line(box, band):
