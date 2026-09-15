@@ -23,6 +23,12 @@ JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "3600"))
 # better. Deliberately NOT under JOBS_DIR: that folder is wiped at boot.
 DURATION_DATA = Path(os.getenv("DURATION_DATA", "data/duration.csv"))
 
+# The preset voices: one wav per voice, and the file name is the voice id.
+# Made from the samples one folder up by server/scripts/prepare_voices.py.
+VOICES_DIR = Path(
+    os.getenv("VOICES_DIR", Path(__file__).resolve().parent / "voices" / "wav")
+)
+
 MAX_VIDEO_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(200 * 1024 * 1024)))
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))
 

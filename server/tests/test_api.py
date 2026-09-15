@@ -248,6 +248,27 @@ def test_the_video_file_name_reaches_the_pipeline():
         "VID 20240115 bougainvillea")
 
 
+def test_voices_lists_the_preset_wavs(client, tmp_path):
+    voices = tmp_path / "voices"
+    voices.mkdir()
+    (voices / "kai_clean.wav").write_bytes(b"w")
+    with client(VOICES_DIR=voices) as http:
+        assert http.get("/voices").status_code == 401
+        response = http.get("/voices", headers=AUTH)
+        assert response.status_code == 200
+        assert response.json() == [{"id": "kai_clean", "label": "Kai Clean"}]
+
+
+def test_a_voice_the_server_does_not_have_is_refused_at_once(client, tmp_path):
+    voices = tmp_path / "voices"
+    voices.mkdir()
+    (voices / "kai_clean.wav").write_bytes(b"w")
+    with client(VOICES_DIR=voices) as http:
+        assert post_dub(http, voice_mode="male_young").status_code == 422
+        assert post_dub(http, voice_mode="kai_clean").status_code == 202
+        assert post_dub(http, voice_mode="original").status_code == 202
+
+
 def test_speakers_only_accepts_one_or_nothing():
     """Two speakers would promise a voice each, and there is only one."""
     from pydantic import ValidationError

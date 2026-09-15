@@ -20,6 +20,7 @@ from server.auth import require_api_key
 from server.jobs import DONE, JobContext, JobRunner, PipelineError
 from server.limits import BodySizeLimit
 from server.schemas import CloneRequest, DubRequest
+from server.steps.synth import list_voices
 from server.uploads import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, save_upload
 
 CLONE_AUDIO_EXTENSIONS = {
@@ -111,6 +112,11 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
             "gpu": _gpu_name(),
             "worker_alive": get_runner().worker_alive(),
         }
+
+    @app.get("/voices")
+    def voices():
+        """The preset voices a job may ask for, besides "original"."""
+        return list_voices()
 
     @app.post("/dub", status_code=202)
     def dub(form: Annotated[DubRequest, Form()]):

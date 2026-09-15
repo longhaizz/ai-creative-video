@@ -17,17 +17,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # as-is; there is no automatic large-v3 retry.
 WhisperModel = Literal["tiny", "base", "small", "medium", "large-v3"]
 
-# "original" clones the voice from the video. The rest are voice presets.
-VoiceMode = Literal[
-    "original",
-    "male_young",
-    "male_middle",
-    "male_old",
-    "female_young",
-    "female_middle",
-    "female_old",
-]
-
 # How the subtitle remover paints over the old text.
 VsrMode = Literal["sttn-det", "sttn-auto", "lama", "propainter"]
 
@@ -49,7 +38,10 @@ class DubParams(BaseModel):
     dub: bool = True
 
     # -- voice -------------------------------------------------------------
-    voice_mode: VoiceMode = "original"
+    # "original" clones the voice from the video, or from reference_audio.
+    # Anything else is the id of a preset voice: a wav on the server, listed
+    # by GET /voices. Checked in _voice_must_exist.
+    voice_mode: str = Field("original", max_length=64)
     cfg_value: float = Field(2.0, ge=1.0, le=3.0)
     inference_timesteps: int = Field(10, ge=5, le=30)
     target_lang: str = Field("same", max_length=16)
@@ -169,6 +161,25 @@ class DubParams(BaseModel):
             raise ValueError("hook_top must be smaller than hook_bottom")
         if self.hook_left >= self.hook_right:
             raise ValueError("hook_left must be smaller than hook_right")
+        return self
+
+    @model_validator(mode="after")
+    def _voice_must_exist(self):
+        """A preset voice must have its wav here, or the job is refused now.
+
+        Without this, a wrong id is found only after the subtitles are off
+        and demucs has run. With dub false the voice is ignored, not checked.
+        """
+        if not self.dub or self.voice_mode == "original":
+            return self
+        # Imported here, so reading this file does not load the voice step.
+        from server.jobs import PipelineError
+        from server.steps.synth import preset_voice
+
+        try:
+            preset_voice(self.voice_mode)
+        except PipelineError as error:
+            raise ValueError(str(error)) from None
         return self
 
     @model_validator(mode="after")
