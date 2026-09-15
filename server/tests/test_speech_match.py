@@ -50,6 +50,12 @@ def test_a_short_read_says_nothing():
     assert sm.contained("OK", "ok ok ok") == 0.0
 
 
+def test_a_short_word_sharing_the_arabic_article_is_chance():
+    """Seen on ara1.mp4: "التمن" shares only "الت" with "الترابي", 3 of 5."""
+    spoken = "سوف نستخدم هذا الترابي لنرقف الأخطاقية"
+    assert sm.contained("التمن", spoken) == 0.0
+
+
 # -- learning the line -----------------------------------------------------
 
 
@@ -70,6 +76,30 @@ def test_two_lines_of_subtitles_are_both_kept():
     band = sm.subtitle_band(reads, CUES, FPS)
     assert sm.on_the_line(upper, band) and sm.on_the_line(SUB, band)
     assert not sm.on_the_line(LOGO, band)
+
+
+def test_three_lines_are_kept_when_only_the_middle_one_matches():
+    """Seen on ara1.mp4: OCR read one line of three well enough to match."""
+    upper = (100, 900, 740, 795)
+    lower = (100, 900, 862, 915)
+    reads = {
+        n: [(upper, "xqzw vbnm", 0.9), (SUB, "chia sẻ một mẹo", 0.9),
+            (lower, "kjhg fdsa", 0.9), (LOGO, "SALE", 0.9)]
+        for n in range(1, 30, 3)
+    }
+    band = sm.subtitle_band(reads, CUES, FPS)
+    assert all(sm.on_the_line(box, band) for box in (upper, SUB, lower)), band
+    assert not sm.on_the_line(LOGO, band)
+
+
+def test_a_line_next_to_the_subtitles_at_other_times_is_not_grown_into():
+    below = (100, 900, 865, 920)
+    reads = _reads("mình chia sẻ một mẹo")
+    for n in (31, 34, 37):
+        reads[n] = [(below, "SHOP NOW", 0.9)]
+    band = sm.subtitle_band(reads, CUES, FPS)
+    assert sm.on_the_line(SUB, band)
+    assert not sm.on_the_line(below, band)
 
 
 def test_a_subtitle_in_another_language_finds_no_line():
