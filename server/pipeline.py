@@ -117,7 +117,7 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             video, work / "no_subs.mp4", params.vsr_mode,
             params.vsr_top, params.vsr_bottom, params.vsr_left, params.vsr_right,
             ctx=ctx,
-            speech_cues=_speech_file(work, cues, meta),
+            speech_cues=_speech_file(work, cues, meta, ctx),
         )
     ctx.check_cancel()
 
@@ -342,21 +342,24 @@ def _subtitle_cues(work: Path, cues: list[dict]) -> list[dict]:
     return _spoken_lines(spoken)
 
 
-def _speech_file(work: Path, cues: list[dict], meta: dict) -> Path | None:
-    """Write what Whisper heard for the subtitle remover, or None if nothing.
+def _speech_file(work: Path, cues: list[dict], meta: dict, ctx) -> Path:
+    """Write what Whisper heard for the subtitle remover, and log each line.
 
     The remover reads the text in each box it finds and keeps the line whose
     text was said. The language picks the model that can read that script.
+    The file is written even when nothing was heard: the remover then knows
+    the filter was asked for, and removes nothing instead of every text.
     """
     import json
 
     lines = _spoken_lines(cues)
-    if not lines:
-        return None
+    language = meta.get("language", "")
+    for line in lines:
+        ctx.log(f"Heard ({language}) {line['start']:.2f}-{line['end']:.2f}s: "
+                f"{line['text']}")
     path = work / "speech_cues.json"
     path.write_text(
-        json.dumps({"language": meta.get("language", ""), "cues": lines},
-                   ensure_ascii=False),
+        json.dumps({"language": language, "cues": lines}, ensure_ascii=False),
         encoding="utf-8",
     )
     return path
@@ -418,7 +421,8 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
             video, work / "no_subs.mp4", params.vsr_mode,
             params.vsr_top, params.vsr_bottom, params.vsr_left, params.vsr_right,
             ctx=ctx,
-            speech_cues=_speech_file(work, cues, meta),
+            speech_cues=(_speech_file(work, cues, meta, ctx)
+                         if models.whisper is not None else None),
         )
     ctx.check_cancel()
 

@@ -187,6 +187,10 @@ def remove_subtitles(
     """
     video = Path(video).resolve()
     out_path = Path(out_path).resolve()
+    # Absolute like the others: the tool runs from its own folder, where a
+    # path under jobs/ points at nothing.
+    if speech_cues is not None:
+        speech_cues = Path(speech_cues).resolve()
 
     width, height = probe_size(video)
     area = area_to_pixels(width, height, top, bottom, left, right)
@@ -227,9 +231,9 @@ def remove_subtitles(
                 process.kill()
                 raise JobCancelled()
             now = time.monotonic()
-            # The speech filter says once whether it kept the line or gave
-            # up. That line must not be lost between two progress bars.
-            if now - last_log >= LOG_EVERY_SECONDS or line.startswith("Speech filter"):
+            # What OCR read and what the speech filter decided come once
+            # each. They must not be lost between two progress bars.
+            if now - last_log >= LOG_EVERY_SECONDS or line.startswith(("Speech filter", "OCR ")):
                 last_log = now
                 ctx.log(line)
     finally:

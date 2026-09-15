@@ -8,7 +8,7 @@ from .model_config import ModelConfig
 from .hardware_accelerator import HardwareAccelerator
 from .common_tools import get_readable_path
 from .ocr import get_coordinates
-from .speech_match import REC_MODELS, on_the_line, subtitle_band
+from .speech_match import REC_MODELS, on_the_line, read_log, subtitle_band
 from backend.config import config, tr
 from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
@@ -88,8 +88,8 @@ class SubtitleDetect:
         )
 
     def read_boxes(self, img, boxes):
-        """Return the text in each box, "" where there is nothing to read."""
-        texts = [""] * len(boxes)
+        """Return (text, score) for each box, ("", 0.0) where there is nothing to read."""
+        texts = [("", 0.0)] * len(boxes)
         crops = {
             i: img[ymin:ymax, xmin:xmax]
             for i, (xmin, xmax, ymin, ymax) in enumerate(boxes)
@@ -99,26 +99,36 @@ class SubtitleDetect:
             return texts
         results = self.text_recognizer.predict(list(crops.values()), batch_size=len(crops))
         for i, res in zip(crops.keys(), results):
-            texts[i] = res['rec_text'] or ""
+            texts[i] = (res['rec_text'] or "", float(res['rec_score'] or 0.0))
         return texts
 
     def keep_subtitle_line(self, sampled_results, reads, sub_remover=None):
         """Drop the boxes that are not on the subtitle line.
 
         PATCH (dub server). The line is learned from the boxes whose text
-        was spoken, see speech_match.py. With no speech, no model for the
-        language, or too few matches, every box is kept, as upstream does.
+        was spoken, see speech_match.py. With no speech file, every box is
+        kept, as upstream does. With one, anything that stops the line from
+        being learned removes nothing at all.
         """
-        if not self.speech:
+        if self.speech is None:
             return sampled_results
         log = sub_remover.append_output if sub_remover else print
+        if self.speech["error"]:
+            log(f"Speech filter: {self.speech['error']}, nothing removed")
+            return {}
+        if not self.speech["cues"]:
+            log("Speech filter: no speech heard, nothing removed")
+            return {}
         if not self.rec_model:
-            log(f"Speech filter off: no text model for language '{self.speech['language']}'")
-            return sampled_results
+            log(f"Speech filter: no text model for language "
+                f"'{self.speech['language']}', nothing removed")
+            return {}
         band = subtitle_band(reads, self.speech["cues"], self.fps)
+        for line in read_log(reads, self.speech["cues"], self.fps, band):
+            log(line)
         if band is None:
-            log("Speech filter off: too few boxes match the speech, keeping every box")
-            return sampled_results
+            log("Speech filter: too few boxes match the speech, nothing removed")
+            return {}
         kept = {}
         for frame_no, boxes in sampled_results.items():
             on_line = [box for box in boxes if on_the_line(box, band)]
@@ -186,7 +196,10 @@ class SubtitleDetect:
                     sampled_results[current_frame_no] = temp_list
                     if self.rec_model:
                         # ponytail: reads every box of every sampled frame; stop once the line is learned if this gets slow
-                        reads[current_frame_no] = list(zip(temp_list, self.read_boxes(frame, temp_list)))
+                        reads[current_frame_no] = [
+                            (box, text, score)
+                            for box, (text, score) in zip(temp_list, self.read_boxes(frame, temp_list))
+                        ]
             tbar.update(1)
             if sub_remover:
                 sub_remover.progress_total = (100 * float(current_frame_no) / float(frame_count)) // 2
