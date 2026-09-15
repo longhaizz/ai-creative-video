@@ -50,6 +50,12 @@ def test_a_short_read_says_nothing():
     assert sm.contained("OK", "ok ok ok") == 0.0
 
 
+def test_letters_without_their_marks_still_match():
+    """Seen on a Bosnian ad: OCR read "MOZETE", Whisper wrote "možete"."""
+    assert sm.contained("MOZETE", "da možete govoriti") == 1.0
+    assert sm.contained("HOM NAY MINH CHIA SE", CUES[0]["text"]) >= sm.MIN_SCORE
+
+
 def test_a_short_word_sharing_the_arabic_article_is_chance():
     """Seen on ara1.mp4: "التمن" shares only "الت" with "الترابي", 3 of 5."""
     spoken = "سوف نستخدم هذا الترابي لنرقف الأخطاقية"
@@ -100,6 +106,22 @@ def test_a_line_next_to_the_subtitles_at_other_times_is_not_grown_into():
     band = sm.subtitle_band(reads, CUES, FPS)
     assert sm.on_the_line(SUB, band)
     assert not sm.on_the_line(below, band)
+
+
+def test_app_text_in_a_screen_recording_is_not_grown_into():
+    """Seen on a Bosnian ad: left-aligned Play Store lines stacked above the
+    subtitle, and small buttons inside its band, were all painted out."""
+    stack = [(20, 300, 745, 790), (20, 300, 690, 735), (20, 300, 635, 680)]
+    button = (450, 550, 830, 855)   # centred, inside the band, but small
+    reads = {
+        n: [(SUB, "mình chia sẻ một mẹo", 0.9), (button, "Install", 1.0)]
+        + [(box, "Events happening now", 1.0) for box in stack]
+        for n in range(1, 30, 3)
+    }
+    band = sm.subtitle_band(reads, CUES, FPS)
+    assert sm.on_the_line(SUB, band)
+    assert not any(sm.on_the_line(box, band) for box in stack), band
+    assert not sm.on_the_line(button, band)
 
 
 def test_a_subtitle_in_another_language_finds_no_line():
