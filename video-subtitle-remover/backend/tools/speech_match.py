@@ -16,6 +16,7 @@ No paddle in this file, so it can be tested without a GPU.
 import json
 import re
 import statistics
+import unicodedata
 from difflib import SequenceMatcher
 
 # Whisper language code -> the PaddleOCR model that reads that script.
@@ -61,6 +62,9 @@ MIN_RUN = 3
 # that starts with the Arabic article (ال) shares three letters with half the
 # words said, and 3 of 5 is already 0.6.
 MIN_MATCHED_LETTERS = 6
+# A box shorter than this share of the subtitle line is other text: on a
+# Bosnian ad the line was 48px and the app buttons under it 25-30px.
+MIN_HEIGHT_SHARE = 0.7
 
 # The log shows one line per piece of text while it stays on screen. Reads
 # of the same text this close in place and time are one line.
@@ -97,8 +101,14 @@ def load_speech(path):
 
 def _letters(text):
     # Lower case, no spaces or punctuation. Works the same for scripts
-    # written without spaces between words.
-    return re.sub(r"[\W_]+", "", text.lower())
+    # written without spaces between words. Marks on letters go too: OCR
+    # reads "MOZETE" where Whisper writes "možete", and Vietnamese marks are
+    # often read wrong.
+    text = "".join(
+        c for c in unicodedata.normalize("NFKD", text.lower())
+        if not unicodedata.combining(c)
+    )
+    return re.sub(r"[\W_]+", "", text)
 
 
 def contained(read, spoken):
@@ -160,12 +170,18 @@ def subtitle_band(reads, cues, fps):
     # the others badly. Grow the band over the lines right above and below,
     # as long as they are on screen in a frame where a line matched. A logo
     # that sits just under the subtitles but shows at other times stays out.
+    # Subtitle lines are centred on one another; the text of an app shown in
+    # a screen recording mostly is not, and without this check it climbed,
+    # line by line, halfway up a Play Store page.
+    center = statistics.median((xmin + xmax) / 2 for xmin, xmax, _, _ in matched)
     together = [box for n in frames for box, _text, _score in reads[n]]
     grown = True
     while grown:
         grown = False
-        for _, _, ymin, ymax in together:
-            if not height / 2 <= ymax - ymin <= height * 2:
+        for xmin, xmax, ymin, ymax in together:
+            if not _line_height(ymax - ymin, height):
+                continue
+            if abs((xmin + xmax) / 2 - center) > height:
                 continue
             touches = ymin <= bottom + height / 2 and ymax >= top - height / 2
             if touches and (ymin < top or ymax > bottom):
@@ -174,15 +190,21 @@ def subtitle_band(reads, cues, fps):
     return top - height / 2, bottom + height / 2, height
 
 
-def on_the_line(box, band):
-    """Does this box sit on the subtitle line, at about its height?
+def _line_height(box_height, height):
+    """Is a box this tall a line of the subtitle font?
 
     Twice the height is still allowed: the detector sometimes draws one box
-    around a subtitle of two lines.
+    around a subtitle of two lines. The floor keeps out the small buttons
+    and labels of an app that sit inside the band.
     """
+    return MIN_HEIGHT_SHARE * height <= box_height <= 2 * height
+
+
+def on_the_line(box, band):
+    """Does this box sit on the subtitle line, at about its height?"""
     top, bottom, height = band
     _, _, ymin, ymax = box
-    return top <= ymin and ymax <= bottom and height / 2 <= ymax - ymin <= height * 2
+    return top <= ymin and ymax <= bottom and _line_height(ymax - ymin, height)
 
 
 def read_log(reads, cues, fps, band):
