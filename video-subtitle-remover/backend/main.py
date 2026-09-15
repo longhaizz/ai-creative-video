@@ -52,6 +52,9 @@ class SubtitleRemover:
         self.sub_areas = []
         # PATCH (dub server). Where to write the detected boxes, or None.
         self.dump_boxes_path = None
+        # PATCH (dub server). What Whisper heard, to tell the subtitles from
+        # other text in the band, or None. See tools/speech_match.py.
+        self.speech = None
         # 是否为gui运行，gui运行需要显示预览
         self.gui_mode = gui_mode
         self.hardware_accelerator = HardwareAccelerator.instance()
@@ -172,7 +175,7 @@ class SubtitleRemover:
         pass
 
     def propainter_mode(self, tbar):
-        sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
+        sub_detector = SubtitleDetect(self.video_path, self.sub_areas, self.speech)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self.dump_boxes(sub_list)
         if len(sub_list) == 0:
@@ -274,7 +277,7 @@ class SubtitleRemover:
         sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar)
 
     def video_inpaint(self, tbar, model):
-        sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
+        sub_detector = SubtitleDetect(self.video_path, self.sub_areas, self.speech)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self.dump_boxes(sub_list)
         if len(sub_list) == 0:
@@ -518,6 +521,8 @@ if __name__ == '__main__':
     sr.sub_areas = args.subtitle_area_coords
     sr.video_out_path = args.output
     sr.dump_boxes_path = args.dump_boxes
+    from backend.tools.speech_match import load_speech
+    sr.speech = load_speech(args.speech_cues)
     config.inpaintMode.value = args.inpaint_mode
     sr.run()
         

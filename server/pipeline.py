@@ -2,9 +2,9 @@
 
 The whole job, in order:
 
+    read speech                      (Whisper, in-process)
     remove the burned-in subtitles   (optional, its own venv)
     split voice from music           (Demucs)
-    read speech                      (Whisper, in-process)
     rewrite and translate            (OpenAI, three lengths a block)
     say every block                  (VoxCPM, best of a few takes)
     move the mouth                   (LatentSync, optional)
@@ -13,11 +13,12 @@ The whole job, in order:
     burn in the new subtitles        (optional)
 
 With dub=false none of the voice work runs. The job keeps the original
-sound and only redoes the subtitles: take the old ones off, read the speech,
+sound and only redoes the subtitles: read the speech, take the old ones off,
 put new ones on in the language already spoken. See _subtitle_only.
 
-Order matters in two places. Subtitles come off first, so every later step
-works on a clean picture. Lip sync happens before the music is mixed in,
+Order matters in three places. Speech is read first, because the subtitle
+remover keeps only the text that was said. Subtitles come off next, so every
+later step works on a clean picture. Lip sync happens before the music is mixed in,
 because it reads the sound to drive the mouth and music in that track would
 confuse it.
 """
@@ -89,6 +90,26 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     # new ones there unless the client asked for a height of its own.
     detected_position = None
 
+    # 0. Read the speech with Whisper, before the picture is touched. The
+    # subtitle remover compares the text it finds with what was said, to
+    # tell the subtitles from a logo or a price in the same band. The sound
+    # is the same before and after the picture is cleaned, so every later
+    # step reads the transcript it always did.
+    #
+    # Whisper reads the mix, not the vocals stem. Feeding it the stem was
+    # tried, on the theory that music under the voice is what makes Whisper
+    # write one short line for a whole window and skip the rest. It is the
+    # wrong trade: most of these videos have no music at all, and demucs
+    # still runs its four-stem split over the clean voice and rebuilds it,
+    # artefacts and all. Clean speech came back transcribed as words that
+    # do not exist in the language. Do not reshape the sound Whisper hears
+    # to fix a fault that lives in how Whisper is called.
+    mix = audio.extract_audio(video, work / "mix.wav")
+    cues, meta = transcribe.transcribe(
+        models.whisper, mix, params.whisper_model, ctx=ctx
+    )
+    ctx.check_cancel()
+
     # 1. Take the old subtitles off the picture.
     if params.remove_subtitle:
         ctx.step("Removing the old subtitles")
@@ -96,6 +117,7 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             video, work / "no_subs.mp4", params.vsr_mode,
             params.vsr_top, params.vsr_bottom, params.vsr_left, params.vsr_right,
             ctx=ctx,
+            speech_cues=_speech_file(work, cues, meta),
         )
     ctx.check_cancel()
 
@@ -110,22 +132,9 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     width, height = audio.video_size(video)
     ctx.log(f"{video_seconds:.1f}s, {width}x{height}")
 
-    # 2. Split voice from music, then read the mix with Whisper.
-    #
-    # Whisper reads the mix, not the vocals stem. Feeding it the stem was
-    # tried, on the theory that music under the voice is what makes Whisper
-    # write one short line for a whole window and skip the rest. It is the
-    # wrong trade: most of these videos have no music at all, and demucs
-    # still runs its four-stem split over the clean voice and rebuilds it,
-    # artefacts and all. Clean speech came back transcribed as words that
-    # do not exist in the language. Do not reshape the sound Whisper hears
-    # to fix a fault that lives in how Whisper is called.
-    mix = audio.extract_audio(video, work / "mix.wav")
+    # 2. Split voice from music. The mix is the one Whisper read in step 0.
     vocals, music = separate.separate(mix, work, ctx=ctx)
     ctx.check_cancel()
-    cues, meta = transcribe.transcribe(
-        models.whisper, mix, params.whisper_model, ctx=ctx
-    )
     # The file name travels with what Whisper heard, because both are what
     # the translator knows about the source. A title written by a person is
     # the one word in the job spelled the way it was meant.
@@ -333,6 +342,26 @@ def _subtitle_cues(work: Path, cues: list[dict]) -> list[dict]:
     return _spoken_lines(spoken)
 
 
+def _speech_file(work: Path, cues: list[dict], meta: dict) -> Path | None:
+    """Write what Whisper heard for the subtitle remover, or None if nothing.
+
+    The remover reads the text in each box it finds and keeps the line whose
+    text was said. The language picks the model that can read that script.
+    """
+    import json
+
+    lines = _spoken_lines(cues)
+    if not lines:
+        return None
+    path = work / "speech_cues.json"
+    path.write_text(
+        json.dumps({"language": meta.get("language", ""), "cues": lines},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _spoken_lines(cues: list[dict]) -> list[dict]:
     """The cues that carry text, in the shape subtitle.burn wants."""
     return [
@@ -362,12 +391,34 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
     # path: the new text goes back where the old text was.
     detected_position = None
 
+    if params.burn_subtitle and models.whisper is None:
+        raise PipelineError(
+            "New subtitles were asked for, but this server has no "
+            "Whisper model to read the speech with.",
+            code="invalid_input",
+        )
+
+    # Read the speech before the picture is touched. The new lines come from
+    # it, and the subtitle remover uses it to tell the subtitles from other
+    # text. A job that only removes subtitles still pays for this read; with
+    # no Whisper loaded it removes them by position alone, as it always did.
+    cues, meta = [], {}
+    if models.whisper is not None and (params.burn_subtitle or params.remove_subtitle):
+        cues, meta = transcribe.transcribe(
+            models.whisper,
+            audio.extract_audio(video, work / "mix.wav"),
+            params.whisper_model,
+            ctx=ctx,
+        )
+        ctx.check_cancel()
+
     if params.remove_subtitle:
         ctx.step("Removing the old subtitles")
         video, detected_position = vsr.remove_subtitles(
             video, work / "no_subs.mp4", params.vsr_mode,
             params.vsr_top, params.vsr_bottom, params.vsr_left, params.vsr_right,
             ctx=ctx,
+            speech_cues=_speech_file(work, cues, meta),
         )
     ctx.check_cancel()
 
@@ -377,19 +428,6 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
 
     lines: list[dict] = []
     if params.burn_subtitle:
-        if models.whisper is None:
-            raise PipelineError(
-                "New subtitles were asked for, but this server has no "
-                "Whisper model to read the speech with.",
-                code="invalid_input",
-            )
-        cues, _ = transcribe.transcribe(
-            models.whisper,
-            audio.extract_audio(video, work / "mix.wav"),
-            params.whisper_model,
-            ctx=ctx,
-        )
-        ctx.check_cancel()
         lines = _spoken_lines(cues)
         if not lines:
             # Creatives carrying only music are common, and nothing here

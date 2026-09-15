@@ -108,9 +108,10 @@ def build_command(
     mode: str,
     area: tuple[int, int, int, int],
     dump_boxes: Path,
+    speech_cues: Path | None = None,
 ) -> list[str]:
     ymin, ymax, xmin, xmax = area
-    return [
+    command = [
         str(config.VSR_PYTHON),
         "backend/main.py",
         "--input", str(video),
@@ -119,6 +120,9 @@ def build_command(
         "--inpaint-mode", mode,
         "--dump-boxes", str(dump_boxes),
     ]
+    if speech_cues is not None:
+        command += ["--speech-cues", str(speech_cues)]
+    return command
 
 
 def subtitle_position(dump_path: Path, height: int) -> float | None:
@@ -168,6 +172,7 @@ def remove_subtitles(
     left: float,
     right: float,
     ctx=None,
+    speech_cues: Path | None = None,
 ) -> tuple[Path, float | None]:
     """Paint over the burned-in subtitles.
 
@@ -175,6 +180,10 @@ def remove_subtitles(
     there was nothing to paint over; and where the old subtitles sat as a
     share of the frame height, or None when the run found none. The caller
     puts the new subtitles at that height instead of guessing one.
+
+    speech_cues is what Whisper heard, as written by the pipeline. With it
+    the tool reads the text in each box and keeps only the line whose text
+    was spoken. Leave it out for text nobody says, such as the hook.
     """
     video = Path(video).resolve()
     out_path = Path(out_path).resolve()
@@ -182,7 +191,7 @@ def remove_subtitles(
     width, height = probe_size(video)
     area = area_to_pixels(width, height, top, bottom, left, right)
     dump_boxes = out_path.with_name("sub_boxes.json")
-    command = build_command(video, out_path, mode, area, dump_boxes)
+    command = build_command(video, out_path, mode, area, dump_boxes, speech_cues)
 
     if ctx is not None:
         ctx.log(
@@ -218,7 +227,9 @@ def remove_subtitles(
                 process.kill()
                 raise JobCancelled()
             now = time.monotonic()
-            if now - last_log >= LOG_EVERY_SECONDS:
+            # The speech filter says once whether it kept the line or gave
+            # up. That line must not be lost between two progress bars.
+            if now - last_log >= LOG_EVERY_SECONDS or line.startswith("Speech filter"):
                 last_log = now
                 ctx.log(line)
     finally:

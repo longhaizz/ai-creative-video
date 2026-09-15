@@ -79,6 +79,16 @@ def test_the_area_is_given_in_the_order_the_tool_wants():
     assert command[start + 1 : start + 5] == ["10", "20", "30", "40"]
 
 
+def test_speech_cues_are_passed_only_when_given():
+    """The hook pass sends none: nobody says the hook out loud."""
+    plain = build_command("in.mp4", "out.mp4", "sttn-det", (1, 2, 3, 4), "boxes.json")
+    assert "--speech-cues" not in plain
+    heard = build_command(
+        "in.mp4", "out.mp4", "sttn-det", (1, 2, 3, 4), "boxes.json", "cues.json"
+    )
+    assert heard[heard.index("--speech-cues") + 1] == "cues.json"
+
+
 @pytest.mark.parametrize("mode", ["sttn-det", "sttn-auto", "lama", "propainter"])
 def test_every_mode_the_client_may_pick_is_passed_through(mode):
     command = build_command("in.mp4", "out.mp4", mode, (1, 2, 3, 4), "boxes.json")
