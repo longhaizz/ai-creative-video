@@ -106,7 +106,7 @@ Tham số đầy đủ: [`schemas.py`](schemas.py).
 | `API_KEY` | — | **Bắt buộc.** Thiếu thì server không khởi động |
 | `OPENAI_API_KEY` | — | Cần cả khi giữ nguyên ngôn ngữ |
 | `LOAD_MODELS` | `1` | `0` = chạy không model |
-| `LOAD_LIPSYNC` | `1` | `0` = không nạp LatentSync (T4 / card 16GB) |
+| `LOAD_LIPSYNC` | `0` | `1` = nạp LatentSync. Tắt thì job gửi `lipsync=true` chạy như không tick |
 | `JOBS_DIR` | `jobs` | |
 | `JOB_TTL_SECONDS` | `3600` | |
 | `MAX_VIDEO_BYTES` | 200MB | kiểm lúc lưu |

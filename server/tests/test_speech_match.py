@@ -156,6 +156,12 @@ def test_load_speech_reads_what_the_server_writes(tmp_path):
     assert sm.REC_MODELS[speech["language"]] == "latin_PP-OCRv5_mobile_rec"
 
 
+def test_croatian_is_read_with_the_latin_model():
+    """Seen on a Bosnian ad: Whisper said hr, and no model meant no removal."""
+    assert sm.REC_MODELS["hr"] == "latin_PP-OCRv5_mobile_rec"
+    assert sm.REC_MODELS["bs"] == "latin_PP-OCRv5_mobile_rec"
+
+
 def test_no_path_means_the_filter_was_not_asked_for():
     assert sm.load_speech(None) is None
 

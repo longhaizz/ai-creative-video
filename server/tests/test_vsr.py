@@ -138,6 +138,34 @@ def test_a_real_crash_still_fails(monkeypatch, tmp_path):
         _run_with_exit_code(1, monkeypatch, tmp_path)
 
 
+def test_a_filter_line_stuck_to_the_progress_bar_still_reaches_the_log(
+        monkeypatch, tmp_path):
+    """Seen on a Croatian video: the only line saying why nothing was removed
+    came right after a tqdm bar, shared its line, and was thrown away."""
+    (tmp_path / "video.mp4").write_bytes(b"v")
+    monkeypatch.setattr("server.steps.vsr.probe_size", lambda path: (640, 360))
+    process = _FakeProcess(NO_SUBTITLE_EXIT_CODE)
+    process.stdout = io.StringIO(
+        "Subtitle Finding: 85%|###| 710/833Speech filter: no text model "
+        "for language 'xx', nothing removed\n"
+    )
+    monkeypatch.setattr("server.steps.vsr.subprocess.Popen", lambda *a, **k: process)
+
+    class Ctx:
+        logs = []
+
+        def log(self, message):
+            self.logs.append(message)
+
+        def check_cancel(self):
+            pass
+
+    ctx = Ctx()
+    remove_subtitles(tmp_path / "video.mp4", tmp_path / "no_subs.mp4",
+                     "sttn-det", 0.6, 0.96, 0.03, 0.97, ctx=ctx)
+    assert "Speech filter: no text model for language 'xx', nothing removed" in ctx.logs, ctx.logs
+
+
 def test_speech_cues_reach_the_tool_as_an_absolute_path(monkeypatch, tmp_path):
     """The tool runs from its own folder, where jobs/... points at nothing.
 

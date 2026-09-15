@@ -221,6 +221,13 @@ def remove_subtitles(
             line = line.strip()
             if not line:
                 continue
+            # tqdm redraws its bar as "\r" + text, with no newline after the
+            # last one, so the next printed line lands on the end of the bar:
+            # "Subtitle Finding: 85%|...Speech filter: ...". Cut the bar off.
+            for marker in ("Speech filter", "OCR "):
+                at = line.find(marker)
+                if at > 0:
+                    line = line[at:]
             tail.append(line)
             del tail[:-TAIL_LINES]
             if ctx is None:
