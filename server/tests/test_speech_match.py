@@ -24,6 +24,12 @@ def _reads(sub_text, frames=range(1, 30, 3)):
     return {n: [(SUB, sub_text, 0.9), (LOGO, "SALE 50%", 0.95)] for n in frames}
 
 
+def _band(reads, cues, frame=1):
+    """The subtitle line learned for one frame, or None."""
+    bands = sm.subtitle_bands(reads, cues, FPS)
+    return bands and bands[frame]
+
+
 # -- scoring one read ------------------------------------------------------
 
 
@@ -56,6 +62,11 @@ def test_letters_without_their_marks_still_match():
     assert sm.contained("HOM NAY MINH CHIA SE", CUES[0]["text"]) >= sm.MIN_SCORE
 
 
+def test_a_subtitle_in_dialect_still_matches_the_standard_words():
+    """Seen on a Moroccan ad: the subtitle said "انستفرام", Whisper "انستجرام"."""
+    assert sm.contained("منشورات انستفرام", "في صورة انستجرام") >= sm.MIN_SCORE
+
+
 def test_a_short_word_sharing_the_arabic_article_is_chance():
     """Seen on ara1.mp4: "التمن" shares only "الت" with "الترابي", 3 of 5."""
     spoken = "سوف نستخدم هذا الترابي لنرقف الأخطاقية"
@@ -66,7 +77,7 @@ def test_a_short_word_sharing_the_arabic_article_is_chance():
 
 
 def test_the_logo_is_off_the_line():
-    band = sm.subtitle_band(_reads("mình chia sẻ một mẹo"), CUES, FPS)
+    band = _band(_reads("mình chia sẻ một mẹo"), CUES)
     assert band is not None
     assert sm.on_the_line(SUB, band)
     assert not sm.on_the_line(LOGO, band)
@@ -79,7 +90,7 @@ def test_two_lines_of_subtitles_are_both_kept():
             (LOGO, "SALE", 0.9)]
         for n in range(1, 30, 3)
     }
-    band = sm.subtitle_band(reads, CUES, FPS)
+    band = _band(reads, CUES)
     assert sm.on_the_line(upper, band) and sm.on_the_line(SUB, band)
     assert not sm.on_the_line(LOGO, band)
 
@@ -93,7 +104,7 @@ def test_three_lines_are_kept_when_only_the_middle_one_matches():
             (lower, "kjhg fdsa", 0.9), (LOGO, "SALE", 0.9)]
         for n in range(1, 30, 3)
     }
-    band = sm.subtitle_band(reads, CUES, FPS)
+    band = _band(reads, CUES)
     assert all(sm.on_the_line(box, band) for box in (upper, SUB, lower)), band
     assert not sm.on_the_line(LOGO, band)
 
@@ -103,7 +114,7 @@ def test_a_line_next_to_the_subtitles_at_other_times_is_not_grown_into():
     reads = _reads("mình chia sẻ một mẹo")
     for n in (31, 34, 37):
         reads[n] = [(below, "SHOP NOW", 0.9)]
-    band = sm.subtitle_band(reads, CUES, FPS)
+    band = _band(reads, CUES, 31)
     assert sm.on_the_line(SUB, band)
     assert not sm.on_the_line(below, band)
 
@@ -118,25 +129,48 @@ def test_app_text_in_a_screen_recording_is_not_grown_into():
         + [(box, "Events happening now", 1.0) for box in stack]
         for n in range(1, 30, 3)
     }
-    band = sm.subtitle_band(reads, CUES, FPS)
+    band = _band(reads, CUES)
     assert sm.on_the_line(SUB, band)
     assert not any(sm.on_the_line(box, band) for box in stack), band
     assert not sm.on_the_line(button, band)
 
 
+def test_a_subtitle_that_moves_is_followed():
+    """Seen on a Moroccan ad: y=950 for 17 seconds, then near y=750."""
+    high = (100, 900, 600, 660)
+    far_logo = (200, 400, 200, 260)
+    reads = {n: [(SUB, "mình chia sẻ một mẹo", 0.9), (far_logo, "SALE 50%", 0.9)]
+             for n in range(1, 30, 3)}
+    reads.update({n: [(high, "mình chia sẻ một mẹo", 0.9), (far_logo, "SALE 50%", 0.9)]
+                  for n in range(31, 60, 3)})
+    bands = sm.subtitle_bands(reads, CUES, FPS)
+    assert sm.on_the_line(SUB, bands[1]) and not sm.on_the_line(high, bands[1])
+    assert sm.on_the_line(high, bands[55]) and not sm.on_the_line(SUB, bands[55])
+    assert not any(sm.on_the_line(far_logo, band) for band in bands.values())
+
+
+def test_lines_that_do_not_match_between_two_that_do_are_kept():
+    """Seen on a Moroccan ad: whole lines were said in other words."""
+    grown = (100, 900, 790, 880)    # the same line, animated a little bigger
+    reads = {n: [(SUB, "mình chia sẻ một mẹo", 0.9)] for n in (1, 4, 7, 10, 25, 28, 31, 34)}
+    reads.update({n: [(grown, "zzzz qqqq", 0.9)] for n in (13, 16, 19, 22)})
+    bands = sm.subtitle_bands(reads, CUES, FPS)
+    assert all(sm.on_the_line(grown, bands[n]) for n in (13, 16, 19, 22))
+
+
 def test_a_subtitle_in_another_language_finds_no_line():
     """Nothing matches, so there is no line, and the caller removes nothing."""
-    assert sm.subtitle_band(_reads("Today I share a small tip"), CUES, FPS) is None
+    assert _band(_reads("Today I share a small tip"), CUES) is None
 
 
 def test_text_shown_when_nobody_speaks_does_not_match():
     quiet = [{"start": 50.0, "end": 55.0, "text": CUES[0]["text"]}]
-    assert sm.subtitle_band(_reads("mình chia sẻ một mẹo"), quiet, FPS) is None
+    assert _band(_reads("mình chia sẻ một mẹo"), quiet) is None
 
 
 def test_too_few_matching_frames_is_not_enough():
     reads = _reads("mình chia sẻ một mẹo", frames=[1, 4])
-    assert sm.subtitle_band(reads, CUES, FPS) is None
+    assert _band(reads, CUES) is None
 
 
 # -- the log ---------------------------------------------------------------
@@ -144,8 +178,7 @@ def test_too_few_matching_frames_is_not_enough():
 
 def test_the_log_gives_one_line_per_text_with_place_and_verdict():
     reads = _reads("mình chia sẻ một mẹo")
-    band = sm.subtitle_band(reads, CUES, FPS)
-    lines = sm.read_log(reads, CUES, FPS, band)
+    lines = sm.read_log(reads, CUES, FPS, sm.subtitle_bands(reads, CUES, FPS))
     assert len(lines) == 2, lines
     sub, logo = lines
     assert sub.startswith("OCR 0.00-2.70s y=800-860 x=100-900 ocr=0.90 match=1.00 KEEP")
@@ -164,6 +197,16 @@ def test_without_a_line_the_log_still_shows_the_reads():
 def test_the_same_text_back_later_is_a_new_line():
     reads = {1: [(SUB, "mình chia sẻ", 0.9)], 51: [(SUB, "mình chia sẻ", 0.9)]}
     assert len(sm.read_log(reads, CUES, FPS, None)) == 2
+
+
+def test_the_log_always_shows_what_was_kept(monkeypatch):
+    """Seen on a Moroccan ad: app text used up the cap before the subtitles."""
+    monkeypatch.setattr(sm, "MAX_LOG_LINES", 1)
+    noise = [((20, 120, y, y + 30), f"menu {y}", 1.0) for y in (100, 200, 300)]
+    reads = {n: noise + [(SUB, "mình chia sẻ một mẹo", 0.9)] for n in range(1, 30, 3)}
+    lines = sm.read_log(reads, CUES, FPS, sm.subtitle_bands(reads, CUES, FPS))
+    assert any("KEEP" in line and "mình chia sẻ" in line for line in lines), lines
+    assert lines[-1] == "OCR ... 3 more lines not shown", lines
 
 
 # -- the file the server writes --------------------------------------------

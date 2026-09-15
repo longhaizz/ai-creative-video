@@ -13,6 +13,7 @@ product and a price painted out of the whole frame.
 No paddle in this file, so it can be tested without a GPU.
 """
 
+import bisect
 import json
 import re
 import statistics
@@ -49,8 +50,13 @@ REC_MODELS = {
 
 # Seconds a subtitle may show before or after its words are said.
 TIME_PAD = 0.75
-# Share of the read text that must be found in the speech.
-MIN_SCORE = 0.6
+# Share of the read text that must be found in the speech. Low, because the
+# subtitle is often not word for word what Whisper wrote: a Moroccan ad
+# showed dialect ("واش باقي كتقلب") where Whisper wrote standard Arabic, and
+# its real subtitles scored 0.44-0.67. MIN_MATCHED_LETTERS keeps chance out.
+MIN_SCORE = 0.4
+# Matches this many seconds apart, or closer, learn one line together.
+LOCAL_SECONDS = 2.0
 # Fewer frames than this that match the speech is too little to trust.
 MIN_MATCHED_FRAMES = 3
 # A read shorter than this says nothing ("OK", "5%").
@@ -135,27 +141,50 @@ def spoken_at(cues, seconds):
     )
 
 
-def subtitle_band(reads, cues, fps):
-    """Where the subtitle line sits, learned from boxes whose text was said.
+def subtitle_bands(reads, cues, fps):
+    """Where the subtitle line sits in each frame, learned from boxes whose text was said.
 
     reads: frame number (from 1) -> list of (box, text, ocr_score), where a
-    box is (xmin, xmax, ymin, ymax). Returns (top, bottom, line_height) in
-    pixels, or None when too few frames match the speech to say.
+    box is (xmin, xmax, ymin, ymax). Returns frame number -> (top, bottom,
+    line_height) in pixels, or None when too few frames match the speech.
+
+    The line is learned again around every match, from the matches close to
+    it in time, and each frame takes the line of the match nearest to it.
+    Subtitles move: in one Arabic ad they sat at y=950 for 17 seconds and
+    then near y=750, and one line for the whole video missed the first part.
     """
     if fps <= 0:
         return None
-    matched, frames = [], set()
+    matched = {}
     for frame_no, items in reads.items():
         spoken = spoken_at(cues, (frame_no - 1) / fps)
         if not spoken:
             continue
-        for box, text, _score in items:
-            if contained(text, spoken) >= MIN_SCORE:
-                matched.append(box)
-                frames.add(frame_no)
-    if len(frames) < MIN_MATCHED_FRAMES:
+        boxes = [box for box, text, _score in items if contained(text, spoken) >= MIN_SCORE]
+        if boxes:
+            matched[frame_no] = boxes
+    if len(matched) < MIN_MATCHED_FRAMES:
         return None
 
+    # ponytail: compares every match with every other; fine for the few hundred sampled frames of an ad
+    window = LOCAL_SECONDS * fps
+    lines = {}
+    for frame_no in matched:
+        frames = [n for n in matched if abs(n - frame_no) <= window]
+        lines[frame_no] = _line(reads, frames, [b for n in frames for b in matched[n]])
+    order = sorted(n for n, line in lines.items() if line)
+    if not order:
+        return None
+    bands = {}
+    for frame_no in reads:
+        i = bisect.bisect_left(order, frame_no)
+        nearest = min(order[max(0, i - 1):i + 1], key=lambda n: abs(n - frame_no))
+        bands[frame_no] = lines[nearest]
+    return bands
+
+
+def _line(reads, frames, matched):
+    """One subtitle line from the boxes that matched in these frames, or None."""
     height = statistics.median(ymax - ymin for _, _, ymin, ymax in matched)
     # One stray match far from the rest -- a hook that repeats the speech --
     # must not stretch the band over the middle of the picture.
@@ -201,18 +230,24 @@ def _line_height(box_height, height):
 
 
 def on_the_line(box, band):
-    """Does this box sit on the subtitle line, at about its height?"""
+    """Is the middle of this box on the subtitle line, and is it about as tall?
+
+    The middle, not the edges: an animated subtitle grows as it shows up
+    (66px to 133px tall on one ad) around the same middle.
+    """
     top, bottom, height = band
     _, _, ymin, ymax = box
-    return top <= ymin and ymax <= bottom and _line_height(ymax - ymin, height)
+    return top <= (ymin + ymax) / 2 <= bottom and _line_height(ymax - ymin, height)
 
 
-def read_log(reads, cues, fps, band):
+def read_log(reads, cues, fps, bands):
     """Log lines: what OCR read, where, how sure, and what became of it.
 
     Reads of the same text in about the same place, one after another, are
-    one line with the time they stayed on screen. With a band, each line
-    ends in KEEP or DROP; without one there is nothing to decide.
+    one line with the time they stayed on screen. With bands, each line
+    ends in KEEP or DROP; without them there is nothing to decide. Lines
+    that were kept or matched the speech are always shown; the cap only
+    cuts the rest, which on a screen recording is mostly app text.
     """
     groups, open_groups = [], {}
     for frame_no in sorted(reads):
@@ -229,20 +264,28 @@ def read_log(reads, cues, fps, band):
                 group["match"] = max(group["match"], match)
                 continue
             group = {"box": box, "text": text, "first": seconds, "last": seconds,
-                     "ocr": score, "match": match}
+                     "ocr": score, "match": match, "frame": frame_no}
             open_groups[key] = group
             groups.append(group)
 
+    for g in groups:
+        band = bands.get(g["frame"]) if bands else None
+        g["verdict"] = "" if band is None else (
+            " KEEP" if on_the_line(g["box"], band) else " DROP")
+        g["important"] = g["match"] > 0 or g["verdict"] == " KEEP"
+
+    room = MAX_LOG_LINES - sum(g["important"] for g in groups)
     lines = []
-    for g in groups[:MAX_LOG_LINES]:
+    for g in groups:
+        if not g["important"]:
+            if room <= 0:
+                continue
+            room -= 1
         xmin, xmax, ymin, ymax = g["box"]
-        verdict = ""
-        if band is not None:
-            verdict = " KEEP" if on_the_line(g["box"], band) else " DROP"
         lines.append(
             f"OCR {g['first']:.2f}-{g['last']:.2f}s y={ymin}-{ymax} x={xmin}-{xmax} "
-            f"ocr={g['ocr']:.2f} match={g['match']:.2f}{verdict} \"{g['text']}\""
+            f"ocr={g['ocr']:.2f} match={g['match']:.2f}{g['verdict']} \"{g['text']}\""
         )
-    if len(groups) > MAX_LOG_LINES:
-        lines.append(f"OCR ... {len(groups) - MAX_LOG_LINES} more lines not shown")
+    if len(groups) > len(lines):
+        lines.append(f"OCR ... {len(groups) - len(lines)} more lines not shown")
     return lines

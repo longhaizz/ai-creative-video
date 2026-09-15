@@ -8,7 +8,7 @@ from .model_config import ModelConfig
 from .hardware_accelerator import HardwareAccelerator
 from .common_tools import get_readable_path
 from .ocr import get_coordinates
-from .speech_match import REC_MODELS, on_the_line, read_log, subtitle_band
+from .speech_match import REC_MODELS, on_the_line, read_log, subtitle_bands
 from backend.config import config, tr
 from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
@@ -130,19 +130,21 @@ class SubtitleDetect:
             log(f"Speech filter: no text model for language "
                 f"'{self.speech['language']}', nothing removed")
             return {}
-        band = subtitle_band(reads, self.speech["cues"], self.fps)
-        for line in read_log(reads, self.speech["cues"], self.fps, band):
+        bands = subtitle_bands(reads, self.speech["cues"], self.fps)
+        for line in read_log(reads, self.speech["cues"], self.fps, bands):
             log(line)
-        if band is None:
+        if bands is None:
             log("Speech filter: too few boxes match the speech, nothing removed")
             return {}
         kept = {}
         for frame_no, boxes in sampled_results.items():
-            on_line = [box for box in boxes if on_the_line(box, band)]
+            band = bands.get(frame_no)
+            on_line = [box for box in boxes if band and on_the_line(box, band)]
             if on_line:
                 kept[frame_no] = on_line
         dropped = sum(map(len, sampled_results.values())) - sum(map(len, kept.values()))
-        log(f"Speech filter: subtitle line y={band[0]:.0f}-{band[1]:.0f}, "
+        places = sorted({(round(top), round(bottom)) for top, bottom, _ in bands.values()})
+        log(f"Speech filter: subtitle lines y={', '.join(f'{t}-{b}' for t, b in places)}, "
             f"dropped {dropped} boxes off the line")
         return kept
 
