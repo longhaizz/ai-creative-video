@@ -540,7 +540,8 @@ def _stub_pipeline(monkeypatch, tmp_path, cues, vocals, music, refs_out):
     return _dub, Ctx, Voice, Lipsync, order
 
 
-def test_dub_runs_vsr_then_separate_then_whisper(monkeypatch, tmp_path):
+def test_dub_runs_whisper_then_vsr_then_separate(monkeypatch, tmp_path):
+    """Whisper first: the subtitle remover keeps only the text that was said."""
     from server.pipeline import Models
 
     vocals = tmp_path / "vocals.wav"
@@ -562,7 +563,7 @@ def test_dub_runs_vsr_then_separate_then_whisper(monkeypatch, tmp_path):
         vocals=vocals, music=music, refs_out=refs,
     )
     result = _dub(Ctx(), Models(voice=Voice(), lipsync=Lipsync()))
-    assert order == ["vsr", "separate", "asr", "tts", "lipsync"]
+    assert order == ["asr", "vsr", "separate", "tts", "lipsync"]
     assert refs == [str(ref0), str(ref1)]
     assert result.is_file()
 

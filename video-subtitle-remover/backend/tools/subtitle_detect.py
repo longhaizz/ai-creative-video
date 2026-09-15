@@ -8,6 +8,7 @@ from .model_config import ModelConfig
 from .hardware_accelerator import HardwareAccelerator
 from .common_tools import get_readable_path
 from .ocr import get_coordinates
+from .speech_match import REC_MODELS, on_the_line, subtitle_band
 from backend.config import config, tr
 from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
@@ -21,9 +22,13 @@ class SubtitleDetect:
     # 采样间隔，根据视频帧率在 _init_sample_step 中自适应设置
     SAMPLE_STEP = 3
 
-    def __init__(self, video_path, sub_areas=[]):
+    def __init__(self, video_path, sub_areas=[], speech=None):
         self.video_path = video_path
         self.sub_areas = sub_areas
+        # PATCH (dub server). What Whisper heard, or None. The recognition
+        # model is picked by its language; None turns the filter off.
+        self.speech = speech
+        self.rec_model = REC_MODELS.get(speech["language"]) if speech else None
         self._init_sample_step()
 
     def _init_sample_step(self):
@@ -31,6 +36,7 @@ class SubtitleDetect:
         cap = cv2.VideoCapture(get_readable_path(self.video_path))
         fps = cap.get(cv2.CAP_PROP_FPS)
         cap.release()
+        self.fps = fps
         if fps >= 60:
             self.SAMPLE_STEP = 4
         elif fps >= 30:
@@ -68,6 +74,61 @@ class SubtitleDetect:
             thresh=0.45,
         )
 
+    @cached_property
+    def text_recognizer(self):
+        # PATCH (dub server). Reads the text in each box, to compare it with
+        # what Whisper heard. It is not in the repo like the detector:
+        # PaddleOCR downloads it on first use and keeps it in its cache.
+        # text_detector always runs first, so paddle is already set up.
+        from paddleocr import TextRecognition
+        return TextRecognition(
+            model_name=self.rec_model,
+            device="gpu" if HardwareAccelerator.instance().has_cuda() else "cpu",
+            enable_hpi=False,
+        )
+
+    def read_boxes(self, img, boxes):
+        """Return the text in each box, "" where there is nothing to read."""
+        texts = [""] * len(boxes)
+        crops = {
+            i: img[ymin:ymax, xmin:xmax]
+            for i, (xmin, xmax, ymin, ymax) in enumerate(boxes)
+            if xmax > xmin and ymax > ymin
+        }
+        if not crops:
+            return texts
+        results = self.text_recognizer.predict(list(crops.values()), batch_size=len(crops))
+        for i, res in zip(crops.keys(), results):
+            texts[i] = res['rec_text'] or ""
+        return texts
+
+    def keep_subtitle_line(self, sampled_results, reads, sub_remover=None):
+        """Drop the boxes that are not on the subtitle line.
+
+        PATCH (dub server). The line is learned from the boxes whose text
+        was spoken, see speech_match.py. With no speech, no model for the
+        language, or too few matches, every box is kept, as upstream does.
+        """
+        if not self.speech:
+            return sampled_results
+        log = sub_remover.append_output if sub_remover else print
+        if not self.rec_model:
+            log(f"Speech filter off: no text model for language '{self.speech['language']}'")
+            return sampled_results
+        band = subtitle_band(reads, self.speech["cues"], self.fps)
+        if band is None:
+            log("Speech filter off: too few boxes match the speech, keeping every box")
+            return sampled_results
+        kept = {}
+        for frame_no, boxes in sampled_results.items():
+            on_line = [box for box in boxes if on_the_line(box, band)]
+            if on_line:
+                kept[frame_no] = on_line
+        dropped = sum(map(len, sampled_results.values())) - sum(map(len, kept.values()))
+        log(f"Speech filter: subtitle line y={band[0]:.0f}-{band[1]:.0f}, "
+            f"dropped {dropped} boxes off the line")
+        return kept
+
     def detect_subtitle(self, img):
         temp_list = []
         results = self.text_detector.predict(img)
@@ -103,6 +164,9 @@ class SubtitleDetect:
         current_frame_no = 0
         # 阶段1：采样检测，仅对每隔 sample_step 帧执行 OCR
         sampled_results = {}  # frame_no -> temp_list
+        # PATCH (dub server). frame_no -> [(box, text)], only filled when
+        # there is speech to compare the text with.
+        reads = {}
         if sub_remover:
             sub_remover.append_output(tr['Main']['ProcessingStartFindingSubtitles'])
         while video_cap.isOpened():
@@ -120,10 +184,14 @@ class SubtitleDetect:
                 temp_list = self.detect_subtitle(frame)
                 if len(temp_list) > 0:
                     sampled_results[current_frame_no] = temp_list
+                    if self.rec_model:
+                        # ponytail: reads every box of every sampled frame; stop once the line is learned if this gets slow
+                        reads[current_frame_no] = list(zip(temp_list, self.read_boxes(frame, temp_list)))
             tbar.update(1)
             if sub_remover:
                 sub_remover.progress_total = (100 * float(current_frame_no) / float(frame_count)) // 2
         video_cap.release()
+        sampled_results = self.keep_subtitle_line(sampled_results, reads, sub_remover)
         # 阶段2：插值填充 — 两个采样帧之间都有字幕时，中间帧也标记为有字幕
         subtitle_frame_no_box_dict = {}
         detected_nos = sorted(sampled_results.keys())

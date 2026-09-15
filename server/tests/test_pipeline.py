@@ -8,6 +8,7 @@ heard nobody speak.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,8 @@ def params(**changes):
     base = dict(
         dub=False,
         remove_subtitle=False,
+        vsr_mode="sttn-det",
+        vsr_top=0.6, vsr_bottom=0.96, vsr_left=0.03, vsr_right=0.97,
         burn_subtitle=True,
         whisper_model="medium",
         subtitle_font="Noto Sans",
@@ -80,6 +83,43 @@ def test_a_video_nobody_speaks_in_still_comes_back(monkeypatch, tmp_path):
     assert result == source
     assert not burned, "no lines means burning must be skipped, not attempted"
     assert any("nothing to burn" in line for line in ctx.logs), ctx.logs
+
+
+def _stub_vsr(monkeypatch):
+    """Record what the subtitle remover was given, and paint nothing."""
+    seen = {}
+
+    def fake_remove(video, out_path, *args, ctx=None, speech_cues=None):
+        seen["speech_cues"] = speech_cues
+        return video, None
+
+    monkeypatch.setattr(pipeline.vsr, "remove_subtitles", fake_remove)
+    return seen
+
+
+def test_removing_only_still_hands_the_speech_to_the_remover(monkeypatch, tmp_path):
+    """No burn asked for, but the remover still needs to know what was said."""
+    stub_reading(monkeypatch, [{"start": 0.0, "end": 1.0, "text": "xin chào"}])
+    seen = _stub_vsr(monkeypatch)
+    (tmp_path / "video.mp4").write_bytes(b"v")
+
+    ctx = FakeContext(tmp_path, params(remove_subtitle=True, burn_subtitle=False))
+    pipeline._subtitle_only(ctx, pipeline.Models(None, None, object()))
+
+    written = json.loads(seen["speech_cues"].read_text(encoding="utf-8"))
+    assert written["cues"] == [{"start": 0.0, "end": 1.0, "text": "xin chào"}]
+
+
+def test_removing_without_whisper_works_by_position_alone(monkeypatch, tmp_path):
+    """A server with no Whisper must not fail a job that burns nothing."""
+    stub_reading(monkeypatch, [])
+    seen = _stub_vsr(monkeypatch)
+    (tmp_path / "video.mp4").write_bytes(b"v")
+
+    ctx = FakeContext(tmp_path, params(remove_subtitle=True, burn_subtitle=False))
+    pipeline._subtitle_only(ctx, pipeline.Models(None, None, None))
+
+    assert seen["speech_cues"] is None
 
 
 def test_the_heard_lines_are_the_ones_burned(monkeypatch, tmp_path):

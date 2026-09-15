@@ -31,6 +31,13 @@ def parse_args():
         "--dump-boxes", type=str, default=None,
         help="Write the detected subtitle boxes to this JSON file"
     )
+    # PATCH (dub server). What Whisper heard, written by the dub server. The
+    # text in each box is read and compared with it, to keep the subtitles
+    # and drop the logos and prices in the same band. Off unless given.
+    parser.add_argument(
+        "--speech-cues", type=str, default=None,
+        help="JSON file with the language and the spoken cues"
+    )
     args = parser.parse_args()
     args.inpaint_mode = InpaintMode[args.inpaint_mode.replace('-','_').upper()]
     if args.subtitle_area_coords is None:
