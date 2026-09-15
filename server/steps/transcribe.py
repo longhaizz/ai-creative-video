@@ -193,6 +193,14 @@ def _run_once(models: WhisperModels, audio: Path, size: str, ctx):
                 "start": round(float(segment.start), 3),
                 "end": round(float(segment.end), 3),
                 "text": text,
+                # How sure Whisper was, to tell why a line came and went
+                # between two runs of the same clip. temperature > 0 means
+                # the plain decode failed and this text is a random retry;
+                # no_speech_prob near 0.6 means the segment was nearly
+                # dropped as silence.
+                **{name: _number(segment, name) for name in (
+                    "temperature", "avg_logprob", "no_speech_prob", "compression_ratio",
+                )},
             })
         cues.extend(_cues_from_segment(segment))
 
@@ -231,7 +239,21 @@ def _write_transcript(audio: Path, size: str, info, raw_segments: list[dict], ct
         f"language {payload['language']} -> {dest}"
     )
     for seg in raw_segments:
-        ctx.log(f"{seg['start']:.2f}-{seg['end']:.2f}  {seg['text']}")
+        ctx.log(
+            f"{seg['start']:.2f}-{seg['end']:.2f}  "
+            f"t={_shown(seg['temperature'])} logprob={_shown(seg['avg_logprob'])} "
+            f"no_speech={_shown(seg['no_speech_prob'])} "
+            f"ratio={_shown(seg['compression_ratio'])}  {seg['text']}"
+        )
+
+
+def _number(segment, name: str) -> float | None:
+    value = getattr(segment, name, None)
+    return None if value is None else round(float(value), 3)
+
+
+def _shown(value: float | None) -> str:
+    return "?" if value is None else f"{value:.2f}"
 
 
 def _cues_from_segment(segment) -> list[dict]:
