@@ -8,6 +8,7 @@ wrong part of the picture and nothing crashes to tell you.
 
 import io
 import json
+from pathlib import Path
 
 import pytest
 
@@ -135,6 +136,32 @@ def test_no_subtitles_is_not_a_failure(monkeypatch, tmp_path):
 def test_a_real_crash_still_fails(monkeypatch, tmp_path):
     with pytest.raises(PipelineError):
         _run_with_exit_code(1, monkeypatch, tmp_path)
+
+
+def test_speech_cues_reach_the_tool_as_an_absolute_path(monkeypatch, tmp_path):
+    """The tool runs from its own folder, where jobs/... points at nothing.
+
+    This went wrong once: the filter found no file, said nothing, and every
+    piece of text in the frame was painted out.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "video.mp4").write_bytes(b"v")
+    monkeypatch.setattr("server.steps.vsr.probe_size", lambda path: (640, 360))
+    seen = {}
+
+    def fake_popen(command, **kwargs):
+        seen["command"] = command
+        return _FakeProcess(NO_SUBTITLE_EXIT_CODE)
+
+    monkeypatch.setattr("server.steps.vsr.subprocess.Popen", fake_popen)
+    remove_subtitles(
+        "video.mp4", "no_subs.mp4", "sttn-det", 0.6, 0.96, 0.03, 0.97,
+        speech_cues=Path("jobs/abc/speech_cues.json"),
+    )
+    command = seen["command"]
+    given = Path(command[command.index("--speech-cues") + 1])
+    assert given.is_absolute()
+    assert given == tmp_path / "jobs" / "abc" / "speech_cues.json"
 
 
 # -- where the old subtitles sat --------------------------------------------

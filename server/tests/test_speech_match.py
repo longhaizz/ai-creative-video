@@ -21,7 +21,7 @@ CUES = [{"start": 0.0, "end": 10.0, "text": "Hôm nay mình chia sẻ một mẹ
 
 
 def _reads(sub_text, frames=range(1, 30, 3)):
-    return {n: [(SUB, sub_text), (LOGO, "SALE 50%")] for n in frames}
+    return {n: [(SUB, sub_text, 0.9), (LOGO, "SALE 50%", 0.95)] for n in frames}
 
 
 # -- scoring one read ------------------------------------------------------
@@ -63,7 +63,8 @@ def test_the_logo_is_off_the_line():
 def test_two_lines_of_subtitles_are_both_kept():
     upper = (100, 900, 740, 800)
     reads = {
-        n: [(upper, "Hôm nay mình"), (SUB, "chia sẻ một mẹo"), (LOGO, "SALE")]
+        n: [(upper, "Hôm nay mình", 0.9), (SUB, "chia sẻ một mẹo", 0.9),
+            (LOGO, "SALE", 0.9)]
         for n in range(1, 30, 3)
     }
     band = sm.subtitle_band(reads, CUES, FPS)
@@ -71,8 +72,8 @@ def test_two_lines_of_subtitles_are_both_kept():
     assert not sm.on_the_line(LOGO, band)
 
 
-def test_a_subtitle_in_another_language_turns_the_filter_off():
-    """Nothing matches, so there is no line, and the caller keeps every box."""
+def test_a_subtitle_in_another_language_finds_no_line():
+    """Nothing matches, so there is no line, and the caller removes nothing."""
     assert sm.subtitle_band(_reads("Today I share a small tip"), CUES, FPS) is None
 
 
@@ -86,6 +87,33 @@ def test_too_few_matching_frames_is_not_enough():
     assert sm.subtitle_band(reads, CUES, FPS) is None
 
 
+# -- the log ---------------------------------------------------------------
+
+
+def test_the_log_gives_one_line_per_text_with_place_and_verdict():
+    reads = _reads("mình chia sẻ một mẹo")
+    band = sm.subtitle_band(reads, CUES, FPS)
+    lines = sm.read_log(reads, CUES, FPS, band)
+    assert len(lines) == 2, lines
+    sub, logo = lines
+    assert sub.startswith("OCR 0.00-2.70s y=800-860 x=100-900 ocr=0.90 match=1.00 KEEP")
+    assert sub.endswith('"mình chia sẻ một mẹo"')
+    assert "y=600-660" in logo and "DROP" in logo
+
+
+def test_without_a_line_the_log_still_shows_the_reads():
+    """So the log says why nothing matched."""
+    reads = _reads("Today I share a small tip")
+    lines = sm.read_log(reads, CUES, FPS, None)
+    assert len(lines) == 2
+    assert not any("KEEP" in line or "DROP" in line for line in lines)
+
+
+def test_the_same_text_back_later_is_a_new_line():
+    reads = {1: [(SUB, "mình chia sẻ", 0.9)], 51: [(SUB, "mình chia sẻ", 0.9)]}
+    assert len(sm.read_log(reads, CUES, FPS, None)) == 2
+
+
 # -- the file the server writes --------------------------------------------
 
 
@@ -94,13 +122,18 @@ def test_load_speech_reads_what_the_server_writes(tmp_path):
     path.write_text(json.dumps({"language": "vi", "cues": CUES + [
         {"start": 11.0, "end": 12.0, "text": "  "}]}), encoding="utf-8")
     speech = sm.load_speech(str(path))
-    assert speech == {"language": "vi", "cues": CUES}
+    assert speech == {"language": "vi", "cues": CUES, "error": ""}
     assert sm.REC_MODELS[speech["language"]] == "latin_PP-OCRv5_mobile_rec"
 
 
-def test_a_missing_or_broken_file_means_no_speech(tmp_path):
+def test_no_path_means_the_filter_was_not_asked_for():
+    assert sm.load_speech(None) is None
+
+
+def test_a_missing_or_broken_file_is_an_error_not_no_filter(tmp_path):
+    """Asked for but unreadable: the caller must remove nothing, not everything."""
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
-    assert sm.load_speech(None) is None
-    assert sm.load_speech(str(tmp_path / "never.json")) is None
-    assert sm.load_speech(str(broken)) is None
+    for path in (tmp_path / "never.json", broken):
+        speech = sm.load_speech(str(path))
+        assert speech["cues"] == [] and speech["error"], speech

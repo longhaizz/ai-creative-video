@@ -108,6 +108,20 @@ def test_removing_only_still_hands_the_speech_to_the_remover(monkeypatch, tmp_pa
 
     written = json.loads(seen["speech_cues"].read_text(encoding="utf-8"))
     assert written["cues"] == [{"start": 0.0, "end": 1.0, "text": "xin chào"}]
+    assert "Heard () 0.00-1.00s: xin chào" in ctx.logs, ctx.logs
+
+
+def test_nothing_heard_still_tells_the_remover_to_filter(monkeypatch, tmp_path):
+    """An empty file, not no file: the remover removes nothing, not everything."""
+    stub_reading(monkeypatch, [])
+    seen = _stub_vsr(monkeypatch)
+    (tmp_path / "video.mp4").write_bytes(b"v")
+
+    ctx = FakeContext(tmp_path, params(remove_subtitle=True, burn_subtitle=False))
+    pipeline._subtitle_only(ctx, pipeline.Models(None, None, object()))
+
+    written = json.loads(seen["speech_cues"].read_text(encoding="utf-8"))
+    assert written["cues"] == []
 
 
 def test_removing_without_whisper_works_by_position_alone(monkeypatch, tmp_path):
