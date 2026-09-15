@@ -34,8 +34,9 @@ from server.steps.synth import (
     longest_pause,
     split_to_cap,
     text_error,
+    list_voices,
+    preset_voice,
     timed_speech,
-    with_voice_instruction,
 )
 
 @pytest.fixture(autouse=True)
@@ -67,20 +68,34 @@ def cue(start, end, text="hello there"):
 # -- voice presets ----------------------------------------------------------
 
 
-def test_the_preset_goes_in_front_of_the_line():
-    assert with_voice_instruction("hello", "male_old").startswith("(An elderly man")
-    assert with_voice_instruction("hello", "male_old").endswith("hello")
+def test_a_preset_is_a_wav_in_the_voices_folder(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "VOICES_DIR", tmp_path)
+    (tmp_path / "brian_social_media.wav").write_bytes(b"w")
+    (tmp_path / "notes.txt").write_bytes(b"x")
+    (tmp_path / "Bad Name.wav").write_bytes(b"w")
+    assert list_voices() == [
+        {"id": "brian_social_media", "label": "Brian Social Media"}]
+    assert preset_voice("brian_social_media") == tmp_path / "brian_social_media.wav"
 
 
-def test_an_unknown_preset_is_refused():
-    with pytest.raises(PipelineError) as error:
-        with_voice_instruction("hello", "robot")
-    assert error.value.code == "invalid_input"
+def test_an_unknown_or_unsafe_preset_is_refused(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "VOICES_DIR", tmp_path / "voices")
+    (tmp_path / "secret.wav").write_bytes(b"w")
+    for voice_id in ("robot", "../secret", "original", ""):
+        with pytest.raises(PipelineError) as error:
+            preset_voice(voice_id)
+        assert error.value.code == "invalid_input"
+    assert list_voices() == [], "no folder means no presets, not a crash"
 
 
-def test_an_empty_line_is_refused():
-    with pytest.raises(PipelineError):
-        with_voice_instruction("   ", "male_old")
+def test_a_sample_name_becomes_a_voice_id():
+    from server.scripts.prepare_voices import voice_id
+
+    assert voice_id("voice_preview_daniela - warm, clear and positive.mp3") == (
+        "daniela_warm_clear_and_positive")
+    assert voice_id("voice_preview_luke c.mp3") == "luke_c"
+    assert voice_id("voice_preview_hallie - fun, young & feminine.mp3") == (
+        "hallie_fun_young_feminine")
 
 
 # -- building the blocks ----------------------------------------------------

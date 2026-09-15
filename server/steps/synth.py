@@ -106,26 +106,32 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
 _SENTENCE_END = re.compile(r"[.!?…。！？][\"'”’)\]]*$")
 _PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
 
-# Voice presets, put in front of the text for /tts. Not used when cloning.
-VOICE_PRESETS = {
-    "male_young": "A young man, warm, clear and energetic voice",
-    "male_middle": "A middle-aged man, low-pitched, warm and authoritative voice",
-    "male_old": "An elderly man, deep, slightly raspy and slow voice",
-    "female_young": "A young woman, bright, gentle and sweet voice",
-    "female_middle": "A middle-aged woman, warm, confident and natural voice",
-    "female_old": "An elderly woman, soft, mature and slightly raspy voice",
-}
+# A preset voice is a wav in config.VOICES_DIR, cloned like any reference.
+# Its id is the file name. Only these letters, so an id sent by a client can
+# never point outside that folder, and Windows and Linux agree on the name.
+_VOICE_ID = re.compile(r"^[a-z0-9_]+$")
 
 
-def with_voice_instruction(text: str, preset: str) -> str:
-    """Put the voice description in front of the line."""
-    description = VOICE_PRESETS.get(preset)
-    if not description:
-        raise PipelineError(f"Unknown voice preset: {preset}", code="invalid_input")
-    body = (text or "").strip()
-    if not body:
-        raise PipelineError("There is no text to speak", code="invalid_input")
-    return f"({description}){body}"
+def list_voices() -> list[dict]:
+    """Every preset voice on this server, for GET /voices."""
+    folder = config.VOICES_DIR
+    if not folder.is_dir():
+        return []
+    return [
+        {"id": path.stem, "label": path.stem.replace("_", " ").title()}
+        for path in sorted(folder.glob("*.wav"))
+        if _VOICE_ID.match(path.stem) and path.stem != "original"
+    ]
+
+
+def preset_voice(voice_id: str) -> Path:
+    """The reference wav of one preset voice."""
+    path = config.VOICES_DIR / f"{voice_id}.wav"
+    if (voice_id == "original" or not _VOICE_ID.match(voice_id or "")
+            or not path.is_file()):
+        raise PipelineError(f"No reference voice for {voice_id}: {path}",
+                            code="invalid_input")
+    return path
 
 
 class VoxCPMModel:

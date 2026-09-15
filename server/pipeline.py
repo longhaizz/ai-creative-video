@@ -31,7 +31,7 @@ from server import config
 from server.jobs import JobContext, PipelineError
 from server.steps import audio, open_dubbing, separate, subtitle, transcribe, vsr
 from server.steps.lipsync import NoFaceError, detect_scenes
-from server.steps.synth import with_voice_instruction
+from server.steps.synth import preset_voice
 
 
 class Models:
@@ -81,6 +81,10 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     params = ctx.params
     work = ctx.workdir
     video = _source_video(work)
+    # Found before any GPU work: the request was checked, but the file can
+    # still have gone since then.
+    preset = (None if params.voice_mode == "original"
+              else preset_voice(params.voice_mode))
     # Where the old subtitles sat, once step 1 has looked. Step 9 puts the
     # new ones there unless the client asked for a height of its own.
     detected_position = None
@@ -141,28 +145,26 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     ctx.check_cancel()
 
     uploaded = _reference_audio(work)
-    if params.voice_mode == "original":
-        if uploaded is not None:
-            ctx.log(f"Copying the voice from {uploaded.name}")
-        else:
-            ctx.log("Copying the voice from each spoken cue")
-    else:
+    if preset is not None:
         ctx.log(f"Using the {params.voice_mode} voice")
+        # The preset is what the user picked, so it wins over the upload.
+        if uploaded is not None:
+            ctx.log(f"Ignoring {uploaded.name}: voice_mode is "
+                    f"{params.voice_mode}")
+    elif uploaded is not None:
+        ctx.log(f"Copying the voice from {uploaded.name}")
+    else:
+        ctx.log("Copying the voice from each spoken cue")
 
     def speak(text: str, out_wav: Path, cue: dict | None = None) -> Path:
-        if params.voice_mode == "original":
-            ref = uploaded
-            if ref is None and cue is not None and cue.get("ref_wav"):
-                ref = Path(cue["ref_wav"])
-            if ref is None:
-                ref = vocals
-            return models.voice.speak(
-                text, out_wav, params.cfg_value, params.inference_timesteps,
-                reference_wav=ref,
-            )
+        ref = preset or uploaded
+        if ref is None and cue is not None and cue.get("ref_wav"):
+            ref = Path(cue["ref_wav"])
+        if ref is None:
+            ref = vocals
         return models.voice.speak(
-            with_voice_instruction(text, params.voice_mode),
-            out_wav, params.cfg_value, params.inference_timesteps,
+            text, out_wav, params.cfg_value, params.inference_timesteps,
+            reference_wav=ref,
         )
 
     if models.whisper is None:
