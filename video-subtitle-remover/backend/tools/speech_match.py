@@ -75,6 +75,11 @@ MIN_HEIGHT_SHARE = 0.7
 # too short for the line, so they are erased on the word they still read,
 # as long as a box on the line said the same thing this close in time.
 LINGER_SECONDS = 1.0
+# Subtitles run to three lines, no more. Without a ceiling the band walked
+# from the subtitle down through a screen recording of an app on 16.mp4:
+# a line 64px tall grew into a band 400px tall, and the workout list, the
+# buttons and the timer under it were all painted out.
+MAX_BAND_LINES = 3
 
 # The log shows one line per piece of text while it stays on screen. Reads
 # of the same text this close in place and time are one line.
@@ -217,9 +222,12 @@ def _line(reads, frames, matched):
             if abs((xmin + xmax) / 2 - center) > height:
                 continue
             touches = ymin <= bottom + height / 2 and ymax >= top - height / 2
-            if touches and (ymin < top or ymax > bottom):
-                top, bottom = min(top, ymin), max(bottom, ymax)
-                grown = True
+            if not touches or (ymin >= top and ymax <= bottom):
+                continue
+            new_top, new_bottom = min(top, ymin), max(bottom, ymax)
+            if new_bottom - new_top > MAX_BAND_LINES * height:
+                continue
+            top, bottom, grown = new_top, new_bottom, True
     return top - height / 2, bottom + height / 2, height
 
 
