@@ -81,6 +81,12 @@ LINGER_SECONDS = 1.0
 # buttons and the timer under it were all painted out.
 MAX_BAND_LINES = 3
 
+# How sure OCR must be before a read is worth translating and covering with
+# a box of its own. On one ad the real lines scored 0.93-0.97 while the junk
+# ("|", "√", "") scored 0.00-0.43.
+# ponytail: one number from one video; raise it if junk still gets through
+MIN_SCREEN_OCR = 0.6
+
 # The log shows one line per piece of text while it stays on screen. Reads
 # of the same text this close in place and time are one line.
 MERGE_PX = 20
@@ -307,15 +313,14 @@ def boxes_to_erase(reads, bands, fps):
     return erase
 
 
-def read_log(reads, cues, fps, erase):
-    """Log lines: what OCR read, where, how sure, and what became of it.
+def text_groups(reads, cues, fps):
+    """One entry per piece of text, for as long as it stays on screen.
 
-    Reads of the same text in about the same place, one after another, are
-    one line with the time they stayed on screen. ERASE says the text is
-    painted out of the video, LEAVE says it stays on screen; with no
-    decision to show, neither word is printed. Lines that are erased or
-    matched the speech are always shown; the cap only cuts the rest, which
-    on a screen recording is mostly app text.
+    reads is what OCR read, frame by frame. Reads of the same text in about
+    the same place, one after another, are one group. A group carries the
+    box and the frame number of its first read, when the text came and
+    went in seconds, the best OCR score it got, and how much of it was
+    spoken at the time.
     """
     groups, open_groups = [], {}
     for frame_no in sorted(reads):
@@ -335,6 +340,98 @@ def read_log(reads, cues, fps, erase):
                      "ocr": score, "match": match, "frame": frame_no}
             open_groups[key] = group
             groups.append(group)
+    return groups
+
+
+def screen_text(reads, cues, fps, erase, bands):
+    """The text that stays on screen, ready to be translated.
+
+    Everything the video paints out is left out of this: that is the
+    subtitle, and the dub server writes it again from the speech. What is
+    left is the text nobody says -- a headline, a price, a call to action.
+
+    Bad reads are dropped, because every one that survives has a white box
+    drawn over it later, and a white box over a stray "|" is worse than
+    leaving the "|" alone.
+    """
+    kept = []
+    for g in text_groups(reads, cues, fps):
+        if erase.get(g["frame"], {}).get(g["box"]):
+            continue
+        if g["ocr"] < MIN_SCREEN_OCR:
+            continue
+        if g["match"] >= MIN_SCORE:
+            continue
+        if len(_letters(g["text"])) < MIN_CHARS:
+            continue
+        if _near_the_band(g["box"], bands.get(g["frame"]) if bands else None):
+            continue
+        kept.append(g)
+    return _join_covering(kept)
+
+
+def _near_the_band(box, band):
+    """Does this box touch the band the subtitles sit on?
+
+    Not on_the_line, which asks whether the box IS a subtitle line. Here we
+    only need to keep away from where the new subtitles will be drawn, so
+    touching the band at all is reason enough to leave the box alone.
+    """
+    if band is None:
+        return False
+    top, bottom, _height = band
+    _, _, ymin, ymax = box
+    return ymin <= bottom and ymax >= top
+
+
+def _join_covering(groups):
+    """Join the groups that sit on each other at the same time.
+
+    Text that shows up word by word reads as several different strings in
+    one place, one after another: "AND IT LEARNS FROM", then "AND IT LEARNS
+    FROM EVERY". Left alone, each would get its own translation and its own
+    white box, drawn on top of the last. The longest read is the one where
+    the text had finished showing up, so it is the only one worth keeping.
+    """
+    # ponytail: every group against every kept one; an ad gives a few dozen
+    out = []
+    for g in sorted(groups, key=lambda g: g["first"]):
+        for kept in out:
+            if _boxes_touch(g["box"], kept["box"]) and _times_touch(g, kept):
+                if len(_letters(g["text"])) > len(_letters(kept["text"])):
+                    kept["text"], kept["box"] = g["text"], g["box"]
+                kept["first"] = min(kept["first"], g["first"])
+                kept["last"] = max(kept["last"], g["last"])
+                break
+        else:
+            out.append(dict(g))
+    return out
+
+
+def _boxes_touch(a, b):
+    """Do these two boxes share any pixel?"""
+    axmin, axmax, aymin, aymax = a
+    bxmin, bxmax, bymin, bymax = b
+    return axmin <= bxmax and bxmin <= axmax and aymin <= bymax and bymin <= aymax
+
+
+def _times_touch(a, b):
+    """Are these two groups on screen at the same time, or near enough?"""
+    return (a["first"] <= b["last"] + MERGE_SECONDS
+            and b["first"] <= a["last"] + MERGE_SECONDS)
+
+
+def read_log(reads, cues, fps, erase):
+    """Log lines: what OCR read, where, how sure, and what became of it.
+
+    Reads of the same text in about the same place, one after another, are
+    one line with the time they stayed on screen. ERASE says the text is
+    painted out of the video, LEAVE says it stays on screen; with no
+    decision to show, neither word is printed. Lines that are erased or
+    matched the speech are always shown; the cap only cuts the rest, which
+    on a screen recording is mostly app text.
+    """
+    groups = text_groups(reads, cues, fps)
 
     for g in groups:
         reason = erase.get(g["frame"], {}).get(g["box"]) if erase else None

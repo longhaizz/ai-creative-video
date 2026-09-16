@@ -65,6 +65,13 @@ class DubParams(BaseModel):
     vsr_left: float = Field(0.03, ge=0.0, le=1.0)
     vsr_right: float = Field(0.97, ge=0.0, le=1.0)
 
+    # -- translate the text printed on the picture -------------------------
+    # The text that is not the subtitle: a headline, a price, a call to
+    # action. It is read off the frame, translated into target_lang, and
+    # written back where it was, under a box of its own. Independent of
+    # remove_subtitle: with that off the video is only read, never painted.
+    translate_screen_text: bool = False
+
     # -- lip sync ----------------------------------------------------------
     lipsync: bool = False
     # These are the --inference_steps and --guidance_scale of the LatentSync
@@ -195,10 +202,12 @@ class DubParams(BaseModel):
         if self.lipsync:
             raise ValueError(
                 "lipsync has no new voice to follow when dub is false")
-        if not (self.remove_subtitle or self.burn_subtitle or self.hook_text):
+        if not (self.remove_subtitle or self.burn_subtitle or self.hook_text
+                or self.translate_screen_text):
             raise ValueError(
-                "with dub false, ask for remove_subtitle, burn_subtitle or "
-                "hook_text, otherwise there is nothing to do")
+                "with dub false, ask for remove_subtitle, burn_subtitle, "
+                "hook_text or translate_screen_text, otherwise there is "
+                "nothing to do")
         return self
 
 

@@ -532,3 +532,81 @@ def test_schema_takes_a_colour_per_line():
                        hook_colours="#FFFFFF,#FFCC00")
     assert params.hook_colours == "#FFFFFF,#FFCC00"
     assert DubParams().hook_colours == ""
+
+
+# -- the text that was printed on the picture -------------------------------
+
+from server.steps.subtitle import (          # noqa: E402
+    SCREEN_MARGIN,
+    screen_dialogues,
+    screen_layout,
+    screen_times,
+)
+
+W, H = 1080, 1920
+
+
+def _piece(text, box=(400, 680, 300, 360), start=1.0, end=3.0):
+    return {"text": text, "box": list(box), "start": start, "end": end}
+
+
+def test_the_size_comes_from_the_box_the_old_text_sat_in():
+    """A headline must stay a headline, not shrink to subtitle size."""
+    _lines, small, _box = screen_layout(_piece("SALE", (400, 680, 300, 340)), W, H)
+    _lines, big, _box = screen_layout(_piece("SALE", (400, 680, 300, 420)), W, H)
+    assert big > small
+
+
+def test_the_white_box_never_shrinks_below_the_old_text():
+    """A shorter translation must still cover what was underneath it."""
+    old = (400, 900, 300, 360)
+    _lines, _size, (x0, y0, box_w, box_h) = screen_layout(_piece("RẺ", old), W, H)
+    assert box_w >= old[1] - old[0]
+    assert box_h >= old[3] - old[2]
+    assert x0 <= old[0] and x0 + box_w >= old[1]
+    assert y0 <= old[2] and y0 + box_h >= old[3]
+
+
+def test_a_longer_translation_widens_the_box_instead_of_wrapping():
+    old = (400, 680, 300, 360)
+    lines, _size, (_x0, _y0, box_w, _h) = screen_layout(
+        _piece("MIỄN PHÍ VẬN CHUYỂN", old), W, H)
+    assert lines == ["MIỄN PHÍ VẬN CHUYỂN"]
+    assert box_w > old[1] - old[0]
+
+
+def test_text_too_wide_for_the_frame_wraps():
+    lines, _size, (_x0, _y0, box_w, _h) = screen_layout(
+        _piece("GIAM GIA 50 PHAN TRAM CHO DON HANG DAU TIEN HOM NAY"), W, H)
+    assert len(lines) > 1
+    assert box_w <= W - 2 * SCREEN_MARGIN
+
+
+def test_the_box_is_slid_back_inside_the_picture():
+    """A box near the edge must not be drawn half off the frame."""
+    _lines, _size, (x0, y0, box_w, box_h) = screen_layout(
+        _piece("MIỄN PHÍ VẬN CHUYỂN NGAY", (900, 1070, 40, 100)), W, H)
+    assert x0 >= SCREEN_MARGIN
+    assert x0 + box_w <= W - SCREEN_MARGIN
+    assert y0 >= SCREEN_MARGIN and y0 + box_h <= H - SCREEN_MARGIN
+
+
+def test_a_piece_read_in_one_frame_is_still_on_screen_long_enough():
+    start, end = screen_times(_piece("SALE", start=2.0, end=2.0))
+    assert end - start >= 0.5
+
+
+def test_the_padding_never_starts_before_the_video():
+    start, _end = screen_times(_piece("SALE", start=0.0, end=1.0))
+    assert start == 0.0
+
+
+def test_each_piece_draws_a_box_and_then_its_text():
+    body = screen_dialogues([_piece("SALE")], W, H)
+    assert len(body) == 2
+    assert ",ScreenBox," in body[0] and "\\p1}" in body[0]
+    assert ",Screen," in body[1] and "SALE" in body[1]
+
+
+def test_a_piece_with_no_text_draws_nothing():
+    assert screen_dialogues([_piece("  ")], W, H) == []

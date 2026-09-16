@@ -877,3 +877,98 @@ def _selfcheck():
 
 if __name__ == "__main__":
     _selfcheck()
+
+
+# -- the text painted on the picture ---------------------------------------
+
+
+def _labels_schema(n: int) -> dict:
+    """One required key per label, for the same reason as _blocks_schema.
+
+    Strict mode cannot pin the length of an array, so a numbered object is
+    the only shape where the answer must carry every label and cannot
+    reorder or merge any of them.
+    """
+    keys = [str(i) for i in range(n)]
+    return {
+        "name": "screen_labels",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "labels": {
+                    "type": "object",
+                    "properties": {key: {"type": "string"} for key in keys},
+                    "required": keys,
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["labels"],
+            "additionalProperties": False,
+        },
+    }
+
+
+LABELS_SYSTEM = (
+    "You translate the short pieces of text printed on an advertising "
+    "video into {lang_name}.\n"
+    "These were read off the picture by OCR, so a few letters may be "
+    "wrong, words may run together, and everything may be in capitals. "
+    "Read through the mistakes; do not copy them.\n"
+    "Every piece is part of the same advert, so keep the wording "
+    "consistent across them.\n"
+    "Rules:\n"
+    "- Keep numbers, prices, percentages, dates and units exactly as they "
+    "are.\n"
+    "- Leave brand names, product names and web addresses alone.\n"
+    "- Keep it about as short as the original: it has to fit on the "
+    "screen where the old text was.\n"
+    "- Write it the way an advert is written, not word for word.\n"
+    "- Match the capitalisation of the original.\n"
+    "- Answer with the translation only, nothing else.\n"
+    "Answer as JSON: {{\"labels\": {{\"0\": \"...\", \"1\": \"...\"}}}}, one "
+    "key per piece, in the order they were given."
+)
+
+
+def translate_labels(texts, target_lang: str, api_key: str,
+                     asr_meta=None, model: str = DEFAULT_MODEL,
+                     ctx=None) -> list[str]:
+    """Translate the text printed on the picture, all of it in one ask.
+
+    One request for the whole video, not one per piece. These are labels,
+    not speech: there is no length to hit and no timing to keep, so the
+    machinery translate_blocks carries buys nothing here. Sending them
+    together also lets the model see the whole advert, which is what keeps
+    the same word from being translated two ways in one video.
+
+    Returns one translation per text, in the same order. A piece the model
+    leaves empty keeps the text it came in with, so a bad answer costs the
+    translation and not the piece.
+    """
+    texts = [str(t or "").strip() for t in texts]
+    if not texts:
+        return []
+    _code, lang_name, same_mode = _resolve_output_lang(target_lang, asr_meta)
+    if same_mode:
+        # Nothing to do: the text is already in the language asked for, and
+        # writing it again would only round-trip it through OCR mistakes.
+        return list(texts)
+
+    body = "\n".join(f"{i}. {text}" for i, text in enumerate(texts))
+    raw = _chat(
+        LABELS_SYSTEM.format(lang_name=lang_name),
+        body,
+        api_key,
+        model,
+        json_mode=True,
+        schema=_labels_schema(len(texts)),
+    )
+    labels = (_extract_json(raw) or {}).get("labels") or {}
+    out = []
+    for i, text in enumerate(texts):
+        got = str(labels.get(str(i)) or "").strip()
+        if not got and ctx is not None:
+            ctx.log(f"Screen text {i} came back empty, keeping {text!r}")
+        out.append(got or text)
+    return out
