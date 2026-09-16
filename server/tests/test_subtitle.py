@@ -610,3 +610,36 @@ def test_each_piece_draws_a_box_and_then_its_text():
 
 def test_a_piece_with_no_text_draws_nothing():
     assert screen_dialogues([_piece("  ")], W, H) == []
+
+
+def test_one_line_of_text_is_covered_no_more_than_it_used_to_be():
+    """0 padding: the box is the old text's box when the new text fits it.
+
+    Sized by the line box instead of the letters, "Try it now" over a 62px
+    tall piece of Hindi came out 113px tall -- half again as much of the
+    advert hidden as there was text to hide."""
+    old = (227, 488, 262, 324)
+    _lines, _size, (_x0, y0, _w, box_h) = screen_layout(_piece("Try it now", old), W, H)
+    assert box_h == old[3] - old[2]
+    assert y0 == old[2]
+
+
+def test_a_translation_shrinks_to_the_footprint_it_replaces():
+    """"Your" is wider than the Hindi it replaces at the same height, so the
+    type comes down until it sits in the same box."""
+    old = (299, 422, 53, 119)
+    _lines, size, (x0, y0, box_w, box_h) = screen_layout(_piece("Your", old), W, H)
+    assert (x0, y0, box_w, box_h) == (old[0], old[2],
+                                      old[1] - old[0], old[3] - old[2])
+    assert size < round((old[3] - old[2]) * 1.3), "smaller than the Hindi was"
+
+
+def test_the_type_is_not_shrunk_past_reading():
+    """A two word badge whose translation runs to six words must stay
+    readable; the box widens instead."""
+    old = (400, 680, 300, 360)
+    _lines, size, (_x0, _y0, box_w, box_h) = screen_layout(
+        _piece("GIẢM GIÁ NGAY HÔM NAY", old), W, H)
+    assert size >= round((old[3] - old[2]) * 1.3 * 0.6)
+    assert box_w > old[1] - old[0], "what will not shrink has to widen"
+    assert box_h == old[3] - old[2], "and it still covers no more height"

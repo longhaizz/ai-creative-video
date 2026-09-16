@@ -281,3 +281,51 @@ def test_a_missing_dump_is_not_a_failure(tmp_path):
     ctx = FakeContext(tmp_path, params(translate_screen_text=True, target_lang="VI"))
     assert pipeline._translated_screen_text(
         tmp_path / "never_written.json", ctx.params, {}, 1080, 1920, ctx) == []
+
+
+def test_text_already_in_the_target_language_is_left_on_the_picture(
+        monkeypatch, tmp_path):
+    """A Hindi advert ended on an app store whose search box read "pubg"."""
+    seen = _fake_translate(monkeypatch)
+    _write_screen(tmp_path / "screen_text.json", [
+        {"text": "pubg", "box": [100, 300, 200, 260], "start": 1.0, "end": 3.0},
+        {"text": "बबच्चा", "box": [100, 300, 400, 460], "start": 1.0, "end": 3.0},
+    ])
+
+    ctx = FakeContext(tmp_path, params(translate_screen_text=True, target_lang="EN"))
+    screen = pipeline._translated_screen_text(
+        tmp_path / "screen_text.json", ctx.params, {"language": "hi"},
+        1080, 1920, ctx)
+
+    assert seen["texts"] == ["बबच्चा"], "only the Hindi piece is worth an ask"
+    assert [p["text"] for p in screen] == ["[बबच्चा]"]
+
+
+def test_a_translation_that_comes_back_word_for_word_draws_nothing(
+        monkeypatch, tmp_path):
+    """Covering good words with the same words can only make it worse."""
+    _fake_translate(monkeypatch, out=["Free shipping"])
+    _write_screen(tmp_path / "screen_text.json",
+                  [{"text": "free shipping", "box": [1, 2, 3, 4],
+                    "start": 0.0, "end": 1.0}])
+
+    ctx = FakeContext(tmp_path, params(translate_screen_text=True, target_lang="VI"))
+    assert pipeline._translated_screen_text(
+        tmp_path / "screen_text.json", ctx.params, {"language": "id"},
+        1080, 1920, ctx) == []
+
+
+def test_nothing_is_asked_when_every_piece_is_already_right(monkeypatch, tmp_path):
+    import server.steps.translate as translate
+
+    def blow_up(*a, **kw):
+        raise AssertionError("nothing left to translate, so no request")
+
+    monkeypatch.setattr(translate, "translate_labels", blow_up)
+    _write_screen(tmp_path / "screen_text.json",
+                  [{"text": "10m+", "box": [1, 2, 3, 4], "start": 0.0, "end": 1.0}])
+
+    ctx = FakeContext(tmp_path, params(translate_screen_text=True, target_lang="EN"))
+    assert pipeline._translated_screen_text(
+        tmp_path / "screen_text.json", ctx.params, {"language": "hi"},
+        1080, 1920, ctx) == []

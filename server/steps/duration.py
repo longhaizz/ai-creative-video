@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import csv
 import re
+import unicodedata
 from pathlib import Path
 
-# Fitted from nothing: a first guess that is close enough to work on the
-# very first video, before any history exists.
-DEFAULT_COEF = (0.21, 0.12, 0.28, 0.30, 0.20)
+# A first guess, for the very first video before any history exists. Fitted
+# over 4807 takes, so it is a guess only in the sense that this voice has
+# not been heard yet.
+DEFAULT_COEF = (0.17, 0.24, 0.25, 0.22, 0.28)
 # Below this many rows a fit says more about the noise than about the voice.
 MIN_SAMPLES = 30
 # The columns of the history file. Everything after `seconds` is there to
@@ -32,9 +34,46 @@ MIN_SAMPLES = 30
 HEADER = ["lang", "syllables", "commas", "stops", "digits", "seconds",
           "speed", "text"]
 # Languages that write one syllable per space-separated word.
-SYLLABIC = ("vi", "zh", "ja", "th")
-# Everywhere else, a word is about this many syllables.
+SYLLABIC = ("vi",)
+
+# Scripts with no vowel letters to count, and where one character is a
+# steady fraction of a syllable. Latin is not here: it has the vowel run
+# below, which is the better ruler there.
+#
+# Arabic and Devanagari are measured — 2.04 over 544 takes and 2.39 over
+# 177. CJK and Hangul are not measured and do not need to be: one glyph is
+# one syllable by the way those scripts are built.
+#
+# ponytail: Thai and Cyrillic are the shape of the writing, not a
+# measurement — there are no takes in either yet. Re-measure them the way
+# the other two were once the history has rows: group by script, divide
+# characters by seconds, and scale against the 0.21s a Latin syllable
+# takes.
+CHARS_PER_SYLLABLE = {
+    "ARABIC": 2.0,
+    "DEVANAGARI": 2.4,
+    "CJK": 1.0,
+    "HANGUL": 1.0,
+    "THAI": 3.0,
+    "CYRILLIC": 2.6,
+}
+# Where each of those scripts lives, low and high code point. Ranges rather
+# than `unicodedata.name`, because this runs over every character of every
+# line and a name lookup is not free.
+_SCRIPT_RANGES = (
+    ("CYRILLIC", 0x0400, 0x04FF),
+    ("ARABIC", 0x0600, 0x06FF),
+    ("DEVANAGARI", 0x0900, 0x097F),
+    ("THAI", 0x0E00, 0x0E7F),
+    # Kana and Han together: both spend one glyph on one syllable.
+    ("CJK", 0x3040, 0x9FFF),
+    ("HANGUL", 0xAC00, 0xD7AF),
+)
+# Syllables in one space-separated word, for reading a word budget back out
+# of a number of seconds. Measured where there are takes: Arabic is 2.22
+# over 544, Hindi 1.52 which the default already covers.
 SYLLABLES_PER_WORD = 1.5
+_WORD_SYLLABLES = {"vi": 1.0, "ar": 2.2}
 
 _VOWELS = re.compile(r"[aeiouyàáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩị"
                      r"òóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ]+", re.IGNORECASE)
@@ -43,22 +82,58 @@ _STOP = re.compile(r"[.!?…。！？]")
 _DIGIT = re.compile(r"\d")
 
 
+def _script(text: str) -> str:
+    """Which of the scripts above this line is mostly written in, or "".
+
+    Counted rather than read off the first letter: an Arabic line that
+    opens with a brand name in Latin is still an Arabic line.
+    """
+    counts: dict[str, int] = {}
+    for char in text:
+        code = ord(char)
+        for name, low, high in _SCRIPT_RANGES:
+            if low <= code <= high:
+                counts[name] = counts.get(name, 0) + 1
+                break
+    if not counts:
+        return ""
+    return max(counts, key=counts.get)
+
+
 def syllables(text: str, lang: str = "") -> int:
     """How many syllables the line has, near enough.
 
+    Three rules, because there are three kinds of writing here.
+
     Vietnamese writes every syllable as its own word, so words are the
-    right unit there. Elsewhere a syllable is a run of vowels.
+    right unit there. A script with no vowel letters to count goes by how
+    many characters it spends on a syllable — Arabic writes its short
+    vowels as nothing at all, and counting vowel runs in it returned 1 for
+    every word, which is where a 2.2x undercount came from and with it an
+    Arabic dub that was mis-timed in both directions.
+
+    Everywhere else a syllable is a run of vowels. That rule is kept for
+    Latin because it is the better ruler there: against 3533 takes it lands
+    within 0.93-1.11x, while one characters-per-syllable number for all of
+    Latin drifts between 2.45 and 3.09 from one language to the next.
     """
     words = (text or "").split()
     if not words:
         return 0
     if (lang or "").lower()[:2] in SYLLABIC:
         return len(words)
+    script = _script(text)
+    if script:
+        # Combining marks count: a Devanagari vowel sign is a spoken vowel
+        # however the category table files it.
+        letters = sum(1 for char in text if not char.isspace()
+                      and unicodedata.category(char)[0] in "LMN")
+        return max(round(letters / CHARS_PER_SYLLABLE[script]), 1)
     return sum(max(len(_VOWELS.findall(word)), 1) for word in words)
 
 
 def _syllables_per_word(lang: str) -> float:
-    return 1.0 if (lang or "").lower()[:2] in SYLLABIC else SYLLABLES_PER_WORD
+    return _WORD_SYLLABLES.get((lang or "").lower()[:2], SYLLABLES_PER_WORD)
 
 
 def features(text: str, lang: str = "") -> tuple:
@@ -166,10 +241,19 @@ class Model:
         return True
 
     def _read(self) -> None:
-        """Load the history. Rows written before the text column still count.
+        """Load the history, counting every line again from its own words.
 
-        Only the first six fields are read, so a row from any version fits:
-        the older ones simply stop there.
+        The four numbers in a row were written by whatever `syllables`
+        counted on the day of that job, and that count has been wrong
+        before: every Arabic row on disk says one syllable per word. Left
+        alone they teach the next fit the same mistake. This is what
+        `record` writes the text down for — the text is what the row is,
+        and the features are one reading of it, so a reading can be
+        corrected.
+
+        Only the first six fields are needed, so a row from any version
+        fits: the older ones simply stop there and keep their own numbers,
+        which is all there is of them.
         """
         if self.path is None or not self.path.is_file():
             return
@@ -179,9 +263,13 @@ class Model:
                     if len(line) < 6 or line[0] == "lang":
                         continue
                     try:
-                        self.rows.append(tuple(float(v) for v in line[1:6]))
+                        row = tuple(float(v) for v in line[1:6])
                     except ValueError:
                         continue
+                    text = line[7] if len(line) > 7 else ""
+                    if text:
+                        row = (*features(text, line[0]), row[4])
+                    self.rows.append(row)
         except OSError:
             return
         self._fix_header()
@@ -241,6 +329,24 @@ def _selfcheck():
     assert syllables("một hai ba", "vi") == 3
     assert syllables("hello there", "en") == 4, "vowel runs, near enough"
     assert features("Chào bạn, khỏe không?", "vi") == (4, 1, 1, 0)
+
+    # A script with no vowel letters is counted by its characters. Both of
+    # these used to come back as one syllable per space-separated word,
+    # which is what mis-timed every Arabic dub.
+    arabic = "سيقوم التطبيق على الفور بمعالجة بصمة إصبعك"
+    assert syllables(arabic, "ar") > 2 * len(arabic.split())
+    assert syllables("你好世界", "zh") == 4, "one glyph, one syllable"
+    # Devanagari writes its vowels as combining marks. Dropping them is how
+    # a Hindi line comes out a third short.
+    assert syllables("नमस्ते दुनिया", "hi") >= 5
+
+    # A brand name in Latin does not make an Arabic line a Latin one.
+    assert syllables("PUBG " + arabic, "ar") > 2 * len(arabic.split())
+
+    # The point of all of it: two lines that take the same time to say are
+    # guessed to take about the same time, whatever they are written in.
+    english = predict("The app will process your fingerprint right away.", "en")
+    assert 0.75 < predict(arabic, "ar") / english < 1.35, "scripts agree now"
 
     # A longer line is predicted to take longer. That is the whole job.
     assert predict("một hai ba", "vi") < predict("một hai ba bốn năm", "vi")
