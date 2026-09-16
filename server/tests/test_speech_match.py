@@ -521,3 +521,129 @@ def test_a_line_that_shows_up_word_by_word_survives_the_flash_rule():
     groups = _screen_h(reads)
     assert [g["text"] for g in groups] == ["गर्भाव्था को प्रबधित करे"]
     assert groups[0]["last"] > groups[0]["first"]
+
+
+# -- one paragraph replacing another in the same place ----------------------
+
+PARA_A = (57, 381, 236, 272)    # "खोपड़ी अभी पूरी तरह कठोर नहीं"
+PARA_B = (42, 132, 231, 265)    # "शरीर के", the next paragraph, same band
+
+
+def test_a_paragraph_replaced_by_another_is_not_joined_to_it():
+    """On a Hindi video the second paragraph began 0.2s after the first
+    ended, in the same band. Joined, it took the whole of the second
+    paragraph and one line of the first away with it."""
+    reads = {}
+    for n in range(1, 23, 3):       # 0.0 - 2.1s
+        reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9),
+                    (PARA_A, "खोपड़ी अभी पूरी तरह कठोर नहीं", 0.97)]
+    for n in range(25, 41, 3):      # 2.4 - 3.9s, a 0.3s gap
+        reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9),
+                    (PARA_B, "शरीर के तापमान को", 0.99)]
+
+    groups = _screen_h(reads)
+    assert sorted(g["text"] for g in groups) == [
+        "खोपड़ी अभी पूरी तरह कठोर नहीं", "शरीर के तापमान को"]
+
+
+def test_the_same_word_read_several_ways_is_still_one_group():
+    """OCR gives "बच्वा", "बबच्चा", "बख्वा" for one word on one video."""
+    reads = {}
+    for n, text in zip(range(1, 30, 3),
+                       ("बच्वा", "बबच्चा", "बख्वा", "बच्चा", "बच्वा",
+                        "बबच्चा", "बच्चा", "बच्वा", "बच्चा", "बच्चा")):
+        reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9), (PARA_A, text, 0.85)]
+    assert len(_screen_h(reads)) == 1
+
+
+def test_alike_tells_a_growing_line_from_a_new_one():
+    assert sm._alike("AND IT LEARNS", "AND IT LEARNS FROM EVERY")
+    assert sm._alike("बच्वा", "बबच्चा")
+    assert not sm._alike("खोपड़ी अभी पूरी तरह कठोर नहीं", "शरीर के")
+    assert not sm._alike("Loading..", "Tap to continue")
+
+
+# -- words read one by one, put back into lines -----------------------------
+# Boxes are the real ones from the Hindi creative at 22.5-27.2s.
+
+PARAGRAPH = [
+    ((41, 120, 155, 188), "आपका"),
+    ((124, 185, 153, 191), "शिशु"),
+    ((176, 249, 151, 187), "अपनी"),
+    ((253, 355, 151, 188), "साँस लेने"),
+    ((44, 78, 196, 224), "की"),
+    ((81, 172, 193, 227), "प्रक्रिया,"),
+    ((171, 236, 195, 225), "पाचन"),
+    ((240, 352, 192, 225), "क्रिया और"),
+    ((42, 132, 231, 265), "शरीर के"),
+    ((135, 221, 235, 264), "तापमान"),
+    ((228, 262, 235, 263), "को"),
+    ((262, 351, 232, 265), "नियंत्रित"),
+    ((102, 189, 271, 305), "करने में"),
+    ((188, 257, 272, 307), "सक्षम"),
+    ((257, 289, 273, 304), "है।"),
+]
+
+
+def _words(words, frames):
+    """Reads of these words in every one of these frames, under a subtitle."""
+    return {n: [(SUB, "Hôm nay mình chia sẻ", 0.9)]
+               + [(box, text, 1.0) for box, text in words]
+            for n in frames}
+
+
+def test_a_paragraph_read_word_by_word_comes_back_as_its_lines():
+    """14 white boxes with one word each would read as nonsense."""
+    groups = _screen_h(_words(PARAGRAPH, range(1, 47, 3)))
+    assert [g["text"] for g in sorted(groups, key=lambda g: g["box"][2])] == [
+        "आपका शिशु अपनी साँस लेने",
+        "की प्रक्रिया, पाचन क्रिया और",
+        "शरीर के तापमान को नियंत्रित",
+        "करने में सक्षम है।",
+    ]
+
+
+def test_a_line_covers_every_word_it_was_made_of():
+    groups = _screen_h(_words(PARAGRAPH[8:12], range(1, 47, 3)))
+    assert len(groups) == 1
+    assert groups[0]["box"] == (42, 351, 231, 265)
+
+
+def test_a_two_letter_word_holds_its_line_together():
+    """Dropped first for being short, "को" left a 41px hole in the middle of
+    "शरीर के तापमान को नियंत्रित" and the line came back in two."""
+    groups = _screen_h(_words(PARAGRAPH[8:12], range(1, 47, 3)))
+    assert [g["text"] for g in groups] == ["शरीर के तापमान को नियंत्रित"]
+
+
+def test_a_two_letter_word_alone_is_still_dropped():
+    assert _screen_h(_words([((228, 262, 235, 263), "को")], range(1, 47, 3))) == []
+
+
+def test_a_word_that_stays_does_not_join_two_sentences():
+    """"है।" stayed from 22.5s to 32.0s while the words around it changed.
+    It must not carry the first sentence into the second."""
+    first = [((102, 189, 271, 305), "करने में"), ((188, 257, 272, 307), "सक्षम")]
+    second = [((57, 152, 264, 304), "महसूस"), ((158, 212, 265, 296), "कर"),
+              ((213, 299, 263, 297), "सकता")]
+    reads = {}
+    for n in range(1, 47, 3):
+        reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9),
+                    ((257, 289, 273, 304), "है।", 1.0)]
+        reads[n] += [(box, text, 1.0) for box, text in
+                     (first if n < 24 else second)]
+
+    texts = [g["text"] for g in _screen_h(reads)]
+    assert not any("सक्षम" in t and "महसूस" in t for t in texts), texts
+    assert any(t.startswith("करने में सक्षम") for t in texts), texts
+    assert any(t.startswith("महसूस कर सकता") for t in texts), texts
+
+
+def test_a_line_read_whole_and_word_by_word_is_said_once():
+    """OCR gave "अभी" on its own and "अभी आज़माए" whole, lying over it."""
+    reads = {}
+    for n in range(1, 47, 3):
+        reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9),
+                    ((232, 339, 264, 319), "अभी", 1.0),
+                    ((227, 488, 262, 324), "अभी आज़माए", 0.89)]
+    assert [g["text"] for g in _screen_h(reads)] == ["अभी आज़माए"]

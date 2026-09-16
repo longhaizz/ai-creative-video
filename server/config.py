@@ -49,10 +49,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # machine with no GPU.
 LOAD_MODELS = os.getenv("LOAD_MODELS", "1") not in ("0", "false", "no")
 
-# LatentSync sits on the GPU even when a job never asks for lip sync, so it
-# is off unless this is set to 1. While it is off, a job that sends
+# LatentSync is loaded unless this is set to 0. It sits on the GPU even when
+# a job never asks for lip sync. While it is off, a job that sends
 # lipsync=true runs as if the box was not ticked: no mouth work, no error.
-LOAD_LIPSYNC = os.getenv("LOAD_LIPSYNC", "0") not in ("0", "false", "no")
+LOAD_LIPSYNC = os.getenv("LOAD_LIPSYNC", "1") not in ("0", "false", "no")
 
 # -- outside programs ------------------------------------------------------
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
