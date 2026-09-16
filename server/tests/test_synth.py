@@ -327,7 +327,7 @@ def test_a_long_speech_takes_the_long_line(monkeypatch, tmp_path):
     over a pause the speaker had left on purpose.
     """
     cues = [cue(0.0, 4.5, "one."), cue(6.0, 7.0, "two.")]
-    entry = {"short": "ngắn.", "normal": "vừa vừa thôi bạn.",
+    entry = {"short": "ngắn.", "normal": "vừa vừa thôi bạn ơi nhé.",
              "long": "dài hơn nhiều, đủ để lấp hết chỗ trống này."}
     out, spoken, speak = run_blocks(
         monkeypatch, tmp_path, cues, lines=[entry, "câu hai."],
@@ -340,9 +340,15 @@ def test_a_long_speech_takes_the_long_line(monkeypatch, tmp_path):
 
 @needs_ffmpeg
 def test_a_tight_room_takes_the_short_line(monkeypatch, tmp_path):
-    """One second of speech takes the wording the model reads as 0.69s."""
+    """One second of speech takes the wording the model reads as 0.70s.
+
+    The middle wording is six words on purpose. With four it read as 1.21s
+    against the short line's 0.70s, and a one-second room sat almost
+    exactly between them — the test passed on a hundredth of a second and
+    said nothing about which line a tight room really wants.
+    """
     cues = [cue(0.0, 1.0, "one."), cue(1.4, 3.0, "two.")]
-    entry = {"short": "ngắn.", "normal": "vừa vừa thôi bạn.",
+    entry = {"short": "ngắn.", "normal": "vừa vừa thôi bạn ơi nhé.",
              "long": "dài hơn nhiều, đủ để lấp hết chỗ trống này."}
     out, spoken, speak = run_blocks(
         monkeypatch, tmp_path, cues, lines=[entry, "câu hai."],

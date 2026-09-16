@@ -397,8 +397,7 @@ def burn(
         if hook is not None:
             ctx.log(f"Hook: {hook.get('text', '')[:60]}")
         for piece in screen or []:
-            ctx.log(f"Screen text {piece.get('start'):.2f}-{piece.get('end'):.2f}s: "
-                    f"{piece.get('text', '')[:60]}")
+            ctx.log(describe_screen_piece(piece, width, height))
 
     with tempfile.TemporaryDirectory() as work:
         ass = write_ass(
@@ -442,6 +441,23 @@ def burn(
 SCREEN_SIZE_RATIO = 1.3
 # How far apart stacked lines of screen text sit, as a share of the size.
 SCREEN_LINE_SPACING = 1.2
+# How much of the font size one line of letters really fills. A line box
+# counts the room above and below the letters as well, and sizing the white
+# box by that made it half again as tall as the text it covered.
+# ponytail: one number for every font; check it against a real video
+SCREEN_INK_SHARE = 0.75
+# The white box is drawn tight around the text: no padding. It is there to
+# cover the old words and carry the new ones, nothing more, and every pixel
+# of it is a pixel of the advert that the viewer cannot see.
+SCREEN_PADDING = 0
+# How far the text may be shrunk to fit the box the old text sat in, as a
+# share of the size that text was drawn at. English is about twice as wide
+# as Devanagari at the same height, so without shrinking, a headline spilled
+# onto a second line and its white box swallowed the line above it. With no
+# floor the other way is just as bad: a two word badge whose translation
+# runs to six words would shrink until nobody could read it.
+# ponytail: 0.6 keeps a 1280 tall frame readable; measure it on a phone
+SCREEN_MIN_SHRINK = 0.6
 # Keep the white box off the very edge of the picture.
 SCREEN_MARGIN = 8
 # OCR only looks at some frames, so the text was already there a moment
@@ -449,6 +465,10 @@ SCREEN_MARGIN = 8
 SCREEN_TIME_PAD = 0.25
 # A piece read in a single frame would otherwise be drawn for no time at all.
 SCREEN_MIN_SECONDS = 0.5
+# Which layer each half of a piece is drawn on. The white rectangle has to
+# sit under the text, and ASS draws a higher layer over a lower one.
+SCREEN_RECT_LAYER = 0
+SCREEN_TEXT_LAYER = 1
 
 
 def _text_width(text: str, size: int) -> float:
@@ -473,15 +493,28 @@ def screen_layout(piece: dict, width: int, height: int) -> tuple:
     size = resolve_font_size(int(round(old_h * SCREEN_SIZE_RATIO)), height)
     text = (piece.get("text") or "").strip()
 
+    # Shrink to fit the footprint the old text had, rather than spread over
+    # the picture around it. Only down to SCREEN_MIN_SHRINK: past that the
+    # text stops being the design element it replaces.
+    if _text_width(text, size) > old_w:
+        fits = old_w / (CHAR_WIDTH_EM * max(len(text), 1))
+        size = resolve_font_size(
+            int(round(max(fits, size * SCREEN_MIN_SHRINK))), height)
+
     room = max(width - 2 * SCREEN_MARGIN, 1)
     lines = [text]
-    if _text_width(text, size) + 2 * BOX_PADDING > room:
-        lines = wrap_text_lines(text, chars_per_line(room, size)) or [text]
+    if _text_width(text, size) + 2 * SCREEN_PADDING > room:
+        # Wrapped to the whole room, not to the 80% a subtitle wraps to:
+        # every line that is not needed makes the box taller.
+        fits = max(1, int(room / (CHAR_WIDTH_EM * max(size, 1))))
+        lines = wrap_text_lines(text, fits) or [text]
 
     text_w = max(_text_width(line, size) for line in lines)
-    box_w = min(max(old_w, int(round(text_w)) + 2 * BOX_PADDING), room)
-    text_h = int(round(len(lines) * size * SCREEN_LINE_SPACING))
-    box_h = min(max(old_h, text_h + 2 * BOX_PADDING), height)
+    box_w = min(max(old_w, int(round(text_w)) + 2 * SCREEN_PADDING), room)
+    # The letters themselves, not the line boxes around them.
+    text_h = int(round(size * (SCREEN_INK_SHARE
+                               + (len(lines) - 1) * SCREEN_LINE_SPACING)))
+    box_h = min(max(old_h, text_h + 2 * SCREEN_PADDING), height)
 
     x0 = _keep_inside((xmin + xmax) // 2 - box_w // 2, box_w, width)
     y0 = _keep_inside((ymin + ymax) // 2 - box_h // 2, box_h, height)
@@ -519,9 +552,9 @@ def screen_dialogues(pieces: list[dict], width: int, height: int) -> list[str]:
         rect = (f"{{\\pos({x0},{y0})\\p1}}"
                 f"m 0 0 l {box_w} 0 l {box_w} {box_h} l 0 {box_h}"
                 "{\\p0}")
-        body.append(f"Dialogue: 0,{start},{end},ScreenBox,,0,0,0,,{rect}")
+        body.append(f"Dialogue: {SCREEN_RECT_LAYER},{start},{end},ScreenBox,,0,0,0,,{rect}")
         middle = f"{{\\pos({x0 + box_w // 2},{y0 + box_h // 2})\\fs{size}}}"
-        body.append(f"Dialogue: 1,{start},{end},Screen,,0,0,0,,"
+        body.append(f"Dialogue: {SCREEN_TEXT_LAYER},{start},{end},Screen,,0,0,0,,"
                     + middle + "\\N".join(lines))
     return body
 
@@ -541,4 +574,28 @@ def _screen_styles(pieces: list[dict] | None, font: str, size: int) -> str:
                    text_colour=BOX_FILL, border_style=1, alignment=7) + "\n"
         + _ass_style("Screen", font, size, BOX_FILL, 0,
                      text_colour=TEXT_COLOUR, border_style=1) + "\n"
+    )
+
+
+def describe_screen_piece(piece: dict, width: int, height: int) -> str:
+    """One log line saying where a piece of translated text will be drawn.
+
+    It carries the box OCR read the old text in and the box that will be
+    painted over it, so a piece that lands in the wrong place, at the wrong
+    size or at the wrong moment can be told apart from a piece that was
+    read wrongly to begin with.
+    """
+    text = (piece.get("text") or "").strip()
+    if not text:
+        return f"Screen text (nothing to draw) {piece.get('box')}"
+    lines, size, (x0, y0, box_w, box_h) = screen_layout(piece, width, height)
+    start, end = screen_times(piece)
+    oxmin, oxmax, oymin, oymax = piece["box"]
+    return (
+        f"Screen text t={start:.2f}-{end:.2f}s "
+        f"read at x={oxmin}-{oxmax} y={oymin}-{oymax} "
+        f"draw box x={x0}-{x0 + box_w} y={y0}-{y0 + box_h} ({box_w}x{box_h}) "
+        f"centre=({x0 + box_w // 2},{y0 + box_h // 2}) "
+        f"size={size}px layer={SCREEN_TEXT_LAYER} lines={len(lines)} "
+        f"{text!r}"
     )

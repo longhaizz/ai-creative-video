@@ -998,3 +998,38 @@ def translate_labels(texts, target_lang: str, api_key: str,
         out.extend(_translate_chunk(
             texts[at:at + LABELS_PER_ASK], lang_name, api_key, model, ctx))
     return out
+
+
+def _scripts_of(code: str) -> set:
+    """The writing systems a language uses, e.g. {"LATIN"}."""
+    named = LANG_SCRIPTS.get((code or "").lower(), DEFAULT_SCRIPT)
+    return set(named) if isinstance(named, tuple) else {named}
+
+
+def already_in_target(text: str, target_lang: str, asr_meta=None) -> bool:
+    """Is this piece of text already in the language we translate into?
+
+    Translating it again costs a request and, worse, has a white box drawn
+    over words that were right to begin with. A Hindi advert ended on an
+    app store where the search box read "pubg": that came back as "pubg"
+    and was still covered over and written again.
+
+    Only the writing system answers this, and only when the two languages
+    do not share one. Hindi into English is a clean test; Indonesian into
+    Vietnamese is not, because "Gratis" and "Free" are both Latin, so there
+    it answers no and the model does the deciding.
+
+    Text with no letters at all -- "10m+", "50%", a price -- has nothing to
+    translate either way, so it is left alone too.
+    """
+    code, _lang_name, same_mode = _resolve_output_lang(target_lang, asr_meta)
+    if same_mode:
+        return True
+    source = (asr_meta or {}).get("language") or ""
+    letters = [c for c in (text or "") if c.isalpha()]
+    if not letters:
+        return True
+    if _scripts_of(code) & _scripts_of(source):
+        # One alphabet for both: nothing here can tell them apart.
+        return False
+    return all(_script_of(c) in _scripts_of(code) for c in letters)

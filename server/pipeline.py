@@ -436,22 +436,49 @@ def _translated_screen_text(screen_path: Path | None, params, meta,
         ctx.log("No text on the picture to translate")
         return []
 
-    ctx.step("Translating the text on the picture")
     # Imported here, so reading this file does not need an OpenAI key.
-    from server.steps.translate import translate_labels
+    from server.steps.translate import already_in_target, translate_labels
 
+    todo = []
+    for piece in kept:
+        if already_in_target(piece["text"], params.target_lang, meta):
+            ctx.log(f"Screen text: {piece['text']!r} is already in the target "
+                    f"language, leaving it on the picture")
+            continue
+        todo.append(piece)
+    if not todo:
+        ctx.log("Every piece of text on the picture is already in the target "
+                "language, so there is nothing to draw")
+        return []
+
+    ctx.step("Translating the text on the picture")
     try:
         said = translate_labels(
-            [piece["text"] for piece in kept], params.target_lang,
+            [piece["text"] for piece in todo], params.target_lang,
             config.OPENAI_API_KEY, asr_meta=meta, ctx=ctx,
         )
     except PipelineError as error:
         ctx.log(f"Could not translate the text on the picture: {error}")
         return []
-    for piece, text in zip(kept, said):
+
+    out = []
+    for piece, text in zip(todo, said):
+        # A translation that came back word for word is the model saying the
+        # text was already right. Drawing it again would cover good words
+        # with the same words, at a size and place of our choosing.
+        if _the_same_words(piece["text"], text):
+            ctx.log(f"Screen text: {piece['text']!r} came back unchanged, "
+                    f"leaving it on the picture")
+            continue
         ctx.log(f"Screen text: {piece['text']!r} -> {text!r}")
         piece["text"] = text
-    return kept
+        out.append(piece)
+    return out
+
+
+def _the_same_words(before: str, after: str) -> bool:
+    """Did the translation come back as the text that went in?"""
+    return " ".join(before.casefold().split()) == " ".join(after.casefold().split())
 
 
 def _inside_hook(piece: dict, params, width: int, height: int) -> bool:
