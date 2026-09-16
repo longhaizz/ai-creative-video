@@ -1,5 +1,7 @@
 """What the translator is told when a line came out the wrong length."""
 
+import json
+
 
 def test_the_rewrite_prompt_carries_the_misses(monkeypatch):
     """A rewrite told only "25 words" is a guess. It must see the misses.
@@ -396,7 +398,9 @@ def test_every_piece_is_translated_in_one_ask(monkeypatch):
         ["SALE 50%", "BUY NOW"], "VI", "key")
 
     assert out == ["GIẢM 50%", "MUA NGAY"]
-    assert "0. SALE 50%" in seen["user"] and "1. BUY NOW" in seen["user"]
+    # Sent as JSON under the keys the answer must carry, so the model copies
+    # them instead of counting its way down a numbered list.
+    assert json.loads(seen["user"]) == {"0": "SALE 50%", "1": "BUY NOW"}
     assert "Vietnamese" in seen["system"]
 
 
@@ -449,3 +453,27 @@ def test_the_prompt_says_the_text_came_from_ocr(monkeypatch):
     translate.translate_labels(["AND IT.LEARNS"], "VI", "key")
     assert "OCR" in seen["system"]
     assert "numbers" in seen["system"] and "brand" in seen["system"].lower()
+
+
+def test_a_long_list_is_broken_into_asks_of_a_size_the_model_holds(monkeypatch):
+    """One 58 piece ask drifted: every answer past the fortieth was the
+    translation of the piece after it, and the tail of the video was
+    covered in the wrong words."""
+    from server.steps import translate
+
+    asks = []
+
+    def fake_chat(system, user, api_key, model, json_mode=False, schema=None):
+        given = json.loads(user)
+        asks.append(given)
+        return json.dumps({"labels": {k: f"<{v}>" for k, v in given.items()}})
+
+    monkeypatch.setattr(translate, "_chat", fake_chat)
+    texts = [f"piece {i}" for i in range(58)]
+    out = translate.translate_labels(texts, "VI", "key")
+
+    assert out == [f"<{t}>" for t in texts], "every piece keeps its own answer"
+    assert len(asks) == 3
+    assert all(len(ask) <= translate.LABELS_PER_ASK for ask in asks)
+    # Each ask starts its keys again at 0, and the answers still line up.
+    assert list(asks[1]) == [str(i) for i in range(translate.LABELS_PER_ASK)]

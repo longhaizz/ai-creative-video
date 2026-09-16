@@ -55,6 +55,15 @@ TIME_PAD = 0.75
 # showed dialect ("واش باقي كتقلب") where Whisper wrote standard Arabic, and
 # its real subtitles scored 0.44-0.67. MIN_MATCHED_LETTERS keeps chance out.
 MIN_SCORE = 0.4
+# Read this well, and the box says the subtitle on its own: OCR read the
+# subtitles of 16.mp4 at 1.00 all the way through.
+STRONG_SCORE = 0.85
+# Without such a reading, the text has to follow the speech through the
+# video before it counts as a subtitle track. A Hindi ad narrated its own
+# app, so the app's own title and buttons scored 0.50-0.80 here and there,
+# and the whole screen was painted out. Real subtitles are on screen for
+# nearly every line that is said; that text was there for two lines of ten.
+MIN_CUE_SHARE = 0.6
 # Matches this many seconds apart, or closer, learn one line together.
 LOCAL_SECONDS = 2.0
 # Fewer frames than this that match the speech is too little to trust.
@@ -86,6 +95,10 @@ MAX_BAND_LINES = 3
 # ("|", "√", "") scored 0.00-0.43.
 # ponytail: one number from one video; raise it if junk still gets through
 MIN_SCREEN_OCR = 0.6
+# How tall a piece of text must be, as a share of the frame, to be read as
+# a message rather than as small print. See _worth_reading.
+# ponytail: one clean split on one video; move it if real copy gets dropped
+MIN_SCREEN_HEIGHT_SHARE = 0.035
 
 # The log shows one line per piece of text while it stays on screen. Reads
 # of the same text this close in place and time are one line.
@@ -156,6 +169,39 @@ def spoken_at(cues, seconds):
     )
 
 
+def speech_evidence(reads, cues, fps):
+    """What says the text on screen is a subtitle track at all.
+
+    Returns {"matched": frame -> the boxes whose text was said, "strong":
+    how many frames read one of them almost word for word, "cue_share":
+    the share of the lines Whisper heard that had matching text on screen}.
+
+    Text that is not a subtitle still matches now and then, above all when
+    the voice reads out the app it is showing. Subtitles are either read
+    word for word or they follow the speech through the whole video; app
+    text does neither.
+    """
+    matched, strong, covered = {}, 0, set()
+    for frame_no, items in reads.items():
+        seconds = (frame_no - 1) / fps
+        spoken = spoken_at(cues, seconds)
+        if not spoken:
+            continue
+        scores = [(box, contained(text, spoken)) for box, text, _score in items]
+        boxes = [box for box, score in scores if score >= MIN_SCORE]
+        if not boxes:
+            continue
+        matched[frame_no] = boxes
+        if max(score for _box, score in scores) >= STRONG_SCORE:
+            strong += 1
+        covered.update(
+            i for i, cue in enumerate(cues)
+            if cue["start"] - TIME_PAD <= seconds <= cue["end"] + TIME_PAD
+        )
+    return {"matched": matched, "strong": strong,
+            "cue_share": len(covered) / len(cues) if cues else 0.0}
+
+
 def subtitle_bands(reads, cues, fps):
     """Where the subtitle line sits in each frame, learned from boxes whose text was said.
 
@@ -170,15 +216,11 @@ def subtitle_bands(reads, cues, fps):
     """
     if fps <= 0:
         return None
-    matched = {}
-    for frame_no, items in reads.items():
-        spoken = spoken_at(cues, (frame_no - 1) / fps)
-        if not spoken:
-            continue
-        boxes = [box for box, text, _score in items if contained(text, spoken) >= MIN_SCORE]
-        if boxes:
-            matched[frame_no] = boxes
+    found = speech_evidence(reads, cues, fps)
+    matched = found["matched"]
     if len(matched) < MIN_MATCHED_FRAMES:
+        return None
+    if found["strong"] < MIN_MATCHED_FRAMES and found["cue_share"] < MIN_CUE_SHARE:
         return None
 
     # ponytail: compares every match with every other; fine for the few hundred sampled frames of an ad
@@ -343,7 +385,7 @@ def text_groups(reads, cues, fps):
     return groups
 
 
-def screen_text(reads, cues, fps, erase, bands):
+def screen_text(reads, cues, fps, erase, bands, frame_height=0):
     """The text that stays on screen, ready to be translated.
 
     Everything the video paints out is left out of this: that is the
@@ -352,7 +394,7 @@ def screen_text(reads, cues, fps, erase, bands):
 
     Bad reads are dropped, because every one that survives has a white box
     drawn over it later, and a white box over a stray "|" is worse than
-    leaving the "|" alone.
+    leaving the "|" alone. So is the small print: see _worth_reading.
     """
     kept = []
     for g in text_groups(reads, cues, fps):
@@ -364,11 +406,45 @@ def screen_text(reads, cues, fps, erase, bands):
             continue
         if len(_letters(g["text"])) < MIN_CHARS:
             continue
+        if not _worth_reading(g["box"], frame_height):
+            continue
         if _near_the_band(g["box"], bands.get(g["frame"]) if bands else None):
             continue
         kept.append(g)
-    return _join_covering(kept)
+    # After the joining, not before: text read a letter at a time gives
+    # several one-frame groups that are one piece of text once put together.
+    return [g for g in _join_covering(kept) if _stayed_on_screen(g)]
 
+
+def _worth_reading(box, frame_height):
+    """Is this text big enough to be a message rather than small print?
+
+    A Hindi creative ended on a screen recording of an app store, and every
+    row of it -- "Contains ads", "14 MB", a developer name -- is text on
+    screen by any reading, so all of it came back to be translated and
+    covered with a white box.
+
+    Height tells the two apart with nothing left in between. On that video
+    the writing meant to be read ran 58 to 79 pixels tall on a 1280 tall
+    frame, and the app store chrome 23 to 37. Advertising copy is big
+    because it is meant to be read at arm's length; interface labels are
+    small because they are not the message.
+    """
+    if frame_height <= 0:
+        return True
+    _, _, ymin, ymax = box
+    return (ymax - ymin) >= MIN_SCREEN_HEIGHT_SHARE * frame_height
+
+
+def _stayed_on_screen(group):
+    """Was this text there long enough to be worth covering over?
+
+    OCR looks at eight frames a second, so a piece read in a single one was
+    on screen for about a tenth of a second: a row caught mid-scroll, or a
+    frame of a transition. Covering that with a white box draws the eye to
+    a flash that nobody was reading.
+    """
+    return group["last"] > group["first"]
 
 def _near_the_band(box, band):
     """Does this box touch the band the subtitles sit on?

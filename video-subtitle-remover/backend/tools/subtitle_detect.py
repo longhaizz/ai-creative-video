@@ -44,6 +44,9 @@ class SubtitleDetect:
         """根据视频帧率自适应设置采样间隔，保持每秒至少采样8帧"""
         cap = cv2.VideoCapture(get_readable_path(self.video_path))
         fps = cap.get(cv2.CAP_PROP_FPS)
+        # PATCH (dub server). How tall the frame is, to tell a headline from
+        # the small print of an app store. See _worth_reading.
+        self.frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         cap.release()
         self.fps = fps
         if fps >= 60:
@@ -148,10 +151,15 @@ class SubtitleDetect:
         # has no subtitle line to find, and that text is exactly what the
         # translate step wants.
         self.screen_text = screen_text(
-            reads, self.speech["cues"], self.fps, erase, bands)
+            reads, self.speech["cues"], self.fps, erase, bands,
+            frame_height=self.frame_height)
         log(f"Screen text: {len(self.screen_text)} pieces to translate")
         if bands is None:
-            log("Speech filter: too few boxes match the speech, nothing removed")
+            found = speech_evidence(reads, self.speech["cues"], self.fps)
+            log(f"Speech filter: {len(found['matched'])} frames match the speech, "
+                f"{found['strong']} of them word for word, and text was on screen "
+                f"for {found['cue_share']:.0%} of what was said -- "
+                f"not a subtitle track, nothing removed")
             return {}
         kept = {}
         for frame_no, boxes in sampled_results.items():

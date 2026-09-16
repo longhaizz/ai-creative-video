@@ -909,6 +909,13 @@ def _labels_schema(n: int) -> dict:
     }
 
 
+# How many pieces go in one ask. A long list is where the model stops
+# copying the keys it was given and starts counting its own: on a 58 piece
+# video every answer past the fortieth belonged to the piece after it, so
+# the whole tail of the video was covered with the wrong words.
+# ponytail: twenty held on one video; drop it if a longer list drifts again
+LABELS_PER_ASK = 20
+
 LABELS_SYSTEM = (
     "You translate the short pieces of text printed on an advertising "
     "video into {lang_name}.\n"
@@ -926,9 +933,40 @@ LABELS_SYSTEM = (
     "- Write it the way an advert is written, not word for word.\n"
     "- Match the capitalisation of the original.\n"
     "- Answer with the translation only, nothing else.\n"
-    "Answer as JSON: {{\"labels\": {{\"0\": \"...\", \"1\": \"...\"}}}}, one "
-    "key per piece, in the order they were given."
+    "You are given a JSON object of pieces. Answer with "
+    "{{\"labels\": {{...}}}} carrying the same keys, each one holding the "
+    "translation of the piece that came under that key. Copy the keys "
+    "across: do not renumber them, and do not work their order out for "
+    "yourself."
 )
+
+
+def _translate_chunk(texts, lang_name: str, api_key: str, model: str,
+                     ctx=None) -> list[str]:
+    """Translate up to LABELS_PER_ASK pieces in one request.
+
+    The pieces are sent as JSON under the very keys the answer has to carry,
+    so lining an answer up with its piece is copying and not counting. Sent
+    as a numbered list instead, the model kept its place for about forty
+    pieces and then handed every piece the answer belonging to the next one.
+    """
+    raw = _chat(
+        LABELS_SYSTEM.format(lang_name=lang_name),
+        json.dumps({str(i): text for i, text in enumerate(texts)},
+                   ensure_ascii=False, indent=1),
+        api_key,
+        model,
+        json_mode=True,
+        schema=_labels_schema(len(texts)),
+    )
+    labels = (_extract_json(raw) or {}).get("labels") or {}
+    out = []
+    for i, text in enumerate(texts):
+        got = str(labels.get(str(i)) or "").strip()
+        if not got and ctx is not None:
+            ctx.log(f"Screen text {text!r} came back empty, keeping it as it is")
+        out.append(got or text)
+    return out
 
 
 def translate_labels(texts, target_lang: str, api_key: str,
@@ -955,20 +993,8 @@ def translate_labels(texts, target_lang: str, api_key: str,
         # writing it again would only round-trip it through OCR mistakes.
         return list(texts)
 
-    body = "\n".join(f"{i}. {text}" for i, text in enumerate(texts))
-    raw = _chat(
-        LABELS_SYSTEM.format(lang_name=lang_name),
-        body,
-        api_key,
-        model,
-        json_mode=True,
-        schema=_labels_schema(len(texts)),
-    )
-    labels = (_extract_json(raw) or {}).get("labels") or {}
     out = []
-    for i, text in enumerate(texts):
-        got = str(labels.get(str(i)) or "").strip()
-        if not got and ctx is not None:
-            ctx.log(f"Screen text {i} came back empty, keeping {text!r}")
-        out.append(got or text)
+    for at in range(0, len(texts), LABELS_PER_ASK):
+        out.extend(_translate_chunk(
+            texts[at:at + LABELS_PER_ASK], lang_name, api_key, model, ctx))
     return out
