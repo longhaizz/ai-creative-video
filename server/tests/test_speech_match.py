@@ -176,6 +176,56 @@ def test_the_band_stops_after_three_lines():
     assert not sm.on_the_line(app[-1], band)
 
 
+# Five lines said over ten seconds, and text that reads about half of the
+# first one: "minhchiase" out of "minhchiasexyzwqqqq" is 0.56.
+MANY_CUES = [{"start": t, "end": t + 2.0,
+              "text": CUES[0]["text"] if t == 0 else f"câu thứ {t} không liên quan"}
+             for t in (0.0, 2.0, 4.0, 6.0, 8.0)]
+HALF_READ = "mình chia sẻ xyzw qqqq"
+
+
+def test_app_text_that_echoes_one_line_is_not_a_subtitle_track():
+    """Seen on a Hindi ad: the voice read the app out loud, so its title and
+    buttons matched here and there, and the whole screen was painted out."""
+    reads = {n: [(SUB, HALF_READ, 0.9)] for n in range(1, 30, 3)}   # 0.00-2.70s
+    assert 0.4 <= sm.contained(HALF_READ, CUES[0]["text"]) < sm.STRONG_SCORE
+    assert sm.subtitle_bands(reads, MANY_CUES, FPS) is None
+
+
+def _follows_the_speech(cues, frames):
+    """A subtitle track: on screen the words being said, read only half right."""
+    reads = {}
+    for n in frames:
+        seconds = (n - 1) / FPS
+        said = next(c["text"] for c in cues if c["start"] <= seconds < c["end"])
+        reads[n] = [(SUB, said[:20] + " xyzw qqqq", 0.9)]
+    return reads
+
+
+def test_a_subtitle_that_follows_every_line_is_kept_even_when_read_badly():
+    """Seen on a Moroccan ad: dialect on screen, standard Arabic heard, so
+    the real subtitles only scored 0.44-0.67 -- but they were always there."""
+    reads = _follows_the_speech(MANY_CUES, range(1, 100, 3))   # 0.00-9.90s
+    for items in reads.values():
+        _box, text, _score = items[0]
+        assert 0.4 <= sm.contained(text, _said_at(text)) < sm.STRONG_SCORE
+    band = sm.subtitle_bands(reads, MANY_CUES, FPS)[1]
+    assert sm.on_the_line(SUB, band)
+
+
+def _said_at(read_text):
+    """The cue this read came from, for the score check above."""
+    return next(c["text"] for c in MANY_CUES
+                if sm._letters(c["text"]).startswith(sm._letters(read_text)[:8]))
+
+
+def test_a_subtitle_read_word_for_word_needs_no_more_proof():
+    """16.mp4 read at 1.00, on screen for only part of what was said."""
+    reads = {n: [(SUB, CUES[0]["text"], 0.9)] for n in range(1, 30, 3)}
+    band = sm.subtitle_bands(reads, MANY_CUES, FPS)[1]
+    assert sm.on_the_line(SUB, band)
+
+
 def test_a_subtitle_in_another_language_finds_no_line():
     """Nothing matches, so there is no line, and the caller removes nothing."""
     assert _band(_reads("Today I share a small tip"), CUES) is None
@@ -403,3 +453,60 @@ def test_a_group_carries_when_it_came_and_went():
     groups = _screen(_reads("Hôm nay mình chia sẻ"))
     assert groups[0]["first"] == 0.0
     assert groups[0]["last"] == 2.7
+
+
+# -- small print and flashes, from a real Hindi creative --------------------
+
+FRAME_H = 1280
+HEADLINE = (126, 594, 121, 185)   # 64px: "गर्भाव्था को प्रबधित करे"
+SMALL_PRINT = (152, 458, 244, 271)      # 27px: "Pregnancy Tracker - Baby App"
+
+
+def _with(box, text, frames=range(1, 30, 3), score=0.97):
+    """Reads where the subtitle runs throughout and `box` carries `text`."""
+    return {n: [(SUB, "Hôm nay mình chia sẻ", 0.9), (box, text, score)]
+            for n in frames}
+
+
+def _screen_h(reads, height=FRAME_H):
+    bands = sm.subtitle_bands(reads, CUES, FPS)
+    erase = sm.boxes_to_erase(reads, bands, FPS)
+    return sm.screen_text(reads, CUES, FPS, erase, bands, frame_height=height)
+
+
+def test_app_store_small_print_is_left_alone():
+    """A screen recording is text on screen, but it is not the message."""
+    assert _screen_h(_with(SMALL_PRINT, "Pregnancy Tracker - Baby App")) == []
+
+
+def test_a_headline_of_the_same_advert_is_kept():
+    assert _texts(_screen_h(_with(HEADLINE, "गर्भाव्था को प्रबधित करे"))) == [
+        "गर्भाव्था को प्रबधित करे"]
+
+
+def test_without_a_frame_height_nothing_is_judged_by_size():
+    """The height is not always known, and a guess would drop real text."""
+    assert _texts(_screen_h(_with(SMALL_PRINT, "Pregnancy Tracker - Baby App"),
+                            height=0)) == ["Pregnancy Tracker - Baby App"]
+
+
+def test_text_seen_in_a_single_frame_is_a_flash_not_a_message():
+    """A row caught mid-scroll was on screen for about a tenth of a second."""
+    reads = _with(HEADLINE, "गर्भाव्था को प्रबधित करे")
+    reads[16] = [(SUB, "Hôm nay mình chia sẻ", 0.9),
+                 (LOGO, "memeriksa", 0.99)]
+    assert _texts(_screen_h(reads)) == ["गर्भाव्था को प्रबधित करे"]
+
+
+def test_a_line_that_shows_up_word_by_word_survives_the_flash_rule():
+    """Each part is read once, but together they stayed on screen."""
+    reads = {}
+    for n, text in zip(range(1, 30, 3), (
+            "गर्भ", "गर्भाव्था", "गर्भाव्था को", "गर्भाव्था को प्रब",
+            "गर्भाव्था को प्रबधित", "गर्भाव्था को प्रबधित करे",
+            "गर्भाव्था को प्रबधित करे", "गर्भाव्था को प्रबधित करे",
+            "गर्भाव्था को प्रबधित करे", "गर्भाव्था को प्रबधित करे")):
+        reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9), (HEADLINE, text, 0.97)]
+    groups = _screen_h(reads)
+    assert [g["text"] for g in groups] == ["गर्भाव्था को प्रबधित करे"]
+    assert groups[0]["last"] > groups[0]["first"]
