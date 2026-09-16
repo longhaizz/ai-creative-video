@@ -459,7 +459,8 @@ def test_a_group_carries_when_it_came_and_went():
 
 FRAME_H = 1280
 HEADLINE = (126, 594, 121, 185)   # 64px: "गर्भाव्था को प्रबधित करे"
-SMALL_PRINT = (152, 458, 244, 271)      # 27px: "Pregnancy Tracker - Baby App"
+BODY_COPY = (65, 375, 203, 232)   # 29px: a line of the advert's own text
+TINY = (152, 458, 244, 262)       # 18px: smaller than any line of an advert
 
 
 def _with(box, text, frames=range(1, 30, 3), score=0.97):
@@ -474,9 +475,19 @@ def _screen_h(reads, height=FRAME_H):
     return sm.screen_text(reads, CUES, FPS, erase, bands, frame_height=height)
 
 
-def test_app_store_small_print_is_left_alone():
-    """A screen recording is text on screen, but it is not the message."""
-    assert _screen_h(_with(SMALL_PRINT, "Pregnancy Tracker - Baby App")) == []
+def test_the_smallest_marks_are_left_alone():
+    """Only a floor under the noise. It cannot tell an app store row from a
+    line of body copy -- on one Hindi video those were 23-42px and 29-40px
+    on the same frame -- and it must not try."""
+    assert _screen_h(_with(TINY, "Pregnancy Tracker")) == []
+
+
+def test_small_body_copy_is_still_translated():
+    """A paragraph of the advert reads smaller than its headline. Held to
+    the headline's height, a five line block at 17.7s was thrown away and
+    the viewer got a video with Hindi still on it."""
+    assert _texts(_screen_h(_with(BODY_COPY, "सखत होने की प्क्रिया में हैं।"))) == [
+        "सखत होने की प्क्रिया में हैं।"]
 
 
 def test_a_headline_of_the_same_advert_is_kept():
@@ -486,8 +497,8 @@ def test_a_headline_of_the_same_advert_is_kept():
 
 def test_without_a_frame_height_nothing_is_judged_by_size():
     """The height is not always known, and a guess would drop real text."""
-    assert _texts(_screen_h(_with(SMALL_PRINT, "Pregnancy Tracker - Baby App"),
-                            height=0)) == ["Pregnancy Tracker - Baby App"]
+    assert _texts(_screen_h(_with(TINY, "Pregnancy Tracker"), height=0)) == [
+        "Pregnancy Tracker"]
 
 
 def test_text_seen_in_a_single_frame_is_a_flash_not_a_message():
