@@ -578,7 +578,7 @@ if __name__ == '__main__':
     tr.read(TRANSLATION_FILE, encoding='utf-8')
     sr = SubtitleRemover(args.input)
     if not is_video_or_image(args.input):
-        sr.append_output(f'Error: {video_path} is not supported not corrupted.')
+        sr.append_output(f'Error: {args.input} is not supported not corrupted.')
         exit(-1)
     sr.sub_areas = args.subtitle_area_coords
     sr.video_out_path = args.output

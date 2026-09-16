@@ -9,7 +9,7 @@ from .hardware_accelerator import HardwareAccelerator
 from .common_tools import get_readable_path
 from .ocr import get_coordinates
 from .speech_match import (REC_MODELS, boxes_to_erase, read_log, screen_text,
-                           subtitle_bands)
+                           speech_evidence, subtitle_bands)
 from backend.config import config, tr
 from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
