@@ -163,6 +163,19 @@ def test_lines_that_do_not_match_between_two_that_do_are_kept():
     assert all(sm.on_the_line(grown, bands[n]) for n in (13, 16, 19, 22))
 
 
+def test_the_band_stops_after_three_lines():
+    """Seen on 16.mp4: the band walked down a screen recording of an app,
+    line by line, until it covered the workout list and the buttons."""
+    app = [(430, 570, 880, 940), (430, 570, 960, 1020), (430, 570, 1040, 1100)]
+    reads = {n: [(SUB, "mình chia sẻ một mẹo", 0.9)]
+                + [(box, f"row {box[2]}", 1.0) for box in app]
+             for n in range(1, 30, 3)}
+    band = _band(reads, CUES)
+    top, bottom, _ = band
+    assert bottom - top <= 4 * 60, band          # three lines, plus half a line each side
+    assert not sm.on_the_line(app[-1], band)
+
+
 def test_a_subtitle_in_another_language_finds_no_line():
     """Nothing matches, so there is no line, and the caller removes nothing."""
     assert _band(_reads("Today I share a small tip"), CUES) is None
