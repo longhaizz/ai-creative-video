@@ -237,3 +237,72 @@ def test_no_boxes_means_no_position(tmp_path):
 def test_no_file_means_no_position(tmp_path):
     """The mode ran no detection, or the run stopped before writing."""
     assert subtitle_position(tmp_path / "never_written.json", 1000) is None
+
+
+# -- the text that stays on screen ------------------------------------------
+
+from server.steps.vsr import read_screen_text        # noqa: E402
+
+
+def test_asking_for_screen_text_reads_the_whole_frame():
+    """Text to translate sits anywhere, not only where the subtitles are."""
+    command = build_command("in.mp4", "out.mp4", "sttn-det", (1, 2, 3, 4),
+                            "boxes.json", screen_text="screen.json")
+    assert command[command.index("--dump-screen-text") + 1] == "screen.json"
+    assert "--scan-all-text" in command
+    assert "--detect-only" not in command
+
+
+def test_detect_only_is_only_sent_when_asked():
+    plain = build_command("in.mp4", "out.mp4", "sttn-det", (1, 2, 3, 4),
+                          "boxes.json")
+    assert "--dump-screen-text" not in plain
+    assert "--scan-all-text" not in plain
+    looking = build_command("in.mp4", "out.mp4", "sttn-det", (1, 2, 3, 4),
+                            "boxes.json", screen_text="s.json", detect_only=True)
+    assert "--detect-only" in looking
+
+
+def test_detect_only_hands_back_the_video_it_was_given(monkeypatch, tmp_path):
+    """Nothing was painted, so there is no new file to hand on."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"v")
+    monkeypatch.setattr("server.steps.vsr.probe_size", lambda path: (640, 360))
+    monkeypatch.setattr("server.steps.vsr.subprocess.Popen",
+                        lambda *a, **k: _FakeProcess(0))
+    out, position = remove_subtitles(
+        video, tmp_path / "unused.mp4", "sttn-det", 0.6, 0.96, 0.03, 0.97,
+        screen_text=tmp_path / "screen.json", detect_only=True,
+    )
+    assert out == video.resolve()
+    assert position is None
+    assert not (tmp_path / "unused.mp4").exists()
+
+
+def test_a_detect_only_crash_still_fails(monkeypatch, tmp_path):
+    (tmp_path / "video.mp4").write_bytes(b"v")
+    monkeypatch.setattr("server.steps.vsr.probe_size", lambda path: (640, 360))
+    monkeypatch.setattr("server.steps.vsr.subprocess.Popen",
+                        lambda *a, **k: _FakeProcess(1))
+    with pytest.raises(PipelineError):
+        remove_subtitles(
+            tmp_path / "video.mp4", tmp_path / "unused.mp4", "sttn-det",
+            0.6, 0.96, 0.03, 0.97,
+            screen_text=tmp_path / "screen.json", detect_only=True,
+        )
+
+
+def test_the_screen_text_is_read_back_from_the_file(tmp_path):
+    path = tmp_path / "screen.json"
+    path.write_text(
+        '[{"text": "SALE", "box": [1, 2, 3, 4], "start": 0.0, "end": 1.0}]',
+        encoding="utf-8")
+    assert read_screen_text(path)[0]["text"] == "SALE"
+
+
+def test_a_missing_or_broken_screen_text_file_is_no_text(tmp_path):
+    """The tool leaves early on a clean video; that must not be a failure."""
+    assert read_screen_text(tmp_path / "never_written.json") == []
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    assert read_screen_text(broken) == []

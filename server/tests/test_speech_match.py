@@ -322,3 +322,84 @@ def test_a_missing_or_broken_file_is_an_error_not_no_filter(tmp_path):
     for path in (tmp_path / "never.json", broken):
         speech = sm.load_speech(str(path))
         assert speech["cues"] == [] and speech["error"], speech
+
+
+# -- the text that stays on screen, for translating -------------------------
+
+
+def _screen(reads, cues=CUES):
+    """The groups worth translating, as the remover hands them over."""
+    bands = sm.subtitle_bands(reads, cues, FPS)
+    erase = sm.boxes_to_erase(reads, bands, FPS)
+    return sm.screen_text(reads, cues, FPS, erase, bands)
+
+
+def _texts(groups):
+    return sorted(g["text"] for g in groups)
+
+
+def test_the_subtitle_is_not_screen_text():
+    """It is painted out and written again from the speech."""
+    assert _texts(_screen(_reads("Hôm nay mình chia sẻ"))) == ["SALE 50%"]
+
+
+def test_a_logo_nobody_says_is_screen_text():
+    groups = _screen(_reads("Hôm nay mình chia sẻ"))
+    assert [g["box"] for g in groups] == [LOGO]
+
+
+def test_an_unsure_read_is_dropped():
+    """A white box over a stray mark is worse than leaving the mark."""
+    reads = {n: [(SUB, "Hôm nay mình chia sẻ", 0.9), (LOGO, "√", 0.43)]
+             for n in range(1, 30, 3)}
+    assert _screen(reads) == []
+
+
+def test_a_read_of_two_letters_is_dropped():
+    reads = {n: [(SUB, "Hôm nay mình chia sẻ", 0.9), (LOGO, "OK", 0.95)]
+             for n in range(1, 30, 3)}
+    assert _screen(reads) == []
+
+
+def test_text_off_the_line_that_repeats_the_speech_is_dropped():
+    """A hook saying what is said would be written twice over."""
+    reads = {n: [(SUB, "Hôm nay mình chia sẻ", 0.9),
+                 (LOGO, "chia sẻ một mẹo nhỏ", 0.95)]
+             for n in range(1, 30, 3)}
+    assert _screen(reads) == []
+
+
+def test_a_box_touching_the_subtitle_band_is_left_alone():
+    near = (100, 900, 880, 910)   # just under the line at 800-860
+    reads = {n: [(SUB, "Hôm nay mình chia sẻ", 0.9), (near, "DOWNLOAD NOW", 0.95)]
+             for n in range(1, 30, 3)}
+    assert _screen(reads) == []
+
+
+def test_text_showing_up_word_by_word_is_one_group():
+    """Two reads of a growing line must not stack two boxes."""
+    short, long = (100, 480, 600, 660), (100, 590, 600, 660)
+    reads = {}
+    for n in range(1, 15, 3):
+        reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9), (short, "AND IT LEARNS", 0.93)]
+    for n in range(16, 30, 3):
+        reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9),
+                    (long, "AND IT LEARNS FROM EVERY", 0.97)]
+    groups = _screen(reads)
+    assert len(groups) == 1
+    assert groups[0]["text"] == "AND IT LEARNS FROM EVERY"
+    assert groups[0]["box"] == long
+    assert groups[0]["first"] == 0.0
+
+
+def test_screen_text_is_found_even_with_no_subtitle_line():
+    """A video with no spoken subtitles still has text on it."""
+    reads = {n: [(LOGO, "SALE 50%", 0.95)] for n in range(1, 30, 3)}
+    assert sm.subtitle_bands(reads, CUES, FPS) is None
+    assert _texts(sm.screen_text(reads, CUES, FPS, {}, None)) == ["SALE 50%"]
+
+
+def test_a_group_carries_when_it_came_and_went():
+    groups = _screen(_reads("Hôm nay mình chia sẻ"))
+    assert groups[0]["first"] == 0.0
+    assert groups[0]["last"] == 2.7

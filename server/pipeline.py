@@ -110,7 +110,9 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     )
     ctx.check_cancel()
 
-    # 1. Take the old subtitles off the picture.
+    # 1. Take the old subtitles off the picture. The same pass reads the
+    # text that is staying, when the job asked for it to be translated.
+    screen_path = _screen_text_path(work, params)
     if params.remove_subtitle:
         ctx.step("Removing the old subtitles")
         video, detected_position = vsr.remove_subtitles(
@@ -118,7 +120,10 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             params.vsr_top, params.vsr_bottom, params.vsr_left, params.vsr_right,
             ctx=ctx,
             speech_cues=_speech_file(work, cues, meta, ctx),
+            screen_text=screen_path,
         )
+    elif screen_path is not None:
+        _read_screen_only(video, work, params, cues, meta, screen_path, ctx)
     ctx.check_cancel()
 
     # 1b. Take the old hook off too, in the box the client drew. Its own
@@ -249,10 +254,11 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     ctx.log("Normalized the mix so the output is clearly audible")
     result = audio.mux_audio(picture, mixed, work / "result.mp4")
 
-    # 9. Burn the new subtitles and the new hook on last, in one encode, so
-    # they sit on the final picture.
+    # 9. Burn the new subtitles, the new hook and the translated screen text
+    # on last, in one encode, so they sit on the final picture.
     hook = _hook(params, video_seconds)
-    if params.burn_subtitle or hook is not None:
+    screen = _translated_screen_text(screen_path, params, meta, width, height, ctx)
+    if params.burn_subtitle or hook is not None or screen:
         ctx.step("Burning in the subtitles")
         lines = _subtitle_cues(work, cues) if params.burn_subtitle else []
         result = subtitle.burn(
@@ -261,6 +267,7 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             size=params.subtitle_size,
             position=_subtitle_position(params.subtitle_position, detected_position),
             hook=hook,
+            screen=screen,
             ctx=ctx,
         )
 
@@ -376,6 +383,93 @@ def _spoken_lines(cues: list[dict]) -> list[dict]:
     ]
 
 
+def _screen_text_path(work: Path, params) -> Path | None:
+    """Where the remover writes the text it leaves on screen, or None.
+
+    None means no translating: either nobody asked, or the target language
+    is the one already on the picture, in which case writing the same words
+    again would only put OCR mistakes on screen.
+    """
+    if not params.translate_screen_text:
+        return None
+    if (params.target_lang or "same").strip().lower() == "same":
+        return None
+    return work / "screen_text.json"
+
+
+def _read_screen_only(video: Path, work: Path, params, cues, meta,
+                      screen_path: Path, ctx) -> None:
+    """Read the text on the picture without painting anything out.
+
+    For a job that wants the on-screen text translated but the original
+    subtitles left where they are. It runs no inpainting model, so it costs
+    a pass of OCR and nothing else, and the video it was given is unchanged.
+    """
+    ctx.step("Reading the text on the picture")
+    vsr.remove_subtitles(
+        video, work / "detect_only.mp4", params.vsr_mode,
+        params.vsr_top, params.vsr_bottom, params.vsr_left, params.vsr_right,
+        ctx=ctx,
+        speech_cues=_speech_file(work, cues, meta, ctx),
+        screen_text=screen_path,
+        detect_only=True,
+    )
+
+
+def _translated_screen_text(screen_path: Path | None, params, meta,
+                            width: int, height: int, ctx) -> list[dict]:
+    """The text found on the picture, translated, ready for subtitle.burn.
+
+    A failure here loses the translation, not the job: everything before it
+    took minutes on a GPU, and a video that comes back with its original
+    on-screen text is worth more than no video at all.
+    """
+    if screen_path is None:
+        return []
+    pieces = vsr.read_screen_text(screen_path)
+    kept = [piece for piece in pieces
+            if not _inside_hook(piece, params, width, height)]
+    if len(kept) < len(pieces):
+        ctx.log(f"Leaving {len(pieces) - len(kept)} pieces of text in the hook "
+                f"box alone: the hook says what goes there")
+    if not kept:
+        ctx.log("No text on the picture to translate")
+        return []
+
+    ctx.step("Translating the text on the picture")
+    # Imported here, so reading this file does not need an OpenAI key.
+    from server.steps.translate import translate_labels
+
+    try:
+        said = translate_labels(
+            [piece["text"] for piece in kept], params.target_lang,
+            config.OPENAI_API_KEY, asr_meta=meta, ctx=ctx,
+        )
+    except PipelineError as error:
+        ctx.log(f"Could not translate the text on the picture: {error}")
+        return []
+    for piece, text in zip(kept, said):
+        ctx.log(f"Screen text: {piece['text']!r} -> {text!r}")
+        piece["text"] = text
+    return kept
+
+
+def _inside_hook(piece: dict, params, width: int, height: int) -> bool:
+    """Does this piece of text touch the box the client drew for the hook?
+
+    The client typed what that box is to say, so an automatic translation
+    has no business drawing over it. Without this the old hook, read off
+    the frame, would be translated and written on top of the new one.
+    """
+    if not params.hook_text or params.hook_left is None:
+        return False
+    xmin, xmax, ymin, ymax = piece["box"]
+    return (xmin <= width * params.hook_right
+            and xmax >= width * params.hook_left
+            and ymin <= height * params.hook_bottom
+            and ymax >= height * params.hook_top)
+
+
 def _subtitle_only(ctx: JobContext, models: Models) -> Path:
     """No new voice: keep the original sound, only redo the subtitles.
 
@@ -404,7 +498,11 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
     # text. A job that only removes subtitles still pays for this read; with
     # no Whisper loaded it removes them by position alone, as it always did.
     cues, meta = [], {}
-    if models.whisper is not None and (params.burn_subtitle or params.remove_subtitle):
+    # Screen text needs Whisper too: the language it hears is what picks the
+    # model that can read the letters on the picture.
+    wants_reading = (params.burn_subtitle or params.remove_subtitle
+                     or params.translate_screen_text)
+    if models.whisper is not None and wants_reading:
         cues, meta = transcribe.transcribe(
             models.whisper,
             audio.extract_audio(video, work / "mix.wav"),
@@ -413,6 +511,7 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
         )
         ctx.check_cancel()
 
+    screen_path = _screen_text_path(work, params)
     if params.remove_subtitle:
         ctx.step("Removing the old subtitles")
         video, detected_position = vsr.remove_subtitles(
@@ -421,7 +520,10 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
             ctx=ctx,
             speech_cues=(_speech_file(work, cues, meta, ctx)
                          if models.whisper is not None else None),
+            screen_text=screen_path,
         )
+    elif screen_path is not None:
+        _read_screen_only(video, work, params, cues, meta, screen_path, ctx)
     ctx.check_cancel()
 
     if params.hook_text:
@@ -440,9 +542,10 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
 
     # The length is only read when there is a hook to hold for it.
     hook = _hook(params, audio.duration(video)) if params.hook_text else None
-    if lines or hook is not None:
+    width, height = audio.video_size(video)
+    screen = _translated_screen_text(screen_path, params, meta, width, height, ctx)
+    if lines or hook is not None or screen:
         ctx.step("Burning in the subtitles")
-        width, height = audio.video_size(video)
         video = subtitle.burn(
             video, lines, work / "result_subbed.mp4", width, height,
             font=params.subtitle_font,
@@ -450,6 +553,7 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
             position=_subtitle_position(
                 params.subtitle_position, detected_position),
             hook=hook,
+            screen=screen,
             ctx=ctx,
         )
 

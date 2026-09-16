@@ -367,3 +367,85 @@ def test_the_fallbacks_say_what_happened(monkeypatch):
 
     assert any("0 entries" in line and "1 are needed" in line for line in said), said
     assert any("right count" in line for line in said), said
+
+
+# -- the short pieces of text printed on the picture ------------------------
+
+
+def _fake_chat(monkeypatch, answer):
+    """Answer one _chat call and keep what it was asked."""
+    from server.steps import translate
+    import json as _json
+
+    seen = {}
+
+    def fake_chat(system, user, api_key, model, json_mode=False, schema=None):
+        seen["system"], seen["user"], seen["schema"] = system, user, schema
+        return _json.dumps(answer)
+
+    monkeypatch.setattr(translate, "_chat", fake_chat)
+    return seen
+
+
+def test_every_piece_is_translated_in_one_ask(monkeypatch):
+    """One request per video, not one per piece: they share an advert."""
+    from server.steps import translate
+
+    seen = _fake_chat(monkeypatch, {"labels": {"0": "GIẢM 50%", "1": "MUA NGAY"}})
+    out = translate.translate_labels(
+        ["SALE 50%", "BUY NOW"], "VI", "key")
+
+    assert out == ["GIẢM 50%", "MUA NGAY"]
+    assert "0. SALE 50%" in seen["user"] and "1. BUY NOW" in seen["user"]
+    assert "Vietnamese" in seen["system"]
+
+
+def test_the_answer_cannot_drop_or_reorder_a_piece(monkeypatch):
+    """Strict mode cannot pin an array's length, so the keys are numbered."""
+    from server.steps import translate
+
+    seen = _fake_chat(monkeypatch, {"labels": {"0": "a", "1": "b", "2": "c"}})
+    translate.translate_labels(["x", "y", "z"], "VI", "key")
+    labels = seen["schema"]["schema"]["properties"]["labels"]
+    assert labels["required"] == ["0", "1", "2"]
+    assert labels["additionalProperties"] is False
+
+
+def test_a_piece_the_model_left_empty_keeps_its_own_text(monkeypatch):
+    """A bad answer costs the translation, not the piece."""
+    from server.steps import translate
+
+    _fake_chat(monkeypatch, {"labels": {"0": "GIẢM 50%", "1": "  "}})
+    assert translate.translate_labels(
+        ["SALE 50%", "BUY NOW"], "VI", "key") == ["GIẢM 50%", "BUY NOW"]
+
+
+def test_the_same_language_is_not_sent_to_the_model_at_all(monkeypatch):
+    from server.steps import translate
+
+    def blow_up(*a, **kw):
+        raise AssertionError("nothing to translate, so nothing to ask")
+
+    monkeypatch.setattr(translate, "_chat", blow_up)
+    assert translate.translate_labels(
+        ["SALE"], "same", "key", asr_meta={"language": "en"}) == ["SALE"]
+
+
+def test_no_text_asks_nothing(monkeypatch):
+    from server.steps import translate
+
+    def blow_up(*a, **kw):
+        raise AssertionError("no pieces, no request")
+
+    monkeypatch.setattr(translate, "_chat", blow_up)
+    assert translate.translate_labels([], "VI", "key") == []
+
+
+def test_the_prompt_says_the_text_came_from_ocr(monkeypatch):
+    """Without this the model copies "AND IT.LEARNS" straight through."""
+    from server.steps import translate
+
+    seen = _fake_chat(monkeypatch, {"labels": {"0": "x"}})
+    translate.translate_labels(["AND IT.LEARNS"], "VI", "key")
+    assert "OCR" in seen["system"]
+    assert "numbers" in seen["system"] and "brand" in seen["system"].lower()

@@ -38,6 +38,24 @@ def parse_args():
         "--speech-cues", type=str, default=None,
         help="JSON file with the language and the spoken cues"
     )
+    # PATCH (dub server). Where the text that stays on screen is written, for
+    # the translate step. Off unless asked for.
+    parser.add_argument(
+        "--dump-screen-text", type=str, default=None,
+        help="Write the text that is left on screen to this JSON file"
+    )
+    # PATCH (dub server). Look for text in the whole frame, not only in the
+    # subtitle area. What gets painted over is unchanged.
+    parser.add_argument(
+        "--scan-all-text", action="store_true",
+        help="Read text anywhere in the frame, not only in the subtitle area"
+    )
+    # PATCH (dub server). Read the text and stop, painting over nothing. For
+    # a job that wants the text translated but the subtitles left alone.
+    parser.add_argument(
+        "--detect-only", action="store_true",
+        help="Find and dump the text, then stop without touching the video"
+    )
     args = parser.parse_args()
     args.inpaint_mode = InpaintMode[args.inpaint_mode.replace('-','_').upper()]
     if args.subtitle_area_coords is None:

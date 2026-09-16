@@ -281,6 +281,7 @@ def write_ass(
     size: int,
     position: float,
     hook: dict | None = None,
+    screen: list[dict] | None = None,
 ) -> Path:
     """Write the subtitle file. `position` is a share of the frame height.
 
@@ -308,12 +309,13 @@ def write_ass(
         f"{_ass_style('Box', font, size, BOX_BORDER, border)}\n"
         f"{_ass_style('Default', font, size, BOX_FILL, BOX_PADDING)}\n"
         f"{_hook_style(hook, height)}\n"
+        f"{_screen_styles(screen, font, size)}"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
         "Effect, Text\n"
     )
 
-    body = []
+    body = screen_dialogues(screen or [], width, height)
     if hook is not None:
         line = hook_dialogue(hook, width, height)
         if line:
@@ -376,6 +378,7 @@ def burn(
     size: int | None = None,
     position: float = 0.75,
     hook: dict | None = None,
+    screen: list[dict] | None = None,
     ctx=None,
 ) -> Path:
     """Draw the cues and the hook onto the video for good. Returns out_path."""
@@ -383,7 +386,7 @@ def burn(
     out_path = Path(out_path)
     size = resolve_font_size(size, height)
     cues = normalize_cues(cues, max_chars=chars_per_line(width, size))
-    if not cues and hook is None:
+    if not cues and hook is None and not screen:
         raise PipelineError("There is no text to burn", code="invalid_input")
 
     if ctx is not None:
@@ -393,11 +396,14 @@ def burn(
         )
         if hook is not None:
             ctx.log(f"Hook: {hook.get('text', '')[:60]}")
+        for piece in screen or []:
+            ctx.log(f"Screen text {piece.get('start'):.2f}-{piece.get('end'):.2f}s: "
+                    f"{piece.get('text', '')[:60]}")
 
     with tempfile.TemporaryDirectory() as work:
         ass = write_ass(
             cues, Path(work) / "burn.ass", width, height, font, size, position,
-            hook=hook,
+            hook=hook, screen=screen,
         )
         result = _burn_once([
             config.FFMPEG_BIN, "-y", "-loglevel", "error",
@@ -425,3 +431,114 @@ def burn(
     if not out_path.is_file() or out_path.stat().st_size == 0:
         raise PipelineError("Burning the subtitles produced no video")
     return out_path
+
+
+# -- the text that was printed on the picture -------------------------------
+
+# The OCR box is cut tight around the letters, but a font size counts the
+# room above and below them too, so the size that drew those letters is
+# bigger than the box is tall.
+# ponytail: one ratio for every font; check it against a real video
+SCREEN_SIZE_RATIO = 1.3
+# How far apart stacked lines of screen text sit, as a share of the size.
+SCREEN_LINE_SPACING = 1.2
+# Keep the white box off the very edge of the picture.
+SCREEN_MARGIN = 8
+# OCR only looks at some frames, so the text was already there a moment
+# before it was first read, and stayed a moment after the last one.
+SCREEN_TIME_PAD = 0.25
+# A piece read in a single frame would otherwise be drawn for no time at all.
+SCREEN_MIN_SECONDS = 0.5
+
+
+def _text_width(text: str, size: int) -> float:
+    """Roughly how wide this text is, at this font size."""
+    return len(text) * CHAR_WIDTH_EM * max(size, 1)
+
+
+def screen_layout(piece: dict, width: int, height: int) -> tuple:
+    """Where one piece of translated screen text goes and how big it is.
+
+    Returns (lines, size, (x0, y0, box_w, box_h)) in pixels.
+
+    The size comes from the box OCR read the old text in, so a headline
+    stays a headline and a badge stays a badge. When the translation is
+    wider than that box, the white box grows sideways around the middle of
+    the old one rather than the text shrinking: the old text was one line
+    at that size on purpose. Only when there is no room left in the frame
+    does it wrap.
+    """
+    xmin, xmax, ymin, ymax = piece["box"]
+    old_w, old_h = max(xmax - xmin, 1), max(ymax - ymin, 1)
+    size = resolve_font_size(int(round(old_h * SCREEN_SIZE_RATIO)), height)
+    text = (piece.get("text") or "").strip()
+
+    room = max(width - 2 * SCREEN_MARGIN, 1)
+    lines = [text]
+    if _text_width(text, size) + 2 * BOX_PADDING > room:
+        lines = wrap_text_lines(text, chars_per_line(room, size)) or [text]
+
+    text_w = max(_text_width(line, size) for line in lines)
+    box_w = min(max(old_w, int(round(text_w)) + 2 * BOX_PADDING), room)
+    text_h = int(round(len(lines) * size * SCREEN_LINE_SPACING))
+    box_h = min(max(old_h, text_h + 2 * BOX_PADDING), height)
+
+    x0 = _keep_inside((xmin + xmax) // 2 - box_w // 2, box_w, width)
+    y0 = _keep_inside((ymin + ymax) // 2 - box_h // 2, box_h, height)
+    return lines, size, (x0, y0, box_w, box_h)
+
+
+def _keep_inside(start: int, length: int, whole: int) -> int:
+    """Slide a box of this length back inside the picture."""
+    return max(min(start, whole - length - SCREEN_MARGIN), SCREEN_MARGIN)
+
+
+def screen_times(piece: dict) -> tuple[float, float]:
+    """When to show one piece, padded for the frames OCR did not look at."""
+    start = max(float(piece.get("start") or 0.0) - SCREEN_TIME_PAD, 0.0)
+    end = float(piece.get("end") or 0.0) + SCREEN_TIME_PAD
+    return start, max(end, start + SCREEN_MIN_SECONDS)
+
+
+def screen_dialogues(pieces: list[dict], width: int, height: int) -> list[str]:
+    """The ASS lines that cover the old text and write the new one.
+
+    Two lines per piece: a filled rectangle, then the translation on top of
+    it. The rectangle is drawn rather than left to the style's own box,
+    because the style's box hugs the text, and a translation shorter than
+    the original would leave the ends of the old text showing around it.
+    """
+    body = []
+    for piece in pieces:
+        text = (piece.get("text") or "").strip()
+        if not text:
+            continue
+        lines, size, (x0, y0, box_w, box_h) = screen_layout(piece, width, height)
+        start, end = screen_times(piece)
+        start, end = _ass_time(start), _ass_time(end)
+        rect = (f"{{\\pos({x0},{y0})\\p1}}"
+                f"m 0 0 l {box_w} 0 l {box_w} {box_h} l 0 {box_h}"
+                "{\\p0}")
+        body.append(f"Dialogue: 0,{start},{end},ScreenBox,,0,0,0,,{rect}")
+        middle = f"{{\\pos({x0 + box_w // 2},{y0 + box_h // 2})\\fs{size}}}"
+        body.append(f"Dialogue: 1,{start},{end},Screen,,0,0,0,,"
+                    + middle + "\\N".join(lines))
+    return body
+
+
+def _screen_styles(pieces: list[dict] | None, font: str, size: int) -> str:
+    """The two styles screen text needs, or nothing when there is none.
+
+    ScreenBox is only ever used for the drawn rectangle, so its text colour
+    is the fill: a drawing takes its colour from PrimaryColour. Screen is
+    the same black text as the subtitles, with no box of its own, because
+    the rectangle underneath is already the box.
+    """
+    if not pieces:
+        return ""
+    return (
+        _ass_style("ScreenBox", font, size, BOX_FILL, 0,
+                   text_colour=BOX_FILL, border_style=1, alignment=7) + "\n"
+        + _ass_style("Screen", font, size, BOX_FILL, 0,
+                     text_colour=TEXT_COLOUR, border_style=1) + "\n"
+    )

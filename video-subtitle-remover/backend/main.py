@@ -52,6 +52,14 @@ class SubtitleRemover:
         self.sub_areas = []
         # PATCH (dub server). Where to write the detected boxes, or None.
         self.dump_boxes_path = None
+        # PATCH (dub server). Where to write the text that stays on screen,
+        # for the translate step, or None.
+        self.dump_screen_text_path = None
+        # PATCH (dub server). Read text anywhere in the frame, not only in
+        # the subtitle area.
+        self.scan_all_text = False
+        # PATCH (dub server). Stop after reading the text, painting nothing.
+        self.detect_only = False
         # PATCH (dub server). What Whisper heard, to tell the subtitles from
         # other text in the band, or None. See tools/speech_match.py.
         self.speech = None
@@ -175,9 +183,11 @@ class SubtitleRemover:
         pass
 
     def propainter_mode(self, tbar):
-        sub_detector = SubtitleDetect(self.video_path, self.sub_areas, self.speech)
+        sub_detector = SubtitleDetect(self.video_path, self.sub_areas, self.speech,
+                                      scan_all=self.scan_all_text)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self.dump_boxes(sub_list)
+        self.dump_screen_text(sub_detector.screen_text)
         if len(sub_list) == 0:
             sys.exit(NO_SUBTITLE_EXIT_CODE)
         continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
@@ -277,9 +287,11 @@ class SubtitleRemover:
         sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar)
 
     def video_inpaint(self, tbar, model):
-        sub_detector = SubtitleDetect(self.video_path, self.sub_areas, self.speech)
+        sub_detector = SubtitleDetect(self.video_path, self.sub_areas, self.speech,
+                                      scan_all=self.scan_all_text)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self.dump_boxes(sub_list)
+        self.dump_screen_text(sub_detector.screen_text)
         if len(sub_list) == 0:
             sys.exit(NO_SUBTITLE_EXIT_CODE)
         continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
@@ -368,6 +380,53 @@ class SubtitleRemover:
         except Exception:
             traceback.print_exc()
 
+    def dump_screen_text(self, groups):
+        """Write the text that stays on screen, for the translate step.
+
+        PATCH (dub server). Same rule as dump_boxes: the text was read to
+        decide what to paint over, so writing it out costs nothing, and a
+        failure here must never sink a run that would otherwise finish.
+        """
+        if not self.dump_screen_text_path:
+            return
+        try:
+            with open(self.dump_screen_text_path, 'w', encoding='utf-8') as f:
+                json.dump([
+                    {"text": g["text"], "box": list(g["box"]),
+                     "start": g["first"], "end": g["last"], "ocr": g["ocr"]}
+                    for g in groups
+                ], f, ensure_ascii=False)
+        except Exception:
+            traceback.print_exc()
+
+    def detect_only_mode(self, tbar):
+        """Read the text, write it out, paint over nothing.
+
+        PATCH (dub server). For a job that wants the on-screen text
+        translated but the original subtitles left where they are. It skips
+        the inpaint model altogether, so it runs in seconds and needs no
+        output video.
+        """
+        sub_detector = SubtitleDetect(self.video_path, self.sub_areas, self.speech,
+                                      scan_all=self.scan_all_text)
+        sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
+        self.dump_boxes(sub_list)
+        self.dump_screen_text(sub_detector.screen_text)
+        self.append_output('Detect only: the video was not changed')
+        # __init__ opened a reader, a writer and a temp file for an output
+        # this run never writes. Close them here: nothing further down the
+        # normal path will, because that path was skipped.
+        self.video_cap.release()
+        self.video_writer.release()
+        self.video_temp_file.close()
+        if os.path.exists(self.video_temp_file.name):
+            try:
+                os.remove(self.video_temp_file.name)
+            except Exception:
+                pass  # ignore
+        self.isFinished = True
+        self.progress_total = 100
+
     def run(self):
         # 记录开始时间
         start_time = time.time()
@@ -386,6 +445,9 @@ class SubtitleRemover:
         self.progress_total = 0
         tbar = tqdm(total=int(self.frame_count), unit='frame', position=0, file=sys.__stdout__,
                     desc='Subtitle Removing')
+        if self.detect_only:
+            self.detect_only_mode(tbar)
+            return
         if self.is_picture:
             original_frame = read_image(self.video_path)
             if original_frame is None:
@@ -521,6 +583,9 @@ if __name__ == '__main__':
     sr.sub_areas = args.subtitle_area_coords
     sr.video_out_path = args.output
     sr.dump_boxes_path = args.dump_boxes
+    sr.dump_screen_text_path = args.dump_screen_text
+    sr.scan_all_text = args.scan_all_text
+    sr.detect_only = args.detect_only
     from backend.tools.speech_match import load_speech
     sr.speech = load_speech(args.speech_cues)
     config.inpaintMode.value = args.inpaint_mode

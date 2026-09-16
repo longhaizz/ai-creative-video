@@ -109,6 +109,8 @@ def build_command(
     area: tuple[int, int, int, int],
     dump_boxes: Path,
     speech_cues: Path | None = None,
+    screen_text: Path | None = None,
+    detect_only: bool = False,
 ) -> list[str]:
     ymin, ymax, xmin, xmax = area
     command = [
@@ -122,7 +124,28 @@ def build_command(
     ]
     if speech_cues is not None:
         command += ["--speech-cues", str(speech_cues)]
+    if screen_text is not None:
+        # Text to translate sits anywhere in the frame, so the whole frame
+        # is read. The area above still says what may be painted over.
+        command += ["--dump-screen-text", str(screen_text), "--scan-all-text"]
+    if detect_only:
+        command.append("--detect-only")
     return command
+
+
+def read_screen_text(path: Path) -> list[dict]:
+    """The text the tool left on screen, or nothing.
+
+    Read from the file rather than returned by remove_subtitles, because the
+    tool leaves early when it finds no subtitles to paint over, and that run
+    still read every piece of text in the frame. A video with a headline and
+    no spoken subtitles goes down exactly that path.
+    """
+    try:
+        found = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return found if isinstance(found, list) else []
 
 
 def subtitle_position(dump_path: Path, height: int) -> float | None:
@@ -173,6 +196,8 @@ def remove_subtitles(
     right: float,
     ctx=None,
     speech_cues: Path | None = None,
+    screen_text: Path | None = None,
+    detect_only: bool = False,
 ) -> tuple[Path, float | None]:
     """Paint over the burned-in subtitles.
 
@@ -184,6 +209,12 @@ def remove_subtitles(
     speech_cues is what Whisper heard, as written by the pipeline. With it
     the tool reads the text in each box and keeps only the line whose text
     was spoken. Leave it out for text nobody says, such as the hook.
+
+    screen_text is where to write the text that stays on screen, for the
+    translate step; it also turns on reading the whole frame. detect_only
+    stops after that reading, painting nothing, for a job that wants the
+    text translated but the old subtitles left where they are. Both are read
+    back with read_screen_text.
     """
     video = Path(video).resolve()
     out_path = Path(out_path).resolve()
@@ -191,11 +222,14 @@ def remove_subtitles(
     # path under jobs/ points at nothing.
     if speech_cues is not None:
         speech_cues = Path(speech_cues).resolve()
+    if screen_text is not None:
+        screen_text = Path(screen_text).resolve()
 
     width, height = probe_size(video)
     area = area_to_pixels(width, height, top, bottom, left, right)
     dump_boxes = out_path.with_name("sub_boxes.json")
-    command = build_command(video, out_path, mode, area, dump_boxes, speech_cues)
+    command = build_command(video, out_path, mode, area, dump_boxes, speech_cues,
+                            screen_text, detect_only)
 
     if ctx is not None:
         ctx.log(
@@ -246,6 +280,16 @@ def remove_subtitles(
     finally:
         process.stdout.close()
         process.wait()
+
+    if detect_only:
+        # Nothing was painted, so there is no new video: the caller carries
+        # on with the one it had, and reads the text from the dump.
+        if process.returncode != 0:
+            raise PipelineError(
+                "Reading the on-screen text failed:\n" + "\n".join(tail),
+                code="internal",
+            )
+        return video, None
 
     if process.returncode == NO_SUBTITLE_EXIT_CODE:
         # Nothing to paint over. Hand back the video that came in, so every

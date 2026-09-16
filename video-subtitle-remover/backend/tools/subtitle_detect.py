@@ -8,7 +8,8 @@ from .model_config import ModelConfig
 from .hardware_accelerator import HardwareAccelerator
 from .common_tools import get_readable_path
 from .ocr import get_coordinates
-from .speech_match import REC_MODELS, boxes_to_erase, read_log, subtitle_bands
+from .speech_match import (REC_MODELS, boxes_to_erase, read_log, screen_text,
+                           subtitle_bands)
 from backend.config import config, tr
 from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
@@ -22,13 +23,21 @@ class SubtitleDetect:
     # 采样间隔，根据视频帧率在 _init_sample_step 中自适应设置
     SAMPLE_STEP = 3
 
-    def __init__(self, video_path, sub_areas=[], speech=None):
+    def __init__(self, video_path, sub_areas=[], speech=None, scan_all=False):
         self.video_path = video_path
         self.sub_areas = sub_areas
         # PATCH (dub server). What Whisper heard, or None. The recognition
         # model is picked by its language; None turns the filter off.
         self.speech = speech
         self.rec_model = REC_MODELS.get(speech["language"]) if speech else None
+        # PATCH (dub server). Look for text in the whole frame, not only in
+        # sub_areas. The text to translate sits anywhere -- a headline at the
+        # top, a price in the middle -- while sub_areas is where the user
+        # said the subtitles are. What gets painted over is unchanged: the
+        # boxes are still cut back to sub_areas in keep_subtitle_line.
+        self.scan_all = scan_all
+        # Filled by keep_subtitle_line: the text that stays on screen.
+        self.screen_text = []
         self._init_sample_step()
 
     def _init_sample_step(self):
@@ -135,12 +144,19 @@ class SubtitleDetect:
         for line in read_log(reads, self.speech["cues"], self.fps,
                              erase if bands else None):
             log(line)
+        # Before the early return below: a video whose text is never spoken
+        # has no subtitle line to find, and that text is exactly what the
+        # translate step wants.
+        self.screen_text = screen_text(
+            reads, self.speech["cues"], self.fps, erase, bands)
+        log(f"Screen text: {len(self.screen_text)} pieces to translate")
         if bands is None:
             log("Speech filter: too few boxes match the speech, nothing removed")
             return {}
         kept = {}
         for frame_no, boxes in sampled_results.items():
-            on_line = [box for box in boxes if box in erase.get(frame_no, {})]
+            on_line = [box for box in boxes
+                       if box in erase.get(frame_no, {}) and self._inside_areas(box)]
             if on_line:
                 kept[frame_no] = on_line
         dropped = sum(map(len, sampled_results.values())) - sum(map(len, kept.values()))
@@ -152,11 +168,26 @@ class SubtitleDetect:
             f"subtitle showed up or went away")
         return kept
 
+    def _inside_areas(self, box):
+        """Is this box inside one of the areas the user asked us to clean?
+
+        With scan_all the detector looks at the whole frame, so a box can
+        come from outside those areas. Only painting over is held to them;
+        reading is not.
+        """
+        if not self.scan_all or not self.sub_areas:
+            return True
+        xmin, xmax, ymin, ymax = box
+        return any(s_xmin <= xmin and xmax <= s_xmax
+                   and s_ymin <= ymin and ymax <= s_ymax
+                   for s_ymin, s_ymax, s_xmin, s_xmax in self.sub_areas)
+
     def detect_subtitle(self, img):
         temp_list = []
         results = self.text_detector.predict(img)
         sub_areas = self.sub_areas
-        has_areas = sub_areas is not None and len(sub_areas) > 0
+        has_areas = (not self.scan_all
+                     and sub_areas is not None and len(sub_areas) > 0)
         for res in results:
             dt_polys = res['dt_polys']
             if dt_polys is None or len(dt_polys) == 0:
