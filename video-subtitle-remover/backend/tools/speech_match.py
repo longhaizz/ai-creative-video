@@ -95,10 +95,14 @@ MAX_BAND_LINES = 3
 # ("|", "√", "") scored 0.00-0.43.
 # ponytail: one number from one video; raise it if junk still gets through
 MIN_SCREEN_OCR = 0.6
-# How tall a piece of text must be, as a share of the frame, to be read as
-# a message rather than as small print. See _worth_reading.
-# ponytail: one clean split on one video; move it if real copy gets dropped
-MIN_SCREEN_HEIGHT_SHARE = 0.035
+# A floor on how tall a piece of text has to be before it is worth reading.
+# It only keeps out the very smallest marks; it does NOT tell advertising
+# copy from the chrome of an app store, and it never will. On one Hindi
+# video the app store rows ran 23 to 42 pixels tall and a paragraph of the
+# advert's own body copy ran 29 to 40, on the same 1280 tall frame. Set
+# higher, to 0.035, this rule threw that paragraph away.
+# ponytail: a noise floor, not a filter; the junk needs a different signal
+MIN_SCREEN_HEIGHT_SHARE = 0.02
 
 # The log shows one line per piece of text while it stays on screen. Reads
 # of the same text this close in place and time are one line.
@@ -424,11 +428,12 @@ def _worth_reading(box, frame_height):
     screen by any reading, so all of it came back to be translated and
     covered with a white box.
 
-    Height tells the two apart with nothing left in between. On that video
-    the writing meant to be read ran 58 to 79 pixels tall on a 1280 tall
-    frame, and the app store chrome 23 to 37. Advertising copy is big
-    because it is meant to be read at arm's length; interface labels are
-    small because they are not the message.
+    Height does not tell the two apart: on that same video the app store
+    rows ran 23 to 42 pixels tall and a paragraph of the advert's own body
+    copy ran 29 to 40. The rule here is only a floor under the smallest
+    marks, because dropping a line the advert meant to be read is the worse
+    of the two mistakes -- the viewer is left with a language they cannot
+    read, and nothing in the output says why.
     """
     if frame_height <= 0:
         return True
