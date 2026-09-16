@@ -8,7 +8,7 @@ from .model_config import ModelConfig
 from .hardware_accelerator import HardwareAccelerator
 from .common_tools import get_readable_path
 from .ocr import get_coordinates
-from .speech_match import REC_MODELS, on_the_line, read_log, subtitle_bands
+from .speech_match import REC_MODELS, boxes_to_erase, read_log, subtitle_bands
 from backend.config import config, tr
 from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
@@ -131,21 +131,25 @@ class SubtitleDetect:
                 f"'{self.speech['language']}', nothing removed")
             return {}
         bands = subtitle_bands(reads, self.speech["cues"], self.fps)
-        for line in read_log(reads, self.speech["cues"], self.fps, bands):
+        erase = boxes_to_erase(reads, bands, self.fps)
+        for line in read_log(reads, self.speech["cues"], self.fps,
+                             erase if bands else None):
             log(line)
         if bands is None:
             log("Speech filter: too few boxes match the speech, nothing removed")
             return {}
         kept = {}
         for frame_no, boxes in sampled_results.items():
-            band = bands.get(frame_no)
-            on_line = [box for box in boxes if band and on_the_line(box, band)]
+            on_line = [box for box in boxes if box in erase.get(frame_no, {})]
             if on_line:
                 kept[frame_no] = on_line
         dropped = sum(map(len, sampled_results.values())) - sum(map(len, kept.values()))
+        linger = sum(reason == "linger"
+                     for frame in erase.values() for reason in frame.values())
         places = sorted({(round(top), round(bottom)) for top, bottom, _ in bands.values()})
         log(f"Speech filter: subtitle lines y={', '.join(f'{t}-{b}' for t, b in places)}, "
-            f"dropped {dropped} boxes off the line")
+            f"left {dropped} boxes off the line, erased {linger} more while the "
+            f"subtitle showed up or went away")
         return kept
 
     def detect_subtitle(self, img):

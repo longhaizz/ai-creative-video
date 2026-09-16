@@ -30,6 +30,11 @@ def _band(reads, cues, frame=1):
     return bands and bands[frame]
 
 
+def _erase(reads, cues=CUES):
+    """frame -> {box: why it is painted over}."""
+    return sm.boxes_to_erase(reads, sm.subtitle_bands(reads, cues, FPS), FPS)
+
+
 # -- scoring one read ------------------------------------------------------
 
 
@@ -173,17 +178,74 @@ def test_too_few_matching_frames_is_not_enough():
     assert _band(reads, CUES) is None
 
 
+# -- text that lingers while the subtitle shows up or goes away ------------
+
+# A word of the subtitle, too short for the line, 0.3s after the last match.
+SMALL = (134, 209, 785, 821)
+
+
+def _with_linger(frame=31, text="mình", box=SMALL):
+    reads = _reads("mình chia sẻ một mẹo")        # frames 1..28, marks to 2.70s
+    reads[frame] = [(box, text, 0.99)]
+    return reads
+
+
+def test_a_subtitle_shrinking_away_is_still_erased():
+    """Seen on 16.mp4: "GET DOWN LOWER" broke into words 36px tall a frame later."""
+    reads = _with_linger()
+    assert _erase(reads)[31][SMALL] == "linger"
+
+
+def test_the_nav_bar_item_that_repeats_the_subtitle_is_left():
+    """Seen on 16.mp4: "Workout" at the foot of a screen recording, while the
+    subtitles said "EVERY WORKOUT IS UNIQUE"."""
+    nav = (87, 160, 1223, 1241)
+    reads = {n: items + [(nav, "mình", 1.0)]
+             for n, items in _reads("mình chia sẻ một mẹo").items()}
+    assert all(nav not in frame for frame in _erase(reads).values())
+
+
+def test_a_small_button_inside_the_band_is_left():
+    """Seen on a Bosnian ad: it is in the band, but it says something else."""
+    button = (450, 550, 835, 860)
+    reads = {n: items + [(button, "Install", 1.0)]
+             for n, items in _reads("mình chia sẻ một mẹo").items()}
+    assert all(button not in frame for frame in _erase(reads).values())
+
+
+def test_the_carry_over_does_not_chain():
+    """One step from a box on the line, never a step from a step."""
+    reads = _with_linger()                 # 3.00s, 0.30s after the last mark
+    reads[40] = [(SMALL, "mình", 0.99)]    # 3.90s, 0.90s after that one only
+    erase = _erase(reads)
+    assert erase[31][SMALL] == "linger"
+    assert SMALL not in erase.get(40, {})
+
+
+def test_a_huge_box_reading_the_subtitle_text_is_left():
+    """Or a box the size of half the picture would mask half the picture."""
+    huge = (48, 456, 700, 960)             # centred on the line, 260px tall
+    reads = _with_linger(box=huge)
+    assert huge not in _erase(reads).get(31, {})
+
+
+def test_a_read_of_two_letters_is_not_enough_to_carry_over():
+    """The frame counters and "/18" of an app read as one or two letters."""
+    reads = _with_linger(text="mì")
+    assert SMALL not in _erase(reads).get(31, {})
+
+
 # -- the log ---------------------------------------------------------------
 
 
 def test_the_log_gives_one_line_per_text_with_place_and_verdict():
     reads = _reads("mình chia sẻ một mẹo")
-    lines = sm.read_log(reads, CUES, FPS, sm.subtitle_bands(reads, CUES, FPS))
+    lines = sm.read_log(reads, CUES, FPS, _erase(reads))
     assert len(lines) == 2, lines
     sub, logo = lines
-    assert sub.startswith("OCR 0.00-2.70s y=800-860 x=100-900 ocr=0.90 match=1.00 KEEP")
+    assert sub.startswith("OCR 0.00-2.70s y=800-860 x=100-900 ocr=0.90 match=1.00 ERASE")
     assert sub.endswith('"mình chia sẻ một mẹo"')
-    assert "y=600-660" in logo and "DROP" in logo
+    assert "y=600-660" in logo and "LEAVE" in logo
 
 
 def test_without_a_line_the_log_still_shows_the_reads():
@@ -191,7 +253,16 @@ def test_without_a_line_the_log_still_shows_the_reads():
     reads = _reads("Today I share a small tip")
     lines = sm.read_log(reads, CUES, FPS, None)
     assert len(lines) == 2
-    assert not any("KEEP" in line or "DROP" in line for line in lines)
+    assert not any("ERASE" in line or "LEAVE" in line for line in lines)
+
+
+def test_the_log_tells_a_lingering_box_from_a_box_on_the_line():
+    lines = [line for line in sm.read_log(_with_linger(), CUES, FPS,
+                                          _erase(_with_linger()))
+             if "ERASE" in line or "LEAVE" in line]
+    assert any("ERASE linger" in line and '"mình"' in line for line in lines), lines
+    assert any("ERASE " in line and "linger" not in line for line in lines), lines
+    assert any("LEAVE" in line for line in lines), lines
 
 
 def test_the_same_text_back_later_is_a_new_line():
@@ -204,8 +275,8 @@ def test_the_log_always_shows_what_was_kept(monkeypatch):
     monkeypatch.setattr(sm, "MAX_LOG_LINES", 1)
     noise = [((20, 120, y, y + 30), f"menu {y}", 1.0) for y in (100, 200, 300)]
     reads = {n: noise + [(SUB, "mình chia sẻ một mẹo", 0.9)] for n in range(1, 30, 3)}
-    lines = sm.read_log(reads, CUES, FPS, sm.subtitle_bands(reads, CUES, FPS))
-    assert any("KEEP" in line and "mình chia sẻ" in line for line in lines), lines
+    lines = sm.read_log(reads, CUES, FPS, _erase(reads))
+    assert any("ERASE" in line and "mình chia sẻ" in line for line in lines), lines
     assert lines[-1] == "OCR ... 3 more lines not shown", lines
 
 
