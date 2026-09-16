@@ -630,7 +630,7 @@ def test_uploaded_reference_wins_over_cue_ref(monkeypatch, tmp_path):
 
 
 def test_lipsync_asked_but_not_loaded_runs_as_if_not_ticked(monkeypatch, tmp_path):
-    """LOAD_LIPSYNC is off by default: the job must finish, not fail at the end."""
+    """With LOAD_LIPSYNC=0 the job must finish, not fail at the end."""
     from server.pipeline import Models
 
     vocals = tmp_path / "vocals.wav"

@@ -103,6 +103,22 @@ MIN_SCREEN_OCR = 0.6
 # higher, to 0.035, this rule threw that paragraph away.
 # ponytail: a noise floor, not a filter; the junk needs a different signal
 MIN_SCREEN_HEIGHT_SHARE = 0.02
+# How alike two reads must look before they count as the same piece of text
+# rather than one piece replacing another in the same place. Measured on a
+# Hindi creative: one word read several ways ("बच्वा"/"बबच्चा"/"बख्वा",
+# "तुम्तरे"/"तुम्हारे") scored 0.57 to 0.80, and two different paragraphs
+# sharing a band scored 0.17 to 0.32. Nothing landed in between.
+ALIKE_RATIO = 0.5
+# When two pieces of text count as words of one line. Measured on a Hindi
+# creative: the words of a line sat 3 to 7 pixels apart at about 30 pixels
+# tall, and the lines of a paragraph shared none of their height.
+LINE_HEIGHT_RATIO = 1.5     # the taller no more than this times the shorter
+LINE_SHARED_HEIGHT = 0.5    # share of the shorter one's height in common
+LINE_GAP = 1.0              # widest gap between them, in line heights
+LINE_SHARED_TIME = 0.5      # share of the shorter one's time on screen together
+# How much of the smaller box must lie inside the other for two reads to be
+# one piece of text. Words side by side on a line share a pixel or two.
+COVER_SHARE = 0.5
 
 # The log shows one line per piece of text while it stays on screen. Reads
 # of the same text this close in place and time are one line.
@@ -396,28 +412,134 @@ def screen_text(reads, cues, fps, erase, bands, frame_height=0):
     subtitle, and the dub server writes it again from the speech. What is
     left is the text nobody says -- a headline, a price, a call to action.
 
-    Bad reads are dropped, because every one that survives has a white box
-    drawn over it later, and a white box over a stray "|" is worse than
-    leaving the "|" alone. So is the small print: see _worth_reading.
+    OCR reads a paragraph one word at a time, so the words are put back
+    into lines before anything is judged or translated. Two things follow
+    from that order. A word of two letters -- "को", "की" -- is the glue
+    between the words around it, so the length rule waits for the finished
+    line; dropped first, it split "शरीर के तापमान को नियंत्रित" in two. And
+    what goes to the translator is a line, not "temperature", "control"
+    and "digestion" scattered over the picture.
     """
-    kept = []
+    words = []
     for g in text_groups(reads, cues, fps):
         if erase.get(g["frame"], {}).get(g["box"]):
             continue
-        if g["ocr"] < MIN_SCREEN_OCR:
-            continue
-        if g["match"] >= MIN_SCORE:
-            continue
-        if len(_letters(g["text"])) < MIN_CHARS:
-            continue
         if not _worth_reading(g["box"], frame_height):
             continue
-        if _near_the_band(g["box"], bands.get(g["frame"]) if bands else None):
+        if g["ocr"] < MIN_SCREEN_OCR or not _letters(g["text"]):
             continue
-        kept.append(g)
-    # After the joining, not before: text read a letter at a time gives
-    # several one-frame groups that are one piece of text once put together.
-    return [g for g in _join_covering(kept) if _stayed_on_screen(g)]
+        # Judged per word, not per line: one read of a line of body copy
+        # matched the speech at 0.50 by chance, and judged on the line that
+        # one read would have taken the whole line away.
+        if g["match"] >= MIN_SCORE:
+            continue
+        words.append(g)
+    lines = _join_into_lines(_join_covering(words))
+    return [line for line in lines if _worth_translating(line, bands)]
+
+
+def _worth_translating(line, bands):
+    """The checks that only mean something once the words are a line."""
+    if len(_letters(line["text"])) < MIN_CHARS:
+        return False
+    if _near_the_band(line["box"], bands.get(line["frame"]) if bands else None):
+        return False
+    return _stayed_on_screen(line)
+
+
+def _join_into_lines(groups):
+    """Put the words that OCR read one by one back into their lines.
+
+    Two pieces are one line when they sit on the same row, at about the
+    same height, next to each other, at the same time. Lines stacked one
+    over another stay apart: each gets its own box, where the old line was.
+
+    Merged until nothing more joins, so the order the words come in does
+    not decide which of them end up together.
+    """
+    # ponytail: pairs of lines until nothing joins; a few hundred words at most
+    lines = [_line_of([g]) for g in groups]
+    i = 0
+    while i < len(lines):
+        j = i + 1
+        while j < len(lines):
+            if (_same_row(lines[i]["box"], lines[j]["box"])
+                    and _share_time(lines[i], lines[j])):
+                lines[i] = _line_of(lines[i]["parts"] + lines.pop(j)["parts"])
+                j = i + 1   # the line grew, so look at the rest again
+            else:
+                j += 1
+        i += 1
+    return sorted(lines, key=lambda l: (l["first"], l["box"][2], l["box"][0]))
+
+
+def _line_of(parts):
+    """One line made of these words, read left to right.
+
+    The time is the middle of the words' own times, not their widest span.
+    Some words stay on screen while the rest of a paragraph changes around
+    them; taken as the span, one of those carried a line into the next
+    sentence's time and joined the two.
+    """
+    parts = sorted(parts, key=lambda p: p["box"][0])
+    return {
+        "parts": parts,
+        "text": " ".join(p["text"] for p in _readable_parts(parts)),
+        "box": (min(p["box"][0] for p in parts), max(p["box"][1] for p in parts),
+                min(p["box"][2] for p in parts), max(p["box"][3] for p in parts)),
+        "first": statistics.median(p["first"] for p in parts),
+        "last": statistics.median(p["last"] for p in parts),
+        "ocr": min(p["ocr"] for p in parts),
+        "match": max(p["match"] for p in parts),
+        "frame": min(parts, key=lambda p: p["first"])["frame"],
+    }
+
+
+def _readable_parts(parts):
+    """The parts of a line to read out, one per spot, left to right.
+
+    OCR reads a line whole now and then and word by word the rest of the
+    time, so a line holds "अभी" and "अभी आज़माए" lying over each other.
+    Read out as they are, that is "अभी आज़माए अभी". The longest read of a
+    spot stands for it; the box still covers every read, because every
+    read was ink on the picture.
+    """
+    ranked = sorted(parts, key=lambda p: (len(_letters(p["text"])), p["ocr"]),
+                    reverse=True)
+    kept = []
+    for part in ranked:
+        if not any(_covers(part["box"], k["box"]) for k in kept):
+            kept.append(part)
+    return sorted(kept, key=lambda p: p["box"][0])
+
+
+def _same_row(a, b):
+    """Are these two boxes words of one line?
+
+    About as tall, most of their height shared, and no wider apart than a
+    line is tall. On a Hindi video the words of one line sat 3 to 7 pixels
+    apart at 30 pixels tall, and the lines of a paragraph did not share
+    their height at all.
+    """
+    axmin, axmax, aymin, aymax = a
+    bxmin, bxmax, bymin, bymax = b
+    ha, hb = aymax - aymin, bymax - bymin
+    if min(ha, hb) <= 0 or max(ha, hb) > LINE_HEIGHT_RATIO * min(ha, hb):
+        return False
+    shared = min(aymax, bymax) - max(aymin, bymin)
+    if shared < LINE_SHARED_HEIGHT * min(ha, hb):
+        return False
+    gap = max(axmin, bxmin) - min(axmax, bxmax)    # below zero when they overlap
+    return gap <= LINE_GAP * max(ha, hb)
+
+
+def _share_time(a, b):
+    """Were these two on screen together for most of the shorter one's time?"""
+    shared = min(a["last"], b["last"]) - max(a["first"], b["first"])
+    shorter = min(a["last"] - a["first"], b["last"] - b["first"])
+    if shorter <= 0:
+        return shared >= 0
+    return shared >= LINE_SHARED_TIME * shorter
 
 
 def _worth_reading(box, frame_height):
@@ -473,12 +595,18 @@ def _join_covering(groups):
     FROM EVERY". Left alone, each would get its own translation and its own
     white box, drawn on top of the last. The longest read is the one where
     the text had finished showing up, so it is the only one worth keeping.
+
+    Looking alike is what tells that apart from the other thing that happens
+    in one place: a paragraph going away and another taking its spot. Those
+    two are as close in time and place as a line growing -- 0.2s apart on
+    one Hindi video -- and joining them threw a whole paragraph of the
+    advert away, and a line of the paragraph before it.
     """
     # ponytail: every group against every kept one; an ad gives a few dozen
     out = []
     for g in sorted(groups, key=lambda g: g["first"]):
         for kept in out:
-            if _boxes_touch(g["box"], kept["box"]) and _times_touch(g, kept):
+            if _one_piece(g, kept):
                 if len(_letters(g["text"])) > len(_letters(kept["text"])):
                     kept["text"], kept["box"] = g["text"], g["box"]
                 kept["first"] = min(kept["first"], g["first"])
@@ -489,11 +617,52 @@ def _join_covering(groups):
     return out
 
 
-def _boxes_touch(a, b):
-    """Do these two boxes share any pixel?"""
+def _one_piece(a, b):
+    """Are these two groups the same piece of text, read twice?
+
+    They have to lie over each other, not just touch: two words side by
+    side on a line touch at the edge and are two words. And the reads have
+    to look alike -- a line still showing up, a word read badly. A
+    paragraph and the one that replaces it lie over each other too, and do
+    not look alike.
+
+    Being on screen at the same time is not enough on its own. A short word
+    that stays while the sentence around it changes lies over a word of the
+    next sentence, and joined to it, pulled that word back into the
+    sentence before.
+    """
+    return (_covers(a["box"], b["box"]) and _times_touch(a, b)
+            and _alike(a["text"], b["text"]))
+
+
+def _covers(a, b):
+    """Does most of the smaller of these two boxes lie inside the other?"""
     axmin, axmax, aymin, aymax = a
     bxmin, bxmax, bymin, bymax = b
-    return axmin <= bxmax and bxmin <= axmax and aymin <= bymax and bymin <= aymax
+    width = min(axmax, bxmax) - max(axmin, bxmin)
+    height = min(aymax, bymax) - max(aymin, bymin)
+    if width <= 0 or height <= 0:
+        return False
+    smaller = min((axmax - axmin) * (aymax - aymin), (bxmax - bxmin) * (bymax - bymin))
+    return smaller > 0 and width * height >= COVER_SHARE * smaller
+
+
+def _alike(a, b):
+    """Do these two reads look like the same words?
+
+    Not whether they are equal: OCR reads one word several ways as it comes
+    and goes. One read inside the other is a line still showing up; a high
+    share of letters in common is the same words read badly. Anything less
+    is another piece of text that happens to sit in the same place.
+    """
+    x, y = _letters(a), _letters(b)
+    if not x or not y:
+        return False
+    # Only a read long enough to mean something. "को" is "क" once its vowel
+    # sign is gone, and "क" is inside "शरीर के" and half the words around it.
+    if min(len(x), len(y)) >= MIN_CHARS and (x in y or y in x):
+        return True
+    return SequenceMatcher(None, x, y, autojunk=False).ratio() >= ALIKE_RATIO
 
 
 def _times_touch(a, b):
