@@ -477,3 +477,62 @@ def test_a_long_list_is_broken_into_asks_of_a_size_the_model_holds(monkeypatch):
     assert all(len(ask) <= translate.LABELS_PER_ASK for ask in asks)
     # Each ask starts its keys again at 0, and the answers still line up.
     assert list(asks[1]) == [str(i) for i in range(translate.LABELS_PER_ASK)]
+
+
+def test_a_piece_with_a_picture_is_read_off_it(monkeypatch):
+    """OCR read "तुम्हारे यहाँ बच्चा होगा!" as nonsense; the model reads the
+    picture and says what it read, for the log."""
+    from server.steps import translate
+    import json as _json
+
+    seen = {}
+
+    def fake_chat(system, user, api_key, model, json_mode=False, schema=None,
+                  images=()):
+        seen["system"], seen["schema"], seen["images"] = system, schema, images
+        return _json.dumps({"labels": {
+            "0": "GIẢM 50%",
+            "1": {"read": "तुम्हारे यहाँ बच्चा होगा!", "text": "Bạn sắp có em bé!"}}})
+
+    monkeypatch.setattr(translate, "_chat", fake_chat)
+    said = []
+    ctx = type("Ctx", (), {"log": staticmethod(said.append)})()
+    out = translate.translate_labels(
+        ["SALE 50%", "दतुम्हारे चर्हली हब"], "VI", "key", ctx=ctx,
+        images=[None, b"png"])
+
+    assert out == ["GIẢM 50%", "Bạn sắp có em bé!"]
+    assert seen["images"] == [("picture of piece 1", b"png")]
+    assert "read the text off the picture" in seen["system"]
+    keys = seen["schema"]["schema"]["properties"]["labels"]["properties"]
+    assert keys["0"] == {"type": "string"}
+    assert keys["1"]["required"] == ["read", "text"]
+    assert any("तुम्हारे यहाँ बच्चा होगा!" in line for line in said), said
+
+
+def test_a_failed_ask_with_pictures_is_asked_again_without(monkeypatch):
+    from server.steps import translate
+    import json as _json
+
+    calls = []
+
+    def fake_chat(system, user, api_key, model, json_mode=False, schema=None,
+                  images=()):
+        calls.append(images)
+        if images:
+            raise translate.OpenAIError("Gemini HTTP 400: bad image")
+        return _json.dumps({"labels": {"0": "Em bé"}})
+
+    monkeypatch.setattr(translate, "_chat", fake_chat)
+    out = translate.translate_labels(["बबच्चा"], "VI", "key", images=[b"png"])
+
+    assert out == ["Em bé"]
+    assert calls == [[("picture of piece 0", b"png")], ()]
+
+
+def test_any_provider_is_retried_on_a_rate_limit():
+    from server.steps import translate
+
+    assert translate._worth_retrying(translate.OpenAIError("Gemini HTTP 429: slow"))
+    assert translate._worth_retrying(translate.OpenAIError("OpenAI HTTP 503: down"))
+    assert not translate._worth_retrying(translate.OpenAIError("Gemini HTTP 400: bad"))

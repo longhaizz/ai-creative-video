@@ -116,7 +116,7 @@ export HF_HOME=/models/huggingface
 
 ```bash
 cp .env.example .env
-$EDITOR .env          # điền API_KEY, OPENAI_API_KEY
+$EDITOR .env          # điền API_KEY, OPENAI_API_KEY (hoặc LLM_PROVIDER=gemini + GEMINI_API_KEY)
 ```
 
 Sinh khoá:

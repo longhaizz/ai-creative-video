@@ -5,7 +5,7 @@ một hàng đợi, một worker**:
 
 ```
 xoá sub → Demucs + Whisper
-    → dịch (OpenAI) → đọc (VoxCPM, clone từng câu) → khớp miệng
+    → dịch (OpenAI hoặc Gemini) → đọc (VoxCPM, clone từng câu) → khớp miệng
     → trộn → mux → burn sub
 ```
 
@@ -16,7 +16,7 @@ Thiết kế và lộ trình: [`../PLAN.md`](../PLAN.md).
 ## Chạy production
 
 ```bash
-cp .env.example .env      # điền API_KEY, OPENAI_API_KEY
+cp .env.example .env      # điền API_KEY, OPENAI_API_KEY (hoặc LLM_PROVIDER=gemini + GEMINI_API_KEY)
 cd LatentSync && bash setup_env.sh && cd ..   # tải weight, ~1.3GB
 docker compose up -d --build
 ```
@@ -104,7 +104,11 @@ Tham số đầy đủ: [`schemas.py`](schemas.py).
 | Biến | Mặc định | Ghi chú |
 |---|---|---|
 | `API_KEY` | — | **Bắt buộc.** Thiếu thì server không khởi động |
-| `OPENAI_API_KEY` | — | Cần cả khi giữ nguyên ngôn ngữ |
+| `LLM_PROVIDER` | `openai` | `openai` hoặc `gemini`: model dùng để viết lại và dịch |
+| `OPENAI_API_KEY` | — | Cần khi `LLM_PROVIDER=openai`, cả khi giữ nguyên ngôn ngữ |
+| `GEMINI_API_KEY` | — | Cần khi `LLM_PROVIDER=gemini` |
+| `LLM_MODEL` | — | Trống = `gpt-4o-mini` / `gemini-2.5-flash` |
+| `SCREEN_VISION_BELOW` | `0.95` | Chữ trên màn hình có điểm OCR thấp hơn mức này được gửi kèm ảnh để model đọc lại |
 | `LOAD_MODELS` | `1` | `0` = chạy không model |
 | `LOAD_LIPSYNC` | `1` | `0` = không nạp LatentSync. Tắt thì job gửi `lipsync=true` chạy như không tick |
 | `JOBS_DIR` | `jobs` | |
