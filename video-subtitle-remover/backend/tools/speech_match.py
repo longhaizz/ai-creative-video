@@ -128,6 +128,12 @@ NESTED_SHARE = 0.9
 # A word read again scored 0.75 against its line ("बबच्चा" in "तुम्हारे यहाँ
 # बच्चा होगा!"); a different sentence in the same place scored 0.27-0.39.
 NESTED_TEXT_SHARE = 0.6
+# A moment the text on screen changes: at least this many words start, and
+# as many words stopped just before. On a Hindi ad one paragraph gave way to
+# the next in the same place at 22.5s and 27.3s, 14 and 9 words at once;
+# a line read again after a gap brought one or two.
+CUT_WORDS = 3
+CUT_SECONDS = 0.35
 # How long a piece of text must stay on screen before it is translated.
 MIN_SCREEN_SECONDS = 1.0
 # Text shorter than this share of the frame is phone-screen size, and must
@@ -459,10 +465,42 @@ def screen_text(reads, cues, fps, erase, bands, frame_height=0, words_out=None):
         words.append(g)
     if words_out is not None:
         words_out.extend(words)
-    lines = _join_into_lines(_join_covering(words))
+    return pieces_from_words(words, bands, frame_height)
+
+
+def pieces_from_words(words, bands=None, frame_height=0):
+    """Put the words OCR kept back into lines and paragraphs."""
+    cuts = _text_cuts(words)
+    lines = _join_into_lines(_join_covering(words, cuts), cuts)
     lines = [line for line in lines
              if _worth_translating(line, bands, frame_height)]
-    return _drop_nested(_join_into_paragraphs(lines))
+    return _drop_nested(_join_into_paragraphs(lines, cuts))
+
+
+def _text_cuts(words):
+    """The moments the text on screen changed all at once, in seconds.
+
+    A paragraph replaced by another in the same place looks, word by word,
+    like one text that stayed: the words overlap, their times touch, and
+    short Hindi words look alike once their vowel signs are gone ("शिशु
+    अपनी" and "शिशु अब" scored 0.67, more than a line read twice). What
+    tells them apart is that the whole screen changes at one moment. Words
+    on the two sides of such a moment are never joined.
+    """
+    readable = [w for w in words if len(_letters(w["text"])) >= MIN_CHARS]
+    cuts = []
+    for t in sorted({w["first"] for w in readable}):
+        came = sum(1 for w in readable if w["first"] == t)
+        went = sum(1 for w in readable if t - CUT_SECONDS <= w["last"] < t)
+        if came >= CUT_WORDS and went >= CUT_WORDS:
+            cuts.append(t)
+    return cuts
+
+
+def _apart(a, b, cuts):
+    """Is there a cut between these two: one gone before it, one after?"""
+    return any(a["last"] < c <= b["first"] or b["last"] < c <= a["first"]
+               for c in cuts)
 
 
 def _letters_in(small, big):
@@ -520,7 +558,7 @@ def _worth_translating(line, bands, frame_height=0):
     return _stayed_on_screen(line, frame_height)
 
 
-def _join_into_lines(groups):
+def _join_into_lines(groups, cuts=()):
     """Put the words that OCR read one by one back into their lines.
 
     Two pieces are one line when they sit on the same row, at about the
@@ -537,7 +575,7 @@ def _join_into_lines(groups):
         j = i + 1
         while j < len(lines):
             if (_same_row(lines[i]["box"], lines[j]["box"])
-                    and _share_time(lines[i], lines[j])):
+                    and _share_time(lines[i], lines[j], cuts)):
                 lines[i] = _line_of(lines[i]["parts"] + lines.pop(j)["parts"])
                 j = i + 1   # the line grew, so look at the rest again
             else:
@@ -577,7 +615,7 @@ def _line_of(parts):
     }
 
 
-def _join_into_paragraphs(lines):
+def _join_into_paragraphs(lines, cuts=()):
     """Put lines stacked into one block back together as one paragraph.
 
     A paragraph sent line by line comes back as fragments -- "Your baby
@@ -596,7 +634,7 @@ def _join_into_paragraphs(lines):
         j = i + 1
         while j < len(blocks):
             if (_stacked(blocks[i], blocks[j])
-                    and _share_time(blocks[i], blocks[j])):
+                    and _share_time(blocks[i], blocks[j], cuts)):
                 blocks[i] = _paragraph_of(blocks[i]["parts"] + blocks.pop(j)["parts"])
                 j = i + 1
             else:
@@ -680,8 +718,10 @@ def _same_row(a, b):
     return gap <= LINE_GAP * max(ha, hb)
 
 
-def _share_time(a, b):
+def _share_time(a, b, cuts=()):
     """Were these two on screen together for most of the shorter one's time?"""
+    if _apart(a, b, cuts):
+        return False
     shared = min(a["last"], b["last"]) - max(a["first"], b["first"])
     shorter = min(a["last"] - a["first"], b["last"] - b["first"])
     if shorter <= 0:
@@ -742,7 +782,7 @@ def _near_the_band(box, band):
     return ymin <= bottom and ymax >= top
 
 
-def _join_covering(groups):
+def _join_covering(groups, cuts=()):
     """Join the groups that sit on each other at the same time.
 
     Text that shows up word by word reads as several different strings in
@@ -761,7 +801,7 @@ def _join_covering(groups):
     out = []
     for g in sorted(groups, key=lambda g: g["first"]):
         for kept in out:
-            if _one_piece(g, kept):
+            if _one_piece(g, kept, cuts):
                 if len(_letters(g["text"])) > len(_letters(kept["text"])):
                     kept["text"], kept["box"] = g["text"], g["box"]
                 kept["first"] = min(kept["first"], g["first"])
@@ -772,7 +812,7 @@ def _join_covering(groups):
     return out
 
 
-def _one_piece(a, b):
+def _one_piece(a, b, cuts=()):
     """Are these two groups the same piece of text, read twice?
 
     They have to lie over each other, not just touch: two words side by
@@ -787,6 +827,7 @@ def _one_piece(a, b):
     sentence before.
     """
     return (_covers(a["box"], b["box"]) and _times_touch(a, b)
+            and not _apart(a, b, cuts)
             and _alike(a["text"], b["text"]))
 
 

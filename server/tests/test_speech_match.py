@@ -760,3 +760,38 @@ def test_the_words_behind_the_pieces_can_be_kept():
     sm.screen_text(reads, CUES, FPS, sm.boxes_to_erase(reads, bands, FPS), bands,
                    frame_height=FRAME_H, words_out=words)
     assert sorted(w["text"] for w in words) == sorted(t for _b, t in PARAGRAPH[8:12])
+
+
+# -- real words from a Hindi ad: three paragraphs, one place ----------------
+# Read by OCR from 13s to 32s of "baby pregnancy (Hindi) 2.mp4". Three
+# paragraphs took turns in the same speech bubble, at 17.7s, 22.5s and 27.3s.
+# Joined across those moments, a line of the first ran on into the other
+# two and came back as "की सखत होने की प्रक्रिया में हैं अंतर महसूस कर सकता".
+
+def _hindi_paragraphs():
+    from pathlib import Path
+    path = Path(__file__).parent / "data" / "screen_words_hindi_paragraphs.json"
+    words = json.loads(path.read_text(encoding="utf-8"))
+    return sm.pieces_from_words(
+        [dict(w, box=tuple(w["box"]), match=0.0, frame=0) for w in words],
+        frame_height=1280)
+
+
+def test_the_screen_changes_where_the_paragraphs_take_turns():
+    import json as _json
+    from pathlib import Path
+    path = Path(__file__).parent / "data" / "screen_words_hindi_paragraphs.json"
+    words = _json.loads(path.read_text(encoding="utf-8"))
+    cuts = sm._text_cuts(words)
+    assert 22.5 in cuts and 27.3 in cuts, cuts
+    assert not any(19.0 < c < 22.0 for c in cuts), "a line read again is no cut"
+
+
+def test_paragraphs_that_take_turns_in_one_place_stay_apart():
+    pieces = [p for p in _hindi_paragraphs() if p["box"][3] < 380]
+    got = [(round(p["show_first"], 2), round(p["show_last"], 2), p["lines"]) for p in pieces]
+    assert got == [(17.7, 22.4, 5), (22.5, 27.3, 4), (27.3, 32.0, 3)], got
+    assert "सखत होने की प्रक्रिया" in pieces[0]["text"], "the second line is back"
+    assert pieces[1]["text"].endswith("सक्षम है।")
+    assert "अंतर महसूस कर सकता" in pieces[2]["text"]
+    assert not any("सखत" in p["text"] and "अंतर" in p["text"] for p in pieces)
