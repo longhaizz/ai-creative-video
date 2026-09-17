@@ -121,6 +121,9 @@ LINE_SHARED_TIME = 0.5      # share of the shorter one's time on screen together
 # How much of the smaller box must lie inside the other for two reads to be
 # one piece of text. Words side by side on a line share a pixel or two.
 COVER_SHARE = 0.5
+# How much of a piece must lie inside a bigger one, on screen at the same
+# time, for it to be a second read of part of that piece.
+NESTED_SHARE = 0.9
 # How long a piece of text must stay on screen before it is translated.
 MIN_SCREEN_SECONDS = 1.0
 # Text shorter than this share of the frame is phone-screen size, and must
@@ -450,7 +453,39 @@ def screen_text(reads, cues, fps, erase, bands, frame_height=0):
     lines = _join_into_lines(_join_covering(words))
     lines = [line for line in lines
              if _worth_translating(line, bands, frame_height)]
-    return _join_into_paragraphs(lines)
+    return _drop_nested(_join_into_paragraphs(lines))
+
+
+def _drop_nested(blocks):
+    """Leave out a piece that lies inside a bigger one at the same time.
+
+    OCR reads a line whole in some frames and one word of it in others,
+    and a decorated font can read so differently that the two never join:
+    "तुम्हारे यहाँ बच्चा होगा!" came back as the whole line and as "बबच्चा"
+    alone. Drawn as two pieces, the word's box sat on top of the line's
+    and cut the line short. The bigger piece already covers it.
+    """
+    def area(b):
+        xmin, xmax, ymin, ymax = b["box"]
+        return (xmax - xmin) * (ymax - ymin)
+
+    kept = []
+    for small in blocks:
+        inside = [big for big in blocks
+                  if big is not small and area(big) > area(small)
+                  and _covers(big["box"], small["box"], NESTED_SHARE)
+                  # The middle times, as lines are joined by: a word that
+                  # stays on stretches show_first back into the sentence
+                  # before, and that sentence would look nested.
+                  and big["first"] < small["last"]
+                  and small["first"] < big["last"]]
+        if not inside:
+            kept.append(small)
+            continue
+        big = max(inside, key=area)
+        big["show_first"] = min(big["show_first"], small["show_first"])
+        big["show_last"] = max(big["show_last"], small["show_last"])
+    return kept
 
 
 def _worth_translating(line, bands, frame_height=0):
@@ -730,7 +765,7 @@ def _one_piece(a, b):
             and _alike(a["text"], b["text"]))
 
 
-def _covers(a, b):
+def _covers(a, b, share=COVER_SHARE):
     """Does most of the smaller of these two boxes lie inside the other?"""
     axmin, axmax, aymin, aymax = a
     bxmin, bxmax, bymin, bymax = b
@@ -739,7 +774,7 @@ def _covers(a, b):
     if width <= 0 or height <= 0:
         return False
     smaller = min((axmax - axmin) * (aymax - aymin), (bxmax - bxmin) * (bymax - bymin))
-    return smaller > 0 and width * height >= COVER_SHARE * smaller
+    return smaller > 0 and width * height >= share * smaller
 
 
 def _alike(a, b):
