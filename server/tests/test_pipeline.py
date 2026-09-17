@@ -174,6 +174,7 @@ def _fake_translate(monkeypatch, out=None):
     def fake_labels(texts, target_lang, api_key, asr_meta=None, ctx=None, **kw):
         seen["texts"] = list(texts)
         seen["target_lang"] = target_lang
+        seen["images"] = kw.get("images")
         return out if out is not None else [f"[{t}]" for t in texts]
 
     import server.steps.translate as translate
@@ -329,3 +330,48 @@ def test_nothing_is_asked_when_every_piece_is_already_right(monkeypatch, tmp_pat
     assert pipeline._translated_screen_text(
         tmp_path / "screen_text.json", ctx.params, {"language": "hi"},
         1080, 1920, ctx) == []
+
+
+def test_only_text_ocr_was_unsure_of_goes_with_a_picture(monkeypatch, tmp_path):
+    """A picture costs a little; text read well does not need one."""
+    seen = _fake_translate(monkeypatch)
+    (tmp_path / "video.mp4").write_bytes(b"v")
+    _write_screen(tmp_path / "screen_text.json", [
+        {"text": "SALE 50%", "box": [100, 300, 200, 260],
+         "start": 1.0, "end": 3.0, "ocr": 0.99},
+        {"text": "बबच्चा", "box": [351, 476, 425, 486],
+         "start": 13.0, "end": 15.0, "ocr": 0.83},
+    ])
+    crops = []
+
+    def fake_crop(video, seconds, box, out_png, max_width=768):
+        crops.append((seconds, box))
+        out_png.write_bytes(b"png")
+        return out_png
+
+    monkeypatch.setattr(pipeline.audio, "frame_crop", fake_crop)
+    ctx = FakeContext(tmp_path, params(translate_screen_text=True, target_lang="VI"))
+    pipeline._translated_screen_text(
+        tmp_path / "screen_text.json", ctx.params, {}, 1080, 1920, ctx, work=tmp_path)
+
+    assert seen["images"] == [None, b"png"]
+    assert crops == [(14.0, (339, 419, 149, 73))], "the middle, with a margin"
+
+
+def test_a_picture_that_cannot_be_made_leaves_the_text_alone(monkeypatch, tmp_path):
+    seen = _fake_translate(monkeypatch)
+    (tmp_path / "video.mp4").write_bytes(b"v")
+    _write_screen(tmp_path / "screen_text.json", [
+        {"text": "बबच्चा", "box": [351, 476, 425, 486],
+         "start": 13.0, "end": 15.0, "ocr": 0.83}])
+
+    def broken_crop(*a, **k):
+        raise pipeline.PipelineError("ffmpeg failed")
+
+    monkeypatch.setattr(pipeline.audio, "frame_crop", broken_crop)
+    ctx = FakeContext(tmp_path, params(translate_screen_text=True, target_lang="VI"))
+    screen = pipeline._translated_screen_text(
+        tmp_path / "screen_text.json", ctx.params, {}, 1080, 1920, ctx, work=tmp_path)
+
+    assert seen["images"] is None
+    assert [p["text"] for p in screen] == ["[बबच्चा]"]

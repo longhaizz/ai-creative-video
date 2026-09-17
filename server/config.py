@@ -1,7 +1,8 @@
 """Settings read from environment variables.
 
 Only the settings that something already uses. Keys for later steps
-(OPENAI_API_KEY, VSR_PYTHON, VSR_REPO) are added when that step needs them.
+(LLM_PROVIDER and its keys, VSR_PYTHON, VSR_REPO) are added when that step
+needs them.
 """
 
 from __future__ import annotations
@@ -40,9 +41,18 @@ MAX_REQUEST_BYTES = int(
     os.getenv("MAX_REQUEST_BYTES", str(MAX_VIDEO_BYTES + MAX_AUDIO_BYTES + 1024 * 1024))
 )
 
-# Used to rewrite and translate the transcript. It lives here, on the
-# server, so it never ships inside the desktop .exe.
+# The language model that rewrites and translates. The keys live here, on
+# the server, so they never ship inside the desktop .exe.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# The key of the provider in use. Empty means that provider has no key.
+LLM_API_KEY = GEMINI_API_KEY if LLM_PROVIDER == "gemini" else OPENAI_API_KEY
+# Empty means the provider's default model, see steps/llm.py.
+LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
+# A piece of screen text that OCR read with a lower score than this is
+# sent to the model with a picture of it, so the model reads it again.
+SCREEN_VISION_BELOW = float(os.getenv("SCREEN_VISION_BELOW", "0.95"))
 
 # Set to 0 to start without the models. The API answers, and every job fails
 # with "not built yet". Only useful for working on the HTTP side on a

@@ -4,11 +4,13 @@ Copied almost unchanged from spy-ads openai_translate_api.py. It is worth
 keeping as it is: the prompts and the repair passes here were tuned against
 real ad transcripts, and rewriting them would quietly lose that work.
 
-Only two things changed:
+Only three things changed:
   * OpenAIError now sits under PipelineError, so a failure carries an
     error_code back to the client like every other step;
   * the key comes from the server environment, not from the desktop app, so
-    it never ships inside a .exe.
+    it never ships inside a .exe;
+  * the request itself goes through steps/llm.py, so OpenAI or Gemini can
+    answer it. OpenAIError is kept as the name of that failure.
 
 The comments below are still the original Vietnamese.
 """
@@ -22,10 +24,11 @@ import time
 
 import requests
 
-from server.jobs import PipelineError
+from server import config
+from server.steps import llm
 
-API_URL = "https://api.openai.com/v1/chat/completions"
-DEFAULT_MODEL = "gpt-4o-mini"
+# Empty: the model LLM_MODEL names, or the provider's own default.
+DEFAULT_MODEL = ""
 
 # How many times one call is made before the job fails, and how long
 # to wait between them. The wait grows with each try: a rate limit
@@ -67,11 +70,8 @@ LANG_NAMES = {
 VARIANTS = ("short", "normal", "long")
 
 
-class OpenAIError(PipelineError):
-    """A failure the user should see, with the standard error code."""
-
-    def __init__(self, message: str):
-        super().__init__(message, code="internal")
+# The old name, kept: every step and test here knows the failure by it.
+OpenAIError = llm.LLMError
 
 
 def word_count(text: str) -> int:
@@ -79,7 +79,8 @@ def word_count(text: str) -> int:
 
 
 def _chat(system: str, user: str, api_key: str, model: str,
-          json_mode: bool = False, schema: dict | None = None) -> str:
+          json_mode: bool = False, schema: dict | None = None,
+          images: list[tuple[str, bytes]] = ()) -> str:
     """Ask the model once, and try again when the failure is a passing one.
 
     A dub calls this many times per job, so a single 429 or a dropped
@@ -91,7 +92,8 @@ def _chat(system: str, user: str, api_key: str, model: str,
     last: OpenAIError | None = None
     for attempt in range(RETRIES):
         try:
-            text = _chat_once(system, user, api_key, model, json_mode, schema=schema)
+            text = _chat_once(system, user, api_key, model, json_mode,
+                              schema=schema, images=images)
             if json_mode:
                 # Parse it here, so a broken answer is asked again instead
                 # of killing a job that is minutes from done.
@@ -102,20 +104,11 @@ def _chat(system: str, user: str, api_key: str, model: str,
                 raise
             last = error
         except requests.RequestException as error:
-            last = OpenAIError(f"OpenAI request failed: {error}")
+            last = OpenAIError(f"{config.LLM_PROVIDER} request failed: {error}")
         if attempt + 1 < RETRIES:
             time.sleep(RETRY_WAIT * (attempt + 1))
     assert last is not None
     raise last
-
-
-def _response_format(json_mode: bool, schema: dict | None) -> dict:
-    """What to send as response_format: nothing, JSON, or a fixed shape."""
-    if schema is not None:
-        return {"response_format": {"type": "json_schema", "json_schema": schema}}
-    if json_mode:
-        return {"response_format": {"type": "json_object"}}
-    return {}
 
 
 def _blocks_schema(n: int) -> dict:
@@ -158,43 +151,16 @@ def _blocks_schema(n: int) -> dict:
 
 def _worth_retrying(error: OpenAIError) -> bool:
     text = str(error)
-    return "OpenAI HTTP 429" in text or "JSON" in text or any(
-        f"OpenAI HTTP {code}" in text for code in (500, 502, 503, 504)
+    return "JSON" in text or any(
+        f" HTTP {code}" in text for code in (429, 500, 502, 503, 504)
     )
 
 
 def _chat_once(system: str, user: str, api_key: str, model: str,
-               json_mode: bool = False, schema: dict | None = None) -> str:
-    key = (api_key or "").strip()
-    if not key:
-        raise OpenAIError("Chưa có OpenAI API key")
-    r = requests.post(
-        API_URL,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "temperature": 0.1,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            **_response_format(json_mode, schema),
-        },
-        timeout=120,
-    )
-    if not r.ok:
-        raise OpenAIError(f"OpenAI HTTP {r.status_code}: {r.text[:300]}")
-    try:
-        out = r.json()["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError, ValueError) as e:
-        raise OpenAIError(f"OpenAI response lạ: {r.text[:300]}") from e
-    out = (out or "").strip().strip('"').strip("'")
-    if not out:
-        raise OpenAIError("OpenAI trả text rỗng")
-    return out
+               json_mode: bool = False, schema: dict | None = None,
+               images: list[tuple[str, bytes]] = ()) -> str:
+    return llm.ask(system, user, api_key, model, json_mode=json_mode,
+                   schema=schema, images=images)
 
 
 # Chữ có dấu thanh Việt (heuristic phát hiện drift VI ↔ Latin khác).
@@ -882,14 +848,21 @@ if __name__ == "__main__":
 # -- the text painted on the picture ---------------------------------------
 
 
-def _labels_schema(n: int) -> dict:
+def _labels_schema(n: int, pictured: set = frozenset()) -> dict:
     """One required key per label, for the same reason as _blocks_schema.
 
     Strict mode cannot pin the length of an array, so a numbered object is
     the only shape where the answer must carry every label and cannot
-    reorder or merge any of them.
+    reorder or merge any of them. A label sent with a picture answers with
+    what it read off the picture as well as the translation.
     """
     keys = [str(i) for i in range(n)]
+    read_again = {
+        "type": "object",
+        "properties": {"read": {"type": "string"}, "text": {"type": "string"}},
+        "required": ["read", "text"],
+        "additionalProperties": False,
+    }
     return {
         "name": "screen_labels",
         "strict": True,
@@ -898,7 +871,9 @@ def _labels_schema(n: int) -> dict:
             "properties": {
                 "labels": {
                     "type": "object",
-                    "properties": {key: {"type": "string"} for key in keys},
+                    "properties": {
+                        key: read_again if int(key) in pictured else {"type": "string"}
+                        for key in keys},
                     "required": keys,
                     "additionalProperties": False,
                 },
@@ -940,29 +915,53 @@ LABELS_SYSTEM = (
     "yourself."
 )
 
+LABELS_PICTURES = (
+    "\nSome pieces come with a picture of the text as it is on the video, "
+    "named \"picture of piece <key>\". For those, read the text off the "
+    "picture yourself: the OCR text is only a hint and is often wrong. "
+    "Answer those keys with {{\"read\": the text in the picture, in its own "
+    "language, \"text\": the translation}} instead of a plain string."
+)
+
 
 def _translate_chunk(texts, lang_name: str, api_key: str, model: str,
-                     ctx=None) -> list[str]:
+                     ctx=None, images=None) -> list[str]:
     """Translate up to LABELS_PER_ASK pieces in one request.
 
     The pieces are sent as JSON under the very keys the answer has to carry,
     so lining an answer up with its piece is copying and not counting. Sent
     as a numbered list instead, the model kept its place for about forty
     pieces and then handed every piece the answer belonging to the next one.
+
+    images[i], when there is one, is a PNG of piece i as it is on the video.
     """
+    pictures = [(f"picture of piece {i}", png)
+                for i, png in enumerate(images or []) if png]
+    pictured = {i for i, png in enumerate(images or []) if png}
+    system = LABELS_SYSTEM.format(lang_name=lang_name)
+    if pictures:
+        system += LABELS_PICTURES.format()
     raw = _chat(
-        LABELS_SYSTEM.format(lang_name=lang_name),
+        system,
         json.dumps({str(i): text for i, text in enumerate(texts)},
                    ensure_ascii=False, indent=1),
         api_key,
         model,
         json_mode=True,
-        schema=_labels_schema(len(texts)),
+        schema=_labels_schema(len(texts), pictured),
+        # Only when there are some: a text-only ask stays exactly as it was.
+        **({"images": pictures} if pictures else {}),
     )
     labels = (_extract_json(raw) or {}).get("labels") or {}
     out = []
     for i, text in enumerate(texts):
-        got = str(labels.get(str(i)) or "").strip()
+        got = labels.get(str(i))
+        if isinstance(got, dict):
+            if ctx is not None:
+                ctx.log(f"Screen text {text!r} read off the picture as "
+                        f"{str(got.get('read') or '').strip()!r}")
+            got = got.get("text")
+        got = str(got or "").strip()
         if not got and ctx is not None:
             ctx.log(f"Screen text {text!r} came back empty, keeping it as it is")
         out.append(got or text)
@@ -971,7 +970,7 @@ def _translate_chunk(texts, lang_name: str, api_key: str, model: str,
 
 def translate_labels(texts, target_lang: str, api_key: str,
                      asr_meta=None, model: str = DEFAULT_MODEL,
-                     ctx=None) -> list[str]:
+                     ctx=None, images=None) -> list[str]:
     """Translate the text printed on the picture, all of it in one ask.
 
     One request for the whole video, not one per piece. These are labels,
@@ -979,6 +978,10 @@ def translate_labels(texts, target_lang: str, api_key: str,
     machinery translate_blocks carries buys nothing here. Sending them
     together also lets the model see the whole advert, which is what keeps
     the same word from being translated two ways in one video.
+
+    images, when given, lines up with texts: a PNG of that piece, or None.
+    If the ask with pictures fails, it is asked again with the text alone,
+    so a picture the model will not take costs the reading, not the job.
 
     Returns one translation per text, in the same order. A piece the model
     leaves empty keeps the text it came in with, so a bad answer costs the
@@ -993,10 +996,21 @@ def translate_labels(texts, target_lang: str, api_key: str,
         # writing it again would only round-trip it through OCR mistakes.
         return list(texts)
 
+    images = list(images or [None] * len(texts))
     out = []
     for at in range(0, len(texts), LABELS_PER_ASK):
-        out.extend(_translate_chunk(
-            texts[at:at + LABELS_PER_ASK], lang_name, api_key, model, ctx))
+        chunk = texts[at:at + LABELS_PER_ASK]
+        pics = images[at:at + LABELS_PER_ASK]
+        try:
+            out.extend(_translate_chunk(chunk, lang_name, api_key, model, ctx,
+                                        images=pics if any(pics) else None))
+        except OpenAIError as error:
+            if not any(pics):
+                raise
+            if ctx is not None:
+                ctx.log(f"Asking with pictures failed ({error}), "
+                        f"asking again with the text alone")
+            out.extend(_translate_chunk(chunk, lang_name, api_key, model, ctx))
     return out
 
 

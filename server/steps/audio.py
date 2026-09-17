@@ -81,6 +81,25 @@ def video_size(path) -> tuple[int, int]:
         raise PipelineError("The file has no video stream", code="invalid_input")
 
 
+def frame_crop(video, seconds: float, box, out_png, max_width: int = 768) -> Path:
+    """Save one part of one frame as a PNG, no wider than max_width.
+
+    box is (x, y, w, h) in pixels of the video.
+    """
+    x, y, w, h = box
+    out_png = Path(out_png)
+    run_ffmpeg([
+        config.FFMPEG_BIN, "-y", "-loglevel", "error",
+        "-ss", f"{max(seconds, 0.0):.3f}", "-i", str(video),
+        "-frames:v", "1",
+        "-vf", f"crop={w}:{h}:{x}:{y},scale='min({max_width},iw)':-2",
+        str(out_png),
+    ])
+    if not out_png.is_file() or out_png.stat().st_size == 0:
+        raise PipelineError(f"No frame at {seconds:.2f}s")
+    return out_png
+
+
 def extract_audio(video, out_wav) -> Path:
     out_wav = Path(out_wav)
     out_wav.parent.mkdir(parents=True, exist_ok=True)

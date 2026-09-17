@@ -5,7 +5,7 @@ The whole job, in order:
     read speech                      (Whisper, in-process)
     remove the burned-in subtitles   (optional, its own venv)
     split voice from music           (Demucs)
-    rewrite and translate            (OpenAI, three lengths a block)
+    rewrite and translate            (OpenAI or Gemini, three lengths a block)
     say every block                  (VoxCPM, best of a few takes)
     move the mouth                   (LatentSync, optional)
     mix the new voice with the music
@@ -197,12 +197,12 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     scenes = detect_scenes(video)
     ctx.log(f"{len(scenes)} scene cuts")
 
-    # Imported here so the module still loads without an OpenAI key present.
+    # Imported here so the module still loads without a model key present.
     from server.steps.synth import timed_speech
 
     speech = timed_speech(
         cues, work, video_seconds, speak,
-        config.OPENAI_API_KEY, params.target_lang, meta=meta, ctx=ctx,
+        config.LLM_API_KEY, params.target_lang, meta=meta, ctx=ctx,
         listen=listen, scenes=scenes,
     )
     ctx.log(f"Voice track: {audio.duration(speech):.1f}s of {video_seconds:.1f}s")
@@ -257,7 +257,8 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     # 9. Burn the new subtitles, the new hook and the translated screen text
     # on last, in one encode, so they sit on the final picture.
     hook = _hook(params, video_seconds)
-    screen = _translated_screen_text(screen_path, params, meta, width, height, ctx)
+    screen = _translated_screen_text(screen_path, params, meta, width, height, ctx,
+                                     work=work)
     if params.burn_subtitle or hook is not None or screen:
         ctx.step("Burning in the subtitles")
         lines = _subtitle_cues(work, cues) if params.burn_subtitle else []
@@ -417,7 +418,8 @@ def _read_screen_only(video: Path, work: Path, params, cues, meta,
 
 
 def _translated_screen_text(screen_path: Path | None, params, meta,
-                            width: int, height: int, ctx) -> list[dict]:
+                            width: int, height: int, ctx,
+                            work: Path | None = None) -> list[dict]:
     """The text found on the picture, translated, ready for subtitle.burn.
 
     A failure here loses the translation, not the job: everything before it
@@ -452,10 +454,12 @@ def _translated_screen_text(screen_path: Path | None, params, meta,
         return []
 
     ctx.step("Translating the text on the picture")
+    images = _screen_pictures(todo, work, width, height, ctx)
     try:
         said = translate_labels(
             [piece["text"] for piece in todo], params.target_lang,
-            config.OPENAI_API_KEY, asr_meta=meta, ctx=ctx,
+            config.LLM_API_KEY, asr_meta=meta, ctx=ctx,
+            **({"images": images} if any(images) else {}),
         )
     except PipelineError as error:
         ctx.log(f"Could not translate the text on the picture: {error}")
@@ -473,6 +477,51 @@ def _translated_screen_text(screen_path: Path | None, params, meta,
         ctx.log(f"Screen text: {piece['text']!r} -> {text!r}")
         piece["text"] = text
         out.append(piece)
+    return out
+
+
+# How much room to leave around the text in its picture, as a share of the
+# box, so the model sees whole letters and a little of what is around them.
+PICTURE_MARGIN = 0.1
+
+
+def _screen_pictures(pieces: list[dict], work: Path | None,
+                     width: int, height: int, ctx) -> list[bytes | None]:
+    """A PNG of each piece OCR was unsure of, None for the rest.
+
+    OCR scores a piece by its worst word, so one badly read word is enough
+    to send the piece. A decorated font -- white letters with a thick
+    outline -- came back as "दतुम्हारे चर्हली हब बचख्वा होगण!" for "तुम्हारे
+    यहाँ बच्चा होगा!", and was translated as a different sentence. The model
+    reads the picture far better than that.
+
+    Taken from the video as it was uploaded: the times and boxes in the
+    OCR file are its times and boxes. A picture that cannot be made only
+    costs that piece its second reading.
+    """
+    out: list[bytes | None] = [None] * len(pieces)
+    if work is None:
+        return out
+    video = _source_video(work)
+    for i, piece in enumerate(pieces):
+        score = float(piece.get("ocr") or 0.0)
+        if score >= config.SCREEN_VISION_BELOW:
+            continue
+        xmin, xmax, ymin, ymax = piece["box"]
+        pad_x = int((xmax - xmin) * PICTURE_MARGIN)
+        pad_y = int((ymax - ymin) * PICTURE_MARGIN)
+        x0, y0 = max(xmin - pad_x, 0), max(ymin - pad_y, 0)
+        x1, y1 = min(xmax + pad_x, width), min(ymax + pad_y, height)
+        middle = (float(piece.get("start") or 0.0) + float(piece.get("end") or 0.0)) / 2
+        try:
+            png = audio.frame_crop(video, middle, (x0, y0, x1 - x0, y1 - y0),
+                                   work / f"screen_{i}.png")
+        except PipelineError as error:
+            ctx.log(f"Screen text {piece['text']!r}: no picture ({error})")
+            continue
+        out[i] = png.read_bytes()
+        ctx.log(f"Screen text {piece['text']!r} (ocr {score:.2f}) "
+                f"goes with a picture taken at {middle:.2f}s")
     return out
 
 
@@ -570,7 +619,8 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
     # The length is only read when there is a hook to hold for it.
     hook = _hook(params, audio.duration(video)) if params.hook_text else None
     width, height = audio.video_size(video)
-    screen = _translated_screen_text(screen_path, params, meta, width, height, ctx)
+    screen = _translated_screen_text(screen_path, params, meta, width, height, ctx,
+                                     work=work)
     if lines or hook is not None or screen:
         ctx.step("Burning in the subtitles")
         video = subtitle.burn(
