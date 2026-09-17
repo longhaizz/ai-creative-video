@@ -47,6 +47,8 @@ class SubtitleDetect:
         self.scan_all = scan_all
         # Filled by keep_subtitle_line: the text that stays on screen.
         self.screen_text = []
+        # The words those pieces were made of, to trace a bad piece back.
+        self.screen_words = []
         self._init_sample_step()
 
     def _init_sample_step(self):
@@ -159,9 +161,10 @@ class SubtitleDetect:
         # Before the early return below: a video whose text is never spoken
         # has no subtitle line to find, and that text is exactly what the
         # translate step wants.
+        self.screen_words = []
         self.screen_text = screen_text(
             reads, self.speech["cues"], self.fps, erase, bands,
-            frame_height=self.frame_height)
+            frame_height=self.frame_height, words_out=self.screen_words)
         # How far apart two reads are, so the text can be drawn from one
         # step before it was first read to one step after the last.
         for piece in self.screen_text:

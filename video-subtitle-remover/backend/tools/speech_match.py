@@ -124,6 +124,10 @@ COVER_SHARE = 0.5
 # How much of a piece must lie inside a bigger one, on screen at the same
 # time, for it to be a second read of part of that piece.
 NESTED_SHARE = 0.9
+# And how much of its letters must turn up, in order, in the bigger one.
+# A word read again scored 0.75 against its line ("बबच्चा" in "तुम्हारे यहाँ
+# बच्चा होगा!"); a different sentence in the same place scored 0.27-0.39.
+NESTED_TEXT_SHARE = 0.6
 # How long a piece of text must stay on screen before it is translated.
 MIN_SCREEN_SECONDS = 1.0
 # Text shorter than this share of the frame is phone-screen size, and must
@@ -421,7 +425,7 @@ def text_groups(reads, cues, fps):
     return groups
 
 
-def screen_text(reads, cues, fps, erase, bands, frame_height=0):
+def screen_text(reads, cues, fps, erase, bands, frame_height=0, words_out=None):
     """The text that stays on screen, ready to be translated.
 
     Everything the video paints out is left out of this: that is the
@@ -435,6 +439,9 @@ def screen_text(reads, cues, fps, erase, bands, frame_height=0):
     line; dropped first, it split "शरीर के तापमान को नियंत्रित" in two. And
     what goes to the translator is a line, not "temperature", "control"
     and "digestion" scattered over the picture.
+
+    words_out, when given, is filled with the words the lines were made
+    of, so a line that came out wrong can be traced back to them.
     """
     words = []
     for g in text_groups(reads, cues, fps):
@@ -450,10 +457,25 @@ def screen_text(reads, cues, fps, erase, bands, frame_height=0):
         if g["match"] >= MIN_SCORE:
             continue
         words.append(g)
+    if words_out is not None:
+        words_out.extend(words)
     lines = _join_into_lines(_join_covering(words))
     lines = [line for line in lines
              if _worth_translating(line, bands, frame_height)]
     return _drop_nested(_join_into_paragraphs(lines))
+
+
+def _letters_in(small, big):
+    """Share of small's letters found, in order, in big (0..1).
+
+    Unlike contained(), no floor on how many letters: a short word read
+    again is exactly the case this is for.
+    """
+    a, b = _letters(small), _letters(big)
+    if not a:
+        return 0.0
+    blocks = SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks()
+    return sum(m.size for m in blocks) / len(a)
 
 
 def _drop_nested(blocks):
@@ -474,6 +496,7 @@ def _drop_nested(blocks):
         inside = [big for big in blocks
                   if big is not small and area(big) > area(small)
                   and _covers(big["box"], small["box"], NESTED_SHARE)
+                  and _letters_in(small["text"], big["text"]) >= NESTED_TEXT_SHARE
                   # The middle times, as lines are joined by: a word that
                   # stays on stretches show_first back into the sentence
                   # before, and that sentence would look nested.
@@ -543,10 +566,11 @@ def _line_of(parts):
                 min(p["box"][2] for p in parts), max(p["box"][3] for p in parts)),
         "first": statistics.median(min(p["first"] for p in spot) for spot in spots),
         "last": statistics.median(max(p["last"] for p in spot) for spot in spots),
-        # When to draw the translation: the whole time any kept word was on
-        # screen. first and last stay the middle, for joining lines.
-        "show_first": min(p["first"] for spot in spots for p in spot),
-        "show_last": max(p["last"] for spot in spots for p in spot),
+        # When to draw the translation. The middle of the words, like first
+        # and last: one word that stays on, or one read by mistake, would
+        # otherwise stretch the line over the next sentence.
+        "show_first": statistics.median(min(p["first"] for p in spot) for spot in spots),
+        "show_last": statistics.median(max(p["last"] for p in spot) for spot in spots),
         "ocr": min(p["ocr"] for p in parts),
         "match": max(p["match"] for p in parts),
         "frame": min(parts, key=lambda p: p["first"])["frame"],
@@ -591,6 +615,7 @@ def _paragraph_of(lines):
                 min(l["box"][2] for l in lines), max(l["box"][3] for l in lines)),
         "first": statistics.median(l["first"] for l in lines),
         "last": statistics.median(l["last"] for l in lines),
+        # A paragraph is drawn while any of its lines is on screen.
         "show_first": min(l["show_first"] for l in lines),
         "show_last": max(l["show_last"] for l in lines),
         "ocr": min(l["ocr"] for l in lines),
