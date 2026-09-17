@@ -643,3 +643,40 @@ def test_the_type_is_not_shrunk_past_reading():
     assert size >= round((old[3] - old[2]) * 1.3 * 0.6)
     assert box_w > old[1] - old[0], "what will not shrink has to widen"
     assert box_h == old[3] - old[2], "and it still covers no more height"
+
+
+# -- a whole paragraph drawn as one box -------------------------------------
+
+PARA_BOX = (41, 355, 151, 307)      # four Hindi lines at 22.5s, ~34px each
+
+
+def _para(text, box=PARA_BOX, line_height=34, lines=4):
+    return {**_piece(text, box), "line_height": line_height, "lines": lines}
+
+
+def test_a_paragraph_is_sized_by_its_lines_not_its_block():
+    """Sized from the 156px block, the type would come out near 200px."""
+    _lines, size, _box = screen_layout(
+        _para("Your baby can now regulate its own breathing."), W, H)
+    assert size <= round(34 * 1.3)
+
+
+def test_a_paragraph_that_fits_stays_inside_the_block():
+    text = "Your baby can now regulate its own breathing, digestion and body temperature."
+    lines, _size, (x0, y0, box_w, box_h) = screen_layout(_para(text), W, H)
+    assert len(lines) > 1
+    assert (x0, y0, box_w, box_h) == (41, 151, 314, 156)
+
+
+def test_a_paragraph_too_long_to_fit_grows_down_not_sideways():
+    text = " ".join(["Your baby can now regulate its own breathing."] * 6)
+    _lines, size, (x0, y0, box_w, box_h) = screen_layout(_para(text), W, H)
+    assert size == round(round(34 * 1.3) * 0.6), "shrunk to the floor first"
+    assert (x0, y0, box_w) == (41, 151, 314)
+    assert box_h > 156
+
+
+def test_a_one_line_piece_is_laid_out_as_before():
+    one = {**_piece("Try it now", (227, 488, 262, 324)), "line_height": 62, "lines": 1}
+    assert screen_layout(one, W, H) == screen_layout(
+        _piece("Try it now", (227, 488, 262, 324)), W, H)

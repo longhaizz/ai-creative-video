@@ -393,7 +393,9 @@ class SubtitleRemover:
             with open(self.dump_screen_text_path, 'w', encoding='utf-8') as f:
                 json.dump([
                     {"text": g["text"], "box": list(g["box"]),
-                     "start": g["first"], "end": g["last"], "ocr": g["ocr"]}
+                     "start": g["first"], "end": g["last"], "ocr": g["ocr"],
+                     # The type size, since a paragraph's box is several lines tall.
+                     "line_height": g.get("line_height"), "lines": g.get("lines", 1)}
                     for g in groups
                 ], f, ensure_ascii=False)
         except Exception:

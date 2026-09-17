@@ -490,8 +490,10 @@ def screen_layout(piece: dict, width: int, height: int) -> tuple:
     """
     xmin, xmax, ymin, ymax = piece["box"]
     old_w, old_h = max(xmax - xmin, 1), max(ymax - ymin, 1)
-    size = resolve_font_size(int(round(old_h * SCREEN_SIZE_RATIO)), height)
     text = (piece.get("text") or "").strip()
+    if (piece.get("lines") or 1) > 1:
+        return _paragraph_layout(piece, text, width, height)
+    size = resolve_font_size(int(round(old_h * SCREEN_SIZE_RATIO)), height)
 
     # Shrink to fit the footprint the old text had, rather than spread over
     # the picture around it. Only down to SCREEN_MIN_SHRINK: past that the
@@ -511,14 +513,51 @@ def screen_layout(piece: dict, width: int, height: int) -> tuple:
 
     text_w = max(_text_width(line, size) for line in lines)
     box_w = min(max(old_w, int(round(text_w)) + 2 * SCREEN_PADDING), room)
-    # The letters themselves, not the line boxes around them.
-    text_h = int(round(size * (SCREEN_INK_SHARE
-                               + (len(lines) - 1) * SCREEN_LINE_SPACING)))
+    text_h = _block_height(len(lines), size)
     box_h = min(max(old_h, text_h + 2 * SCREEN_PADDING), height)
 
     x0 = _keep_inside((xmin + xmax) // 2 - box_w // 2, box_w, width)
     y0 = _keep_inside((ymin + ymax) // 2 - box_h // 2, box_h, height)
     return lines, size, (x0, y0, box_w, box_h)
+
+
+def _paragraph_layout(piece: dict, text: str, width: int, height: int) -> tuple:
+    """Lay a translated paragraph out over the block of lines it replaces.
+
+    The size comes from one line of the old text, not from the block, which
+    is several lines tall. The translation is wrapped to the block's width
+    and shrunk, down to SCREEN_MIN_SHRINK, until it fits the block's height.
+    If it still does not fit, the box grows downwards and sideways never:
+    the block is a column, and what sits next to it belongs to the advert.
+    """
+    xmin, xmax, ymin, ymax = piece["box"]
+    old_w, old_h = max(xmax - xmin, 1), max(ymax - ymin, 1)
+    line_h = piece.get("line_height") or old_h / piece["lines"]
+    start = resolve_font_size(int(round(line_h * SCREEN_SIZE_RATIO)), height)
+    floor = resolve_font_size(int(round(start * SCREEN_MIN_SHRINK)), height)
+    size, lines = start, [text]
+    for size in range(start, floor - 1, -1):
+        lines = _wrap_to(text, old_w, size)
+        if _block_height(len(lines), size) <= old_h:
+            break
+
+    box_w = min(max(old_w, int(round(max(_text_width(l, size) for l in lines)))),
+                max(width - 2 * SCREEN_MARGIN, 1))
+    box_h = min(max(old_h, _block_height(len(lines), size)), height)
+    x0 = _keep_inside((xmin + xmax) // 2 - box_w // 2, box_w, width)
+    y0 = _keep_inside(ymin, box_h, height)
+    return lines, size, (x0, y0, box_w, box_h)
+
+
+def _wrap_to(text: str, box_w: int, size: int) -> list[str]:
+    """Break text into lines that fit this width at this size."""
+    fits = max(1, int(box_w / (CHAR_WIDTH_EM * max(size, 1))))
+    return wrap_text_lines(text, fits) or [text]
+
+
+def _block_height(lines: int, size: int) -> int:
+    """How tall these many lines of letters are: the letters, not the line boxes."""
+    return int(round(size * (SCREEN_INK_SHARE + (lines - 1) * SCREEN_LINE_SPACING)))
 
 
 def _keep_inside(start: int, length: int, whole: int) -> int:

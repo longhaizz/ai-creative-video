@@ -5,6 +5,7 @@ from there, so it is loaded here straight from its file.
 """
 
 import importlib.util
+import itertools
 import json
 from pathlib import Path
 
@@ -486,7 +487,8 @@ def test_small_body_copy_is_still_translated():
     """A paragraph of the advert reads smaller than its headline. Held to
     the headline's height, a five line block at 17.7s was thrown away and
     the viewer got a video with Hindi still on it."""
-    assert _texts(_screen_h(_with(BODY_COPY, "सखत होने की प्क्रिया में हैं।"))) == [
+    reads = _with(BODY_COPY, "सखत होने की प्क्रिया में हैं।", frames=range(1, 47, 3))
+    assert _texts(_screen_h(reads)) == [
         "सखत होने की प्क्रिया में हैं।"]
 
 
@@ -534,10 +536,10 @@ def test_a_paragraph_replaced_by_another_is_not_joined_to_it():
     ended, in the same band. Joined, it took the whole of the second
     paragraph and one line of the first away with it."""
     reads = {}
-    for n in range(1, 23, 3):       # 0.0 - 2.1s
+    for n in range(1, 41, 3):       # 0.0 - 3.9s
         reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9),
                     (PARA_A, "खोपड़ी अभी पूरी तरह कठोर नहीं", 0.97)]
-    for n in range(25, 41, 3):      # 2.4 - 3.9s, a 0.3s gap
+    for n in range(44, 90, 3):      # 4.3 - 8.8s, a 0.4s gap
         reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9),
                     (PARA_B, "शरीर के तापमान को", 0.99)]
 
@@ -549,9 +551,8 @@ def test_a_paragraph_replaced_by_another_is_not_joined_to_it():
 def test_the_same_word_read_several_ways_is_still_one_group():
     """OCR gives "बच्वा", "बबच्चा", "बख्वा" for one word on one video."""
     reads = {}
-    for n, text in zip(range(1, 30, 3),
-                       ("बच्वा", "बबच्चा", "बख्वा", "बच्चा", "बच्वा",
-                        "बबच्चा", "बच्चा", "बच्वा", "बच्चा", "बच्चा")):
+    for n, text in zip(range(1, 47, 3), itertools.cycle(
+            ("बच्वा", "बबच्चा", "बख्वा", "बच्चा", "बच्वा"))):
         reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9), (PARA_A, text, 0.85)]
     assert len(_screen_h(reads)) == 1
 
@@ -592,15 +593,17 @@ def _words(words, frames):
             for n in frames}
 
 
-def test_a_paragraph_read_word_by_word_comes_back_as_its_lines():
-    """14 white boxes with one word each would read as nonsense."""
+def test_a_paragraph_read_word_by_word_comes_back_as_one_paragraph():
+    """14 white boxes with one word each would read as nonsense, and four
+    lines translated one by one come back as fragments."""
     groups = _screen_h(_words(PARAGRAPH, range(1, 47, 3)))
-    assert [g["text"] for g in sorted(groups, key=lambda g: g["box"][2])] == [
-        "आपका शिशु अपनी साँस लेने",
-        "की प्रक्रिया, पाचन क्रिया और",
-        "शरीर के तापमान को नियंत्रित",
-        "करने में सक्षम है।",
+    assert [g["text"] for g in groups] == [
+        "आपका शिशु अपनी साँस लेने की प्रक्रिया, पाचन क्रिया और "
+        "शरीर के तापमान को नियंत्रित करने में सक्षम है।"
     ]
+    assert groups[0]["lines"] == 4
+    assert groups[0]["box"] == (41, 355, 151, 307)
+    assert 30 <= groups[0]["line_height"] <= 38, "the type size, not the block"
 
 
 def test_a_line_covers_every_word_it_was_made_of():
@@ -627,11 +630,11 @@ def test_a_word_that_stays_does_not_join_two_sentences():
     second = [((57, 152, 264, 304), "महसूस"), ((158, 212, 265, 296), "कर"),
               ((213, 299, 263, 297), "सकता")]
     reads = {}
-    for n in range(1, 47, 3):
+    for n in range(1, 95, 3):       # 0.0 - 4.5s, then 4.8 - 9.3s
         reads[n] = [(SUB, "Hôm nay mình chia sẻ", 0.9),
                     ((257, 289, 273, 304), "है।", 1.0)]
         reads[n] += [(box, text, 1.0) for box, text in
-                     (first if n < 24 else second)]
+                     (first if n < 48 else second)]
 
     texts = [g["text"] for g in _screen_h(reads)]
     assert not any("सक्षम" in t and "महसूस" in t for t in texts), texts
@@ -647,3 +650,64 @@ def test_a_line_read_whole_and_word_by_word_is_said_once():
                     ((232, 339, 264, 319), "अभी", 1.0),
                     ((227, 488, 262, 324), "अभी आज़माए", 0.89)]
     assert [g["text"] for g in _screen_h(reads)] == ["अभी आज़माए"]
+
+
+# -- phone screens: small and quick -------------------------------------------
+# Boxes and times from a phone screen recording (AI Photo 19, 720x1280).
+
+
+def test_a_phone_button_on_screen_for_seconds_is_left_alone():
+    """"Regenerate" was 33px tall and there for 2.6s."""
+    reads = _with((292, 428, 1071, 1104), "إعادة التوليد", frames=range(1, 28, 3))
+    assert _screen_h(reads) == []
+
+
+def test_a_menu_that_flashes_past_is_left_alone():
+    """"أسلوب الذكاء" was there under a second while the menu scrolled."""
+    reads = _with((307, 412, 1228, 1256), "أسلوب الذكاء", frames=range(1, 10, 3))
+    assert _screen_h(reads) == []
+
+
+def test_small_text_that_stays_is_still_translated():
+    """The Hindi body copy was as small, but stayed 4.7s."""
+    reads = _with((65, 375, 164, 196), "आपके बच्े की हड़याँ अभी भी",
+                  frames=range(1, 49, 3))
+    assert _texts(_screen_h(reads)) == ["आपके बच्े की हड़याँ अभी भी"]
+
+
+def test_big_text_needs_only_a_second():
+    reads = _with(HEADLINE, "गर्भाव्था को प्रबधित करे", frames=range(1, 14, 3))  # 1.2s
+    assert _texts(_screen_h(reads)) == ["गर्भाव्था को प्रबधित करे"]
+
+
+# -- lines stacked into one paragraph ---------------------------------------
+
+
+def _lines(rows, frames=range(1, 47, 3)):
+    """Reads of whole lines: (box, text) each, in every frame."""
+    return _words(rows, frames)
+
+
+def test_lines_far_apart_are_two_blocks():
+    """A headline at the top and a caption at the bottom are not one text."""
+    groups = _screen_h(_lines([((65, 375, 164, 196), "आपके बच्े की हड़याँ"),
+                               ((65, 375, 600, 632), "डाउनलोड करें अभी")]))
+    assert len(groups) == 2
+
+
+def test_side_by_side_columns_are_two_blocks():
+    groups = _screen_h(_lines([((20, 300, 164, 196), "आपके बच्े की हड़याँ"),
+                               ((420, 700, 200, 232), "डाउनलोड करें अभी")]))
+    assert len(groups) == 2
+
+
+def test_a_heading_much_bigger_than_the_lines_under_it_stays_apart():
+    groups = _screen_h(_lines([((65, 600, 60, 160), "बड़ा शीर्षक यहाँ"),
+                               ((65, 375, 164, 196), "आपके बच्े की हड़याँ")]))
+    assert len(groups) == 2
+
+
+def test_a_single_line_is_a_paragraph_of_one():
+    groups = _screen_h(_lines([((65, 375, 164, 196), "आपके बच्े की हड़याँ")]))
+    assert groups[0]["lines"] == 1
+    assert groups[0]["line_height"] == 32

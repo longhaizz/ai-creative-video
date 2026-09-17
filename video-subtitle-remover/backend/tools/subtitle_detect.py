@@ -15,6 +15,15 @@ from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
 from backend.tools.inpaint_tools import is_frame_number_in_ab_sections
 
+# PATCH (dub server). How sure the detector must be about a whole text box
+# when the job also translates the text on the picture. The 0.80 used for
+# subtitles alone was chosen to keep logos and artwork text OUT, which is
+# exactly the text translating wants IN. What gets painted over does not
+# change with it: with a speech file, only boxes on the subtitle line are.
+# ponytail: Paddle's own default; lower it if text is still missed
+SCREEN_BOX_THRESH = 0.6
+
+
 class SubtitleDetect:
     """
     文本框检测类，用于检测视频帧中是否存在文本框
@@ -82,7 +91,7 @@ class SubtitleDetect:
             model_dir=model_config.DET_MODEL_DIR,
             device="gpu" if hardware_accelerator.has_cuda() else "cpu",
             enable_hpi=False,
-            box_thresh=0.80,
+            box_thresh=SCREEN_BOX_THRESH if self.scan_all else 0.80,
             thresh=0.45,
         )
 

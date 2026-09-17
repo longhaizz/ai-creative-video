@@ -91,10 +91,12 @@ LINGER_SECONDS = 1.0
 MAX_BAND_LINES = 3
 
 # How sure OCR must be before a read is worth translating and covering with
-# a box of its own. On one ad the real lines scored 0.93-0.97 while the junk
-# ("|", "√", "") scored 0.00-0.43.
-# ponytail: one number from one video; raise it if junk still gets through
-MIN_SCREEN_OCR = 0.6
+# a box of its own. Junk scored 0.00-0.43 on two videos ("|", "√", ""); real
+# Hindi words read with a slip still scored 0.61-0.79 ("चर्हली", "होगाd",
+# "यहा"), and 0.6 lost some of them. Reads below this are dropped before
+# lines are built, so a bad read cannot glue itself into a line.
+# ponytail: lowered to 0.5 on request; raise it again if junk gets through
+MIN_SCREEN_OCR = 0.5
 # A floor on how tall a piece of text has to be before it is worth reading.
 # It only keeps out the very smallest marks; it does NOT tell advertising
 # copy from the chrome of an app store, and it never will. On one Hindi
@@ -119,6 +121,17 @@ LINE_SHARED_TIME = 0.5      # share of the shorter one's time on screen together
 # How much of the smaller box must lie inside the other for two reads to be
 # one piece of text. Words side by side on a line share a pixel or two.
 COVER_SHARE = 0.5
+# How long a piece of text must stay on screen before it is translated.
+MIN_SCREEN_SECONDS = 1.0
+# Text shorter than this share of the frame is phone-screen size, and must
+# stay longer: SMALL_TEXT_MIN_SECONDS. See _stayed_on_screen.
+# ponytail: 3s split one phone recording (<=2.6s) from body copy (4.7s)
+SMALL_TEXT_SHARE = 0.035
+SMALL_TEXT_MIN_SECONDS = 3.0
+# When stacked lines are one paragraph: no further apart than a line is
+# tall, and sharing most of the narrower line's width.
+PARAGRAPH_GAP = 1.0
+PARAGRAPH_SHARED_WIDTH = 0.5
 
 # The log shows one line per piece of text while it stays on screen. Reads
 # of the same text this close in place and time are one line.
@@ -435,16 +448,18 @@ def screen_text(reads, cues, fps, erase, bands, frame_height=0):
             continue
         words.append(g)
     lines = _join_into_lines(_join_covering(words))
-    return [line for line in lines if _worth_translating(line, bands)]
+    lines = [line for line in lines
+             if _worth_translating(line, bands, frame_height)]
+    return _join_into_paragraphs(lines)
 
 
-def _worth_translating(line, bands):
+def _worth_translating(line, bands, frame_height=0):
     """The checks that only mean something once the words are a line."""
     if len(_letters(line["text"])) < MIN_CHARS:
         return False
     if _near_the_band(line["box"], bands.get(line["frame"]) if bands else None):
         return False
-    return _stayed_on_screen(line)
+    return _stayed_on_screen(line, frame_height)
 
 
 def _join_into_lines(groups):
@@ -482,17 +497,83 @@ def _line_of(parts):
     sentence's time and joined the two.
     """
     parts = sorted(parts, key=lambda p: p["box"][0])
+    readable = _readable_parts(parts)
+    # One time per spot, not per read: a spot OCR read five ways, once each,
+    # would otherwise outvote the spot's own span and shorten the line.
+    spots = [[p for p in parts if _covers(p["box"], r["box"])] for r in readable]
     return {
         "parts": parts,
-        "text": " ".join(p["text"] for p in _readable_parts(parts)),
+        "text": " ".join(p["text"] for p in readable),
         "box": (min(p["box"][0] for p in parts), max(p["box"][1] for p in parts),
                 min(p["box"][2] for p in parts), max(p["box"][3] for p in parts)),
-        "first": statistics.median(p["first"] for p in parts),
-        "last": statistics.median(p["last"] for p in parts),
+        "first": statistics.median(min(p["first"] for p in spot) for spot in spots),
+        "last": statistics.median(max(p["last"] for p in spot) for spot in spots),
         "ocr": min(p["ocr"] for p in parts),
         "match": max(p["match"] for p in parts),
         "frame": min(parts, key=lambda p: p["first"])["frame"],
     }
+
+
+def _join_into_paragraphs(lines):
+    """Put lines stacked into one block back together as one paragraph.
+
+    A paragraph sent line by line comes back as fragments -- "Your baby
+    its breathing" -- because the sentence runs across the lines. Joined,
+    it is translated as one sentence and drawn as one box over the block.
+
+    Lines belong together when they were on screen at the same time, are
+    about as tall, sit one right under another, and share most of their
+    width. On a Hindi video the lines of a paragraph sat 1 to 7 pixels
+    apart at about 30 pixels tall.
+    """
+    # ponytail: pairs of paragraphs until nothing joins, like _join_into_lines
+    blocks = [_paragraph_of([line]) for line in lines]
+    i = 0
+    while i < len(blocks):
+        j = i + 1
+        while j < len(blocks):
+            if (_stacked(blocks[i], blocks[j])
+                    and _share_time(blocks[i], blocks[j])):
+                blocks[i] = _paragraph_of(blocks[i]["parts"] + blocks.pop(j)["parts"])
+                j = i + 1
+            else:
+                j += 1
+        i += 1
+    return sorted(blocks, key=lambda b: (b["first"], b["box"][2], b["box"][0]))
+
+
+def _paragraph_of(lines):
+    """One paragraph made of these lines, read top to bottom."""
+    lines = sorted(lines, key=lambda l: l["box"][2])
+    return {
+        "parts": lines,
+        "text": " ".join(l["text"] for l in lines),
+        "box": (min(l["box"][0] for l in lines), max(l["box"][1] for l in lines),
+                min(l["box"][2] for l in lines), max(l["box"][3] for l in lines)),
+        "first": statistics.median(l["first"] for l in lines),
+        "last": statistics.median(l["last"] for l in lines),
+        "ocr": min(l["ocr"] for l in lines),
+        "match": max(l["match"] for l in lines),
+        "frame": min(lines, key=lambda l: l["first"])["frame"],
+        # The size of the type, which the box of a whole block no longer says.
+        "line_height": statistics.median(l["box"][3] - l["box"][2] for l in lines),
+        "lines": len(lines),
+    }
+
+
+def _stacked(a, b):
+    """Does one of these blocks sit right under the other, in the same column?"""
+    axmin, axmax, aymin, aymax = a["box"]
+    bxmin, bxmax, bymin, bymax = b["box"]
+    ha, hb = a["line_height"], b["line_height"]
+    if min(ha, hb) <= 0 or max(ha, hb) > LINE_HEIGHT_RATIO * min(ha, hb):
+        return False
+    gap = max(aymin, bymin) - min(aymax, bymax)    # below zero when they overlap
+    if gap > PARAGRAPH_GAP * max(ha, hb):
+        return False
+    shared = min(axmax, bxmax) - max(axmin, bxmin)
+    narrower = min(axmax - axmin, bxmax - bxmin)
+    return narrower > 0 and shared >= PARAGRAPH_SHARED_WIDTH * narrower
 
 
 def _readable_parts(parts):
@@ -563,15 +644,23 @@ def _worth_reading(box, frame_height):
     return (ymax - ymin) >= MIN_SCREEN_HEIGHT_SHARE * frame_height
 
 
-def _stayed_on_screen(group):
+def _stayed_on_screen(group, frame_height=0):
     """Was this text there long enough to be worth covering over?
 
-    OCR looks at eight frames a second, so a piece read in a single one was
-    on screen for about a tenth of a second: a row caught mid-scroll, or a
-    frame of a transition. Covering that with a white box draws the eye to
-    a flash that nobody was reading.
+    A piece gone in a moment is a row caught mid-scroll or a frame of a
+    transition; covering it with a white box draws the eye to a flash that
+    nobody was reading.
+
+    Small text has to stay longer. The buttons and labels of a phone
+    screen recording ("Save", "Regenerate", "World Cup") were 26 to 36
+    pixels tall and on screen 0.1 to 2.6s. Height alone cannot drop them:
+    a paragraph of body copy on another video was 29 to 40 pixels tall.
+    That paragraph stayed 4.7s, though, and the phone screen never did.
     """
-    return group["last"] > group["first"]
+    seen = group["last"] - group["first"]
+    _, _, ymin, ymax = group["box"]
+    small = frame_height > 0 and ymax - ymin < SMALL_TEXT_SHARE * frame_height
+    return seen >= (SMALL_TEXT_MIN_SECONDS if small else MIN_SCREEN_SECONDS)
 
 def _near_the_band(box, band):
     """Does this box touch the band the subtitles sit on?
