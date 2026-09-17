@@ -173,7 +173,8 @@ class SubtitleDetect:
         if bands is None:
             found = speech_evidence(reads, self.speech["cues"], self.fps)
             log(f"Speech filter: {len(found['matched'])} frames match the speech, "
-                f"{found['strong']} of them word for word, and text was on screen "
+                f"{found['strong']} of them word for word ({found['strong_cues']} "
+                f"different lines), and text was on screen "
                 f"for {found['cue_share']:.0%} of what was said -- "
                 f"not a subtitle track, nothing removed")
             return {}
