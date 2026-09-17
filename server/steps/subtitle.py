@@ -396,8 +396,8 @@ def burn(
         )
         if hook is not None:
             ctx.log(f"Hook: {hook.get('text', '')[:60]}")
-        for piece in screen or []:
-            ctx.log(describe_screen_piece(piece, width, height))
+        for piece, span in zip(screen or [], screen_spans(screen or [])):
+            ctx.log(describe_screen_piece(piece, width, height, span))
 
     with tempfile.TemporaryDirectory() as work:
         ass = write_ass(
@@ -446,130 +446,99 @@ SCREEN_LINE_SPACING = 1.2
 # box by that made it half again as tall as the text it covered.
 # ponytail: one number for every font; check it against a real video
 SCREEN_INK_SHARE = 0.75
-# The white box is drawn tight around the text: no padding. It is there to
-# cover the old words and carry the new ones, nothing more, and every pixel
-# of it is a pixel of the advert that the viewer cannot see.
-SCREEN_PADDING = 0
-# How far the text may be shrunk to fit the box the old text sat in, as a
-# share of the size that text was drawn at. English is about twice as wide
-# as Devanagari at the same height, so without shrinking, a headline spilled
-# onto a second line and its white box swallowed the line above it. With no
-# floor the other way is just as bad: a two word badge whose translation
-# runs to six words would shrink until nobody could read it.
-# ponytail: 0.6 keeps a 1280 tall frame readable; measure it on a phone
-SCREEN_MIN_SHRINK = 0.6
-# Keep the white box off the very edge of the picture.
-SCREEN_MARGIN = 8
-# OCR only looks at some frames, so the text was already there a moment
-# before it was first read, and stayed a moment after the last one.
-SCREEN_TIME_PAD = 0.25
-# A piece read in a single frame would otherwise be drawn for no time at all.
-SCREEN_MIN_SECONDS = 0.5
+# The white box is always the box OCR read the old text in: never bigger,
+# never smaller. The translation is made to fit it, not the other way round.
+# How far the text may shrink, as a share of the size the old text was drawn
+# at, while keeping as many lines as the old text had. Past this, one more
+# line gives bigger letters than shrinking further.
+SCREEN_MIN_SHRINK = 0.5
+# The smallest size anyone can still read. Text that does not fit even at
+# this size spills out of the box; the box itself stays as it is.
+SCREEN_MIN_SIZE = 12
+# OCR only looks at every few frames, so the text was already there up to
+# one step before it was first read, and stayed up to one step after the
+# last. The OCR tool writes its step with each piece; this is for files
+# written before it did.
+SCREEN_READ_STEP = 0.1
 # Which layer each half of a piece is drawn on. The white rectangle has to
 # sit under the text, and ASS draws a higher layer over a lower one.
 SCREEN_RECT_LAYER = 0
 SCREEN_TEXT_LAYER = 1
 
 
-def _text_width(text: str, size: int) -> float:
-    """Roughly how wide this text is, at this font size."""
-    return len(text) * CHAR_WIDTH_EM * max(size, 1)
-
-
 def screen_layout(piece: dict, width: int, height: int) -> tuple:
     """Where one piece of translated screen text goes and how big it is.
 
-    Returns (lines, size, (x0, y0, box_w, box_h)) in pixels.
+    Returns (lines, size, (x0, y0, box_w, box_h)) in pixels. The box is
+    the box OCR read the old text in, exactly.
 
-    The size comes from the box OCR read the old text in, so a headline
-    stays a headline and a badge stays a badge. When the translation is
-    wider than that box, the white box grows sideways around the middle of
-    the old one rather than the text shrinking: the old text was one line
-    at that size on purpose. Only when there is no room left in the frame
-    does it wrap.
+    The size starts from one line of the old text, so a headline stays a
+    headline. The translation keeps as many lines as the old text had and
+    shrinks until it fits the box. Only when that would take it below
+    SCREEN_MIN_SHRINK is it broken into more lines, and then into however
+    many give the biggest letters.
     """
     xmin, xmax, ymin, ymax = piece["box"]
-    old_w, old_h = max(xmax - xmin, 1), max(ymax - ymin, 1)
+    box_w, box_h = max(xmax - xmin, 1), max(ymax - ymin, 1)
     text = (piece.get("text") or "").strip()
-    if (piece.get("lines") or 1) > 1:
-        return _paragraph_layout(piece, text, width, height)
-    size = resolve_font_size(int(round(old_h * SCREEN_SIZE_RATIO)), height)
-
-    # Shrink to fit the footprint the old text had, rather than spread over
-    # the picture around it. Only down to SCREEN_MIN_SHRINK: past that the
-    # text stops being the design element it replaces.
-    if _text_width(text, size) > old_w:
-        fits = old_w / (CHAR_WIDTH_EM * max(len(text), 1))
-        size = resolve_font_size(
-            int(round(max(fits, size * SCREEN_MIN_SHRINK))), height)
-
-    room = max(width - 2 * SCREEN_MARGIN, 1)
-    lines = [text]
-    if _text_width(text, size) + 2 * SCREEN_PADDING > room:
-        # Wrapped to the whole room, not to the 80% a subtitle wraps to:
-        # every line that is not needed makes the box taller.
-        fits = max(1, int(room / (CHAR_WIDTH_EM * max(size, 1))))
-        lines = wrap_text_lines(text, fits) or [text]
-
-    text_w = max(_text_width(line, size) for line in lines)
-    box_w = min(max(old_w, int(round(text_w)) + 2 * SCREEN_PADDING), room)
-    text_h = _block_height(len(lines), size)
-    box_h = min(max(old_h, text_h + 2 * SCREEN_PADDING), height)
-
-    x0 = _keep_inside((xmin + xmax) // 2 - box_w // 2, box_w, width)
-    y0 = _keep_inside((ymin + ymax) // 2 - box_h // 2, box_h, height)
-    return lines, size, (x0, y0, box_w, box_h)
-
-
-def _paragraph_layout(piece: dict, text: str, width: int, height: int) -> tuple:
-    """Lay a translated paragraph out over the block of lines it replaces.
-
-    The size comes from one line of the old text, not from the block, which
-    is several lines tall. The translation is wrapped to the block's width
-    and shrunk, down to SCREEN_MIN_SHRINK, until it fits the block's height.
-    If it still does not fit, the box grows downwards and sideways never:
-    the block is a column, and what sits next to it belongs to the advert.
-    """
-    xmin, xmax, ymin, ymax = piece["box"]
-    old_w, old_h = max(xmax - xmin, 1), max(ymax - ymin, 1)
-    line_h = piece.get("line_height") or old_h / piece["lines"]
+    rows = max(int(piece.get("lines") or 1), 1)
+    line_h = piece.get("line_height") or box_h / rows
     start = resolve_font_size(int(round(line_h * SCREEN_SIZE_RATIO)), height)
-    floor = resolve_font_size(int(round(start * SCREEN_MIN_SHRINK)), height)
-    size, lines = start, [text]
-    for size in range(start, floor - 1, -1):
-        lines = _wrap_to(text, old_w, size)
-        if _block_height(len(lines), size) <= old_h:
+
+    size, lines = _fit(text, rows, box_w, box_h, start)
+    if size < start * SCREEN_MIN_SHRINK:
+        # ponytail: tries every line count up to one word a line; ads are short
+        for more in range(rows + 1, len(text.split()) + 1):
+            size, lines = max((size, lines), _fit(text, more, box_w, box_h, start),
+                              key=lambda fit: fit[0])
+    return lines, max(size, SCREEN_MIN_SIZE), (xmin, ymin, box_w, box_h)
+
+
+def _fit(text: str, rows: int, box_w: int, box_h: int, most: int) -> tuple:
+    """The biggest size, up to most, at which text fits the box in rows lines.
+
+    Returns (size, lines). The lines are as even as the words allow, since
+    the widest line is the one that decides the size.
+    """
+    lines = [text]
+    for chars in range(-(-len(text) // rows), len(text) + 1):
+        lines = wrap_text_lines(text, chars) or [text]
+        if len(lines) <= rows:
             break
-
-    box_w = min(max(old_w, int(round(max(_text_width(l, size) for l in lines)))),
-                max(width - 2 * SCREEN_MARGIN, 1))
-    box_h = min(max(old_h, _block_height(len(lines), size)), height)
-    x0 = _keep_inside((xmin + xmax) // 2 - box_w // 2, box_w, width)
-    y0 = _keep_inside(ymin, box_h, height)
-    return lines, size, (x0, y0, box_w, box_h)
+    widest = max(len(line) for line in lines)
+    by_width = box_w / (CHAR_WIDTH_EM * max(widest, 1))
+    by_height = box_h / (SCREEN_INK_SHARE + (len(lines) - 1) * SCREEN_LINE_SPACING)
+    return int(min(most, by_width, by_height)), lines
 
 
-def _wrap_to(text: str, box_w: int, size: int) -> list[str]:
-    """Break text into lines that fit this width at this size."""
-    fits = max(1, int(box_w / (CHAR_WIDTH_EM * max(size, 1))))
-    return wrap_text_lines(text, fits) or [text]
+def screen_spans(pieces: list[dict]) -> list[tuple[float, float]]:
+    """When to show each piece, in the order the pieces came.
 
-
-def _block_height(lines: int, size: int) -> int:
-    """How tall these many lines of letters are: the letters, not the line boxes."""
-    return int(round(size * (SCREEN_INK_SHARE + (lines - 1) * SCREEN_LINE_SPACING)))
-
-
-def _keep_inside(start: int, length: int, whole: int) -> int:
-    """Slide a box of this length back inside the picture."""
-    return max(min(start, whole - length - SCREEN_MARGIN), SCREEN_MARGIN)
+    From one OCR step before the text was first read to one step after it
+    was last read. A piece is cut off when another one shows up over it:
+    the old text has gone by then, and two white boxes must never be drawn
+    on top of each other.
+    """
+    spans = [screen_times(piece) for piece in pieces]
+    out = []
+    for piece, (start, end) in zip(pieces, spans):
+        for other, (other_start, _end) in zip(pieces, spans):
+            if start < other_start < end and _overlap(piece["box"], other["box"]):
+                end = other_start
+        out.append((start, end))
+    return out
 
 
 def screen_times(piece: dict) -> tuple[float, float]:
-    """When to show one piece, padded for the frames OCR did not look at."""
-    start = max(float(piece.get("start") or 0.0) - SCREEN_TIME_PAD, 0.0)
-    end = float(piece.get("end") or 0.0) + SCREEN_TIME_PAD
-    return start, max(end, start + SCREEN_MIN_SECONDS)
+    """When to show one piece on its own, widened by one OCR step each way."""
+    step = float(piece.get("step") or SCREEN_READ_STEP)
+    start = max(float(piece.get("start") or 0.0) - step, 0.0)
+    return start, float(piece.get("end") or 0.0) + step
+
+
+def _overlap(a, b) -> bool:
+    """Do these two (xmin, xmax, ymin, ymax) boxes share any area?"""
+    return a[0] < b[1] and b[0] < a[1] and a[2] < b[3] and b[2] < a[3]
 
 
 def screen_dialogues(pieces: list[dict], width: int, height: int) -> list[str]:
@@ -581,12 +550,11 @@ def screen_dialogues(pieces: list[dict], width: int, height: int) -> list[str]:
     the original would leave the ends of the old text showing around it.
     """
     body = []
-    for piece in pieces:
+    for piece, (start, end) in zip(pieces, screen_spans(pieces)):
         text = (piece.get("text") or "").strip()
         if not text:
             continue
         lines, size, (x0, y0, box_w, box_h) = screen_layout(piece, width, height)
-        start, end = screen_times(piece)
         start, end = _ass_time(start), _ass_time(end)
         rect = (f"{{\\pos({x0},{y0})\\p1}}"
                 f"m 0 0 l {box_w} 0 l {box_w} {box_h} l 0 {box_h}"
@@ -616,7 +584,8 @@ def _screen_styles(pieces: list[dict] | None, font: str, size: int) -> str:
     )
 
 
-def describe_screen_piece(piece: dict, width: int, height: int) -> str:
+def describe_screen_piece(piece: dict, width: int, height: int,
+                          span: tuple[float, float] | None = None) -> str:
     """One log line saying where a piece of translated text will be drawn.
 
     It carries the box OCR read the old text in and the box that will be
@@ -628,7 +597,7 @@ def describe_screen_piece(piece: dict, width: int, height: int) -> str:
     if not text:
         return f"Screen text (nothing to draw) {piece.get('box')}"
     lines, size, (x0, y0, box_w, box_h) = screen_layout(piece, width, height)
-    start, end = screen_times(piece)
+    start, end = span or screen_times(piece)
     oxmin, oxmax, oymin, oymax = piece["box"]
     return (
         f"Screen text t={start:.2f}-{end:.2f}s "

@@ -711,3 +711,17 @@ def test_a_single_line_is_a_paragraph_of_one():
     groups = _screen_h(_lines([((65, 375, 164, 196), "आपके बच्े की हड़याँ")]))
     assert groups[0]["lines"] == 1
     assert groups[0]["line_height"] == 32
+
+
+def test_a_paragraph_is_drawn_for_as_long_as_any_of_it_is_seen():
+    """The middle of the lines' times joins lines; drawn by it, the top line
+    of this paragraph would show from under the translation for 2.4s."""
+    top = [w for w in PARAGRAPH if w[0][2] < 200]
+    reads = _words(PARAGRAPH, range(1, 47, 3))
+    for n, found in _words(top, range(49, 71, 3)).items():
+        reads[n] = found
+    groups = _screen_h(reads)
+    assert len(groups) == 1
+    assert groups[0]["show_first"] == 0.0
+    assert groups[0]["show_last"] == 6.9
+    assert groups[0]["last"] < groups[0]["show_last"]

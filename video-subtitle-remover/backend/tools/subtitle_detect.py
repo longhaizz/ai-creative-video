@@ -162,7 +162,11 @@ class SubtitleDetect:
         self.screen_text = screen_text(
             reads, self.speech["cues"], self.fps, erase, bands,
             frame_height=self.frame_height)
-        log(f"Screen text: {len(self.screen_text)} pieces to translate")
+        # How far apart two reads are, so the text can be drawn from one
+        # step before it was first read to one step after the last.
+        for piece in self.screen_text:
+            piece["step"] = self.SAMPLE_STEP / self.fps if self.fps > 0 else None
+        log(f"Screen text:{len(self.screen_text)} pieces to translate")
         if bands is None:
             found = speech_evidence(reads, self.speech["cues"], self.fps)
             log(f"Speech filter: {len(found['matched'])} frames match the speech, "
