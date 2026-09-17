@@ -221,10 +221,38 @@ def _said_at(read_text):
 
 
 def test_a_subtitle_read_word_for_word_needs_no_more_proof():
-    """16.mp4 read at 1.00, on screen for only part of what was said."""
-    reads = {n: [(SUB, CUES[0]["text"], 0.9)] for n in range(1, 30, 3)}
-    band = sm.subtitle_bands(reads, MANY_CUES, FPS)[1]
+    """16.mp4 read at 1.00, on screen for only part of what was said:
+    two lines of five here, too few for the share on its own."""
+    cues = [dict(c) for c in MANY_CUES]
+    cues[1]["text"] = "hôm nay trời đẹp quá nhỉ các bạn"
+    reads = {n: [(SUB, cues[0]["text"], 0.9)] for n in range(1, 20, 3)}
+    reads.update({n: [(SUB, cues[1]["text"], 0.9)] for n in range(22, 40, 3)})
+    band = sm.subtitle_bands(reads, cues, FPS)[1]
     assert sm.on_the_line(SUB, band)
+
+
+def test_a_headline_that_repeats_one_line_is_not_a_subtitle_track():
+    """A loan ad showed "Clear payment plan" as the voice said it, word for
+    word in 27 frames, one line of six. The whole band was painted out and
+    the new subtitles were put in the middle of the picture."""
+    cues = [
+        {"start": 0.0, "end": 1.34, "text": "Need to plan a loan?"},
+        {"start": 1.60, "end": 3.72, "text": "Just adjust your loan details"},
+        {"start": 3.72, "end": 6.40, "text": "and see a clear payment plan in seconds."},
+        {"start": 6.78, "end": 9.06, "text": "It helps you understand your payments"},
+        {"start": 9.06, "end": 10.90, "text": "and manage spending more easily."},
+        {"start": 11.36, "end": 13.98, "text": "Simple loan planning right in your pocket."},
+    ]
+    fps = 12.0
+    headline = (134, 371, 410, 442)
+    reads = {n: [(headline, "Clear payment plan", 1.0),
+                 ((140, 365, 210, 241), "Loan Calculator", 0.98)]
+             for n in range(62, 90)}                     # 5.08 - 7.33s
+    found = sm.speech_evidence(reads, cues, fps)
+    assert found["strong"] >= sm.MIN_MATCHED_FRAMES
+    assert found["strong_cues"] == 1
+    assert found["cue_share"] < sm.MIN_CUE_SHARE
+    assert sm.subtitle_bands(reads, cues, fps) is None
 
 
 def test_a_subtitle_in_another_language_finds_no_line():

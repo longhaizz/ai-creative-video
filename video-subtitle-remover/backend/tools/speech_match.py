@@ -56,14 +56,18 @@ TIME_PAD = 0.75
 # its real subtitles scored 0.44-0.67. MIN_MATCHED_LETTERS keeps chance out.
 MIN_SCORE = 0.4
 # Read this well, and the box says the subtitle on its own: OCR read the
-# subtitles of 16.mp4 at 1.00 all the way through.
+# subtitles of 16.mp4 at 1.00, on screen for only part of what was said.
 STRONG_SCORE = 0.85
+# ...as long as it is word for word for this many different lines. A
+# headline repeats one line: an English loan ad showed "Clear payment plan"
+# as the voice said it, read word for word in 27 frames, one line of six,
+# and the whole band it sat in was painted out.
+MIN_STRONG_CUES = 2
 # Without such a reading, the text has to follow the speech through the
-# video before it counts as a subtitle track. A Hindi ad narrated its own
-# app, so the app's own title and buttons scored 0.50-0.80 here and there,
-# and the whole screen was painted out. Real subtitles are on screen for
-# nearly every line that is said; that text was there for two lines of ten.
-MIN_CUE_SHARE = 0.6
+# video before it counts as a subtitle track. Real subtitles are there for
+# nearly every line; a Hindi ad that narrated its own app matched two lines
+# of ten, the loan ad one of six.
+MIN_CUE_SHARE = 0.5
 # Matches this many seconds apart, or closer, learn one line together.
 LOCAL_SECONDS = 2.0
 # Fewer frames than this that match the speech is too little to trust.
@@ -219,32 +223,40 @@ def speech_evidence(reads, cues, fps):
     """What says the text on screen is a subtitle track at all.
 
     Returns {"matched": frame -> the boxes whose text was said, "strong":
-    how many frames read one of them almost word for word, "cue_share":
-    the share of the lines Whisper heard that had matching text on screen}.
+    how many frames read one of them almost word for word, "strong_cues":
+    how many different lines those frames read, "cue_share": the share of
+    the lines Whisper heard that had matching text on screen}.
+
+    A line counts as matched by what it says, not by when: text on screen
+    through the end of one line and the start of the next matches only
+    the one whose words it carries.
 
     Text that is not a subtitle still matches now and then, above all when
     the voice reads out the app it is showing. Subtitles are either read
     word for word or they follow the speech through the whole video; app
     text does neither.
     """
-    matched, strong, covered = {}, 0, set()
+    matched, strong, covered, strong_cues = {}, 0, set(), set()
     for frame_no, items in reads.items():
         seconds = (frame_no - 1) / fps
-        spoken = spoken_at(cues, seconds)
-        if not spoken:
+        now = [i for i, cue in enumerate(cues)
+               if cue["start"] - TIME_PAD <= seconds <= cue["end"] + TIME_PAD]
+        if not now:
             continue
-        scores = [(box, contained(text, spoken)) for box, text, _score in items]
-        boxes = [box for box, score in scores if score >= MIN_SCORE]
-        if not boxes:
+        spoken = " ".join(cues[i]["text"] for i in now)
+        scores = [(box, text, contained(text, spoken)) for box, text, _score in items]
+        found = [(box, text) for box, text, score in scores if score >= MIN_SCORE]
+        if not found:
             continue
-        matched[frame_no] = boxes
-        if max(score for _box, score in scores) >= STRONG_SCORE:
+        matched[frame_no] = [box for box, _text in found]
+        if max(score for _box, _text, score in scores) >= STRONG_SCORE:
             strong += 1
-        covered.update(
-            i for i, cue in enumerate(cues)
-            if cue["start"] - TIME_PAD <= seconds <= cue["end"] + TIME_PAD
-        )
-    return {"matched": matched, "strong": strong,
+        for _box, text in found:
+            line = max(now, key=lambda i: contained(text, cues[i]["text"]))
+            covered.add(line)
+            if contained(text, spoken) >= STRONG_SCORE:
+                strong_cues.add(line)
+    return {"matched": matched, "strong": strong, "strong_cues": len(strong_cues),
             "cue_share": len(covered) / len(cues) if cues else 0.0}
 
 
@@ -266,7 +278,9 @@ def subtitle_bands(reads, cues, fps):
     matched = found["matched"]
     if len(matched) < MIN_MATCHED_FRAMES:
         return None
-    if found["strong"] < MIN_MATCHED_FRAMES and found["cue_share"] < MIN_CUE_SHARE:
+    word_for_word = (found["strong"] >= MIN_MATCHED_FRAMES
+                     and found["strong_cues"] >= MIN_STRONG_CUES)
+    if not word_for_word and found["cue_share"] < MIN_CUE_SHARE:
         return None
 
     # ponytail: compares every match with every other; fine for the few hundred sampled frames of an ad
