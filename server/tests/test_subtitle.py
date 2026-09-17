@@ -537,17 +537,22 @@ def test_schema_takes_a_colour_per_line():
 # -- the text that was printed on the picture -------------------------------
 
 from server.steps.subtitle import (          # noqa: E402
-    SCREEN_MARGIN,
+    SCREEN_MIN_SIZE,
     screen_dialogues,
     screen_layout,
+    screen_spans,
     screen_times,
 )
 
 W, H = 1080, 1920
 
 
-def _piece(text, box=(400, 680, 300, 360), start=1.0, end=3.0):
-    return {"text": text, "box": list(box), "start": start, "end": end}
+def _piece(text, box=(400, 680, 300, 360), start=1.0, end=3.0, step=0.1):
+    return {"text": text, "box": list(box), "start": start, "end": end, "step": step}
+
+
+def _is_box(box, old):
+    return box == (old[0], old[2], old[1] - old[0], old[3] - old[2])
 
 
 def test_the_size_comes_from_the_box_the_old_text_sat_in():
@@ -557,48 +562,63 @@ def test_the_size_comes_from_the_box_the_old_text_sat_in():
     assert big > small
 
 
-def test_the_white_box_never_shrinks_below_the_old_text():
-    """A shorter translation must still cover what was underneath it."""
+def test_the_white_box_is_the_old_box_for_a_short_translation():
     old = (400, 900, 300, 360)
-    _lines, _size, (x0, y0, box_w, box_h) = screen_layout(_piece("RẺ", old), W, H)
-    assert box_w >= old[1] - old[0]
-    assert box_h >= old[3] - old[2]
-    assert x0 <= old[0] and x0 + box_w >= old[1]
-    assert y0 <= old[2] and y0 + box_h >= old[3]
+    _lines, _size, box = screen_layout(_piece("RẺ", old), W, H)
+    assert _is_box(box, old)
 
 
-def test_a_longer_translation_widens_the_box_instead_of_wrapping():
+def test_a_longer_translation_shrinks_on_one_line_inside_the_old_box():
     old = (400, 680, 300, 360)
-    lines, _size, (_x0, _y0, box_w, _h) = screen_layout(
-        _piece("MIỄN PHÍ VẬN CHUYỂN", old), W, H)
-    assert lines == ["MIỄN PHÍ VẬN CHUYỂN"]
-    assert box_w > old[1] - old[0]
+    lines, size, box = screen_layout(_piece("MIỄN PHÍ", old), W, H)
+    assert lines == ["MIỄN PHÍ"]
+    assert _is_box(box, old)
+    assert size * 0.55 * len("MIỄN PHÍ") <= old[1] - old[0]
 
 
-def test_text_too_wide_for_the_frame_wraps():
-    lines, _size, (_x0, _y0, box_w, _h) = screen_layout(
-        _piece("GIAM GIA 50 PHAN TRAM CHO DON HANG DAU TIEN HOM NAY"), W, H)
-    assert len(lines) > 1
-    assert box_w <= W - 2 * SCREEN_MARGIN
+def test_text_that_would_shrink_too_far_takes_more_lines_in_the_same_box():
+    """'Your hub is ready!' read as one 119px tall box on a Hindi video:
+    the white box grew to 665x293 around it."""
+    old = (107, 605, 384, 503)
+    text = "Trung tâm của bạn đã sẵn sàng!"
+    lines, size, box = screen_layout(_piece(text, old), W, H)
+    assert _is_box(box, old)
+    assert len(lines) == 2
+    assert size * 0.55 * max(map(len, lines)) <= old[1] - old[0]
+    assert size * (0.75 + 1.2) <= old[3] - old[2]
 
 
-def test_the_box_is_slid_back_inside_the_picture():
-    """A box near the edge must not be drawn half off the frame."""
-    _lines, _size, (x0, y0, box_w, box_h) = screen_layout(
-        _piece("MIỄN PHÍ VẬN CHUYỂN NGAY", (900, 1070, 40, 100)), W, H)
-    assert x0 >= SCREEN_MARGIN
-    assert x0 + box_w <= W - SCREEN_MARGIN
-    assert y0 >= SCREEN_MARGIN and y0 + box_h <= H - SCREEN_MARGIN
+def test_a_translation_that_cannot_fit_keeps_the_box_and_a_readable_size():
+    old = (400, 440, 300, 310)
+    _lines, size, box = screen_layout(
+        _piece("GIẢM GIÁ NGAY HÔM NAY CHO BẠN", old), W, H)
+    assert _is_box(box, old)
+    assert size == SCREEN_MIN_SIZE
 
 
-def test_a_piece_read_in_one_frame_is_still_on_screen_long_enough():
-    start, end = screen_times(_piece("SALE", start=2.0, end=2.0))
-    assert end - start >= 0.5
+def test_the_text_is_drawn_from_one_read_before_to_one_read_after():
+    assert screen_times(_piece("SALE", start=2.0, end=4.0, step=0.1)) == (1.9, 4.1)
 
 
 def test_the_padding_never_starts_before_the_video():
     start, _end = screen_times(_piece("SALE", start=0.0, end=1.0))
     assert start == 0.0
+
+
+def test_a_file_with_no_step_still_pads_a_little():
+    piece = {"text": "SALE", "box": [0, 10, 0, 10], "start": 2.0, "end": 3.0}
+    start, end = screen_times(piece)
+    assert 1.8 <= start < 2.0 and 3.0 < end <= 3.2
+
+
+def test_a_piece_is_cut_when_another_shows_up_over_it():
+    first = _piece("A", (100, 300, 100, 200), start=1.0, end=5.0)
+    second = _piece("B", (150, 350, 150, 250), start=4.0, end=8.0)
+    elsewhere = _piece("C", (600, 800, 900, 1000), start=2.0, end=3.0)
+    spans = screen_spans([first, second, elsewhere])
+    assert spans[0] == (0.9, 3.9)
+    assert spans[1] == (3.9, 8.1)
+    assert spans[2] == (1.9, 3.1)
 
 
 def test_each_piece_draws_a_box_and_then_its_text():
@@ -610,39 +630,6 @@ def test_each_piece_draws_a_box_and_then_its_text():
 
 def test_a_piece_with_no_text_draws_nothing():
     assert screen_dialogues([_piece("  ")], W, H) == []
-
-
-def test_one_line_of_text_is_covered_no_more_than_it_used_to_be():
-    """0 padding: the box is the old text's box when the new text fits it.
-
-    Sized by the line box instead of the letters, "Try it now" over a 62px
-    tall piece of Hindi came out 113px tall -- half again as much of the
-    advert hidden as there was text to hide."""
-    old = (227, 488, 262, 324)
-    _lines, _size, (_x0, y0, _w, box_h) = screen_layout(_piece("Try it now", old), W, H)
-    assert box_h == old[3] - old[2]
-    assert y0 == old[2]
-
-
-def test_a_translation_shrinks_to_the_footprint_it_replaces():
-    """"Your" is wider than the Hindi it replaces at the same height, so the
-    type comes down until it sits in the same box."""
-    old = (299, 422, 53, 119)
-    _lines, size, (x0, y0, box_w, box_h) = screen_layout(_piece("Your", old), W, H)
-    assert (x0, y0, box_w, box_h) == (old[0], old[2],
-                                      old[1] - old[0], old[3] - old[2])
-    assert size < round((old[3] - old[2]) * 1.3), "smaller than the Hindi was"
-
-
-def test_the_type_is_not_shrunk_past_reading():
-    """A two word badge whose translation runs to six words must stay
-    readable; the box widens instead."""
-    old = (400, 680, 300, 360)
-    _lines, size, (_x0, _y0, box_w, box_h) = screen_layout(
-        _piece("GIẢM GIÁ NGAY HÔM NAY", old), W, H)
-    assert size >= round((old[3] - old[2]) * 1.3 * 0.6)
-    assert box_w > old[1] - old[0], "what will not shrink has to widen"
-    assert box_h == old[3] - old[2], "and it still covers no more height"
 
 
 # -- a whole paragraph drawn as one box -------------------------------------
@@ -661,19 +648,17 @@ def test_a_paragraph_is_sized_by_its_lines_not_its_block():
     assert size <= round(34 * 1.3)
 
 
-def test_a_paragraph_that_fits_stays_inside_the_block():
+def test_a_paragraph_stays_inside_the_block():
     text = "Your baby can now regulate its own breathing, digestion and body temperature."
-    lines, _size, (x0, y0, box_w, box_h) = screen_layout(_para(text), W, H)
+    lines, _size, box = screen_layout(_para(text), W, H)
     assert len(lines) > 1
-    assert (x0, y0, box_w, box_h) == (41, 151, 314, 156)
+    assert _is_box(box, PARA_BOX)
 
 
-def test_a_paragraph_too_long_to_fit_grows_down_not_sideways():
+def test_a_paragraph_too_long_to_fit_keeps_the_block():
     text = " ".join(["Your baby can now regulate its own breathing."] * 6)
-    _lines, size, (x0, y0, box_w, box_h) = screen_layout(_para(text), W, H)
-    assert size == round(round(34 * 1.3) * 0.6), "shrunk to the floor first"
-    assert (x0, y0, box_w) == (41, 151, 314)
-    assert box_h > 156
+    _lines, _size, box = screen_layout(_para(text), W, H)
+    assert _is_box(box, PARA_BOX)
 
 
 def test_a_one_line_piece_is_laid_out_as_before():

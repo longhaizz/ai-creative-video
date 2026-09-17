@@ -508,6 +508,10 @@ def _line_of(parts):
                 min(p["box"][2] for p in parts), max(p["box"][3] for p in parts)),
         "first": statistics.median(min(p["first"] for p in spot) for spot in spots),
         "last": statistics.median(max(p["last"] for p in spot) for spot in spots),
+        # When to draw the translation: the whole time any kept word was on
+        # screen. first and last stay the middle, for joining lines.
+        "show_first": min(p["first"] for spot in spots for p in spot),
+        "show_last": max(p["last"] for spot in spots for p in spot),
         "ocr": min(p["ocr"] for p in parts),
         "match": max(p["match"] for p in parts),
         "frame": min(parts, key=lambda p: p["first"])["frame"],
@@ -552,6 +556,8 @@ def _paragraph_of(lines):
                 min(l["box"][2] for l in lines), max(l["box"][3] for l in lines)),
         "first": statistics.median(l["first"] for l in lines),
         "last": statistics.median(l["last"] for l in lines),
+        "show_first": min(l["show_first"] for l in lines),
+        "show_last": max(l["show_last"] for l in lines),
         "ocr": min(l["ocr"] for l in lines),
         "match": max(l["match"] for l in lines),
         "frame": min(lines, key=lambda l: l["first"])["frame"],
