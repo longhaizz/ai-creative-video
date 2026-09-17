@@ -187,7 +187,7 @@ class SubtitleRemover:
                                       scan_all=self.scan_all_text)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self.dump_boxes(sub_list)
-        self.dump_screen_text(sub_detector.screen_text)
+        self.dump_screen_text(sub_detector.screen_text, sub_detector.screen_words)
         if len(sub_list) == 0:
             sys.exit(NO_SUBTITLE_EXIT_CODE)
         continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
@@ -291,7 +291,7 @@ class SubtitleRemover:
                                       scan_all=self.scan_all_text)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self.dump_boxes(sub_list)
-        self.dump_screen_text(sub_detector.screen_text)
+        self.dump_screen_text(sub_detector.screen_text, sub_detector.screen_words)
         if len(sub_list) == 0:
             sys.exit(NO_SUBTITLE_EXIT_CODE)
         continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
@@ -380,7 +380,7 @@ class SubtitleRemover:
         except Exception:
             traceback.print_exc()
 
-    def dump_screen_text(self, groups):
+    def dump_screen_text(self, groups, words=()):
         """Write the text that stays on screen, for the translate step.
 
         PATCH (dub server). Same rule as dump_boxes: the text was read to
@@ -402,6 +402,16 @@ class SubtitleRemover:
                      "line_height": g.get("line_height"), "lines": g.get("lines", 1)}
                     for g in groups
                 ], f, ensure_ascii=False)
+            # Beside it, the words those pieces were made of, one per read
+            # spot, to tell a wrong join from a wrong read.
+            words_path = os.path.join(os.path.dirname(self.dump_screen_text_path),
+                                      'screen_words.json')
+            with open(words_path, 'w', encoding='utf-8') as f:
+                json.dump([
+                    {"text": w["text"], "box": list(w["box"]),
+                     "first": w["first"], "last": w["last"], "ocr": w["ocr"]}
+                    for w in sorted(words, key=lambda w: (w["first"], w["box"][2], w["box"][0]))
+                ], f, ensure_ascii=False)
         except Exception:
             traceback.print_exc()
 
@@ -417,7 +427,7 @@ class SubtitleRemover:
                                       scan_all=self.scan_all_text)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self.dump_boxes(sub_list)
-        self.dump_screen_text(sub_detector.screen_text)
+        self.dump_screen_text(sub_detector.screen_text, sub_detector.screen_words)
         self.append_output('Detect only: the video was not changed')
         # __init__ opened a reader, a writer and a temp file for an output
         # this run never writes. Close them here: nothing further down the

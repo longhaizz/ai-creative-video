@@ -739,3 +739,24 @@ def test_a_word_read_alone_inside_its_line_is_not_a_second_piece():
     groups = _screen_h(reads)
     assert [g["text"] for g in groups] == [line[1]]
     assert groups[0]["show_first"] == 0.0
+
+
+def test_a_different_sentence_inside_a_bigger_box_is_kept():
+    """"शरीर के तापमान को नियंत्रित करने में सक्षम है।" lay inside the box of
+    a piece joined from other sentences, and was thrown away as a reread."""
+    big = ((44, 375, 192, 304), "की सखत होने की प्रक्रिया में हैं अंतर महसूस कर सकता")
+    small = ((42, 351, 231, 300), "शरीर के तापमान को नियंत्रित करने में सक्षम है।")
+    reads = _words([big], range(1, 47, 3))
+    for n in range(1, 47, 3):
+        reads[n] = reads[n] + [(small[0], small[1], 1.0)]
+    texts = [g["text"] for g in _screen_h(reads)]
+    assert small[1] in texts, texts
+
+
+def test_the_words_behind_the_pieces_can_be_kept():
+    words = []
+    reads = _words(PARAGRAPH[8:12], range(1, 47, 3))
+    bands = sm.subtitle_bands(reads, CUES, FPS)
+    sm.screen_text(reads, CUES, FPS, sm.boxes_to_erase(reads, bands, FPS), bands,
+                   frame_height=FRAME_H, words_out=words)
+    assert sorted(w["text"] for w in words) == sorted(t for _b, t in PARAGRAPH[8:12])
