@@ -349,8 +349,15 @@ class LipsyncPipeline(DiffusionPipeline):
 
         # 0. Define call parameters
         device = self._execution_device
-        mask_image = load_fixed_mask(height, mask_image_path)
-        self.image_processor = ImageProcessor(height, device="cuda", mask_image=mask_image)
+        # Build the face detector once and keep it. Making it again on every
+        # call opened a new InsightFace session each time, about 5s per shot.
+        _load = 0.0
+        cached = getattr(self, "image_processor", None)
+        if cached is None or cached.resolution != height:
+            _t0 = time.perf_counter()
+            mask_image = load_fixed_mask(height, mask_image_path)
+            self.image_processor = ImageProcessor(height, device="cuda", mask_image=mask_image)
+            _load = _since(_t0)
         self.set_progress_bar_config(desc=f"Sample frames: {num_frames}")
 
         # 1. Default height and width to unet
@@ -504,6 +511,7 @@ class LipsyncPipeline(DiffusionPipeline):
         # or the guidance change; the other three are the fixed cost.
         print(
             f"[lipsync] {num_inferences} chunks of {num_frames} frames | "
+            f"face model load {_load:.1f}s | "
             f"whisper {_audio:.1f}s | read {_read:.1f}s | faces {_faces:.1f}s | "
             f"unet {_unet:.1f}s | vae decode {_decode:.1f}s | "
             f"restore+write {_since(_s):.1f}s",
