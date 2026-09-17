@@ -725,3 +725,17 @@ def test_a_paragraph_is_drawn_for_as_long_as_any_of_it_is_seen():
     assert groups[0]["show_first"] == 0.0
     assert groups[0]["show_last"] == 6.9
     assert groups[0]["last"] < groups[0]["show_last"]
+
+
+def test_a_word_read_alone_inside_its_line_is_not_a_second_piece():
+    """"तुम्हारे यहाँ बच्चा होगा!" in a decorated font read as the whole line,
+    and in some frames as "बबच्चा" alone, too unlike to join. Drawn apart,
+    the word's box sat on the line's and cut it short."""
+    line = ((107, 605, 384, 503), "तुम्हारे यहाँ बच्चा होगा!")
+    word = ((351, 476, 425, 486), "बबच्चा")
+    reads = _words([line], range(1, 47, 3))
+    for n in range(1, 20, 3):
+        reads[n] = reads[n] + [(word[0], word[1], 1.0)]
+    groups = _screen_h(reads)
+    assert [g["text"] for g in groups] == [line[1]]
+    assert groups[0]["show_first"] == 0.0
