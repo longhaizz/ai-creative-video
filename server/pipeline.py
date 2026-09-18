@@ -366,7 +366,12 @@ def _speech_file(work: Path, cues: list[dict], meta: dict, ctx) -> Path:
                 f"{line['text']}")
     path = work / "speech_cues.json"
     path.write_text(
-        json.dumps({"language": language, "cues": lines}, ensure_ascii=False),
+        json.dumps({
+            "language": language,
+            "language_probability": meta.get("language_probability"),
+            "confidence": meta.get("confidence") or "",
+            "cues": lines,
+        }, ensure_ascii=False),
         encoding="utf-8",
     )
     return path

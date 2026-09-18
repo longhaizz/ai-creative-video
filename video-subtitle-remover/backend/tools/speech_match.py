@@ -48,6 +48,13 @@ REC_MODELS = {
     )},
 }
 
+# When Whisper only guessed the language, read Latin. A Spanish ad heard as
+# Korean at p=0.18 was sent to korean_PP-OCRv5_mobile_rec, which turned
+# "Depositarán" into "del pesalroy".
+LATIN_REC_MODEL = "latin_PP-OCRv5_mobile_rec"
+# Same floor as transcribe.asr_quality: below this, the language is a guess.
+LANGUAGE_GUESS_BELOW = 0.75
+
 # Seconds a subtitle may show before or after its words are said.
 TIME_PAD = 0.75
 # Share of the read text that must be found in the speech. Low, because the
@@ -178,9 +185,40 @@ def load_speech(path):
             for c in data["cues"]
             if str(c.get("text") or "").strip()
         ]
-        return {"language": str(data.get("language") or ""), "cues": cues, "error": ""}
+        speech = {"language": str(data.get("language") or ""), "cues": cues, "error": ""}
+        if "language_probability" in data and data["language_probability"] is not None:
+            speech["language_probability"] = float(data["language_probability"])
+        if data.get("confidence"):
+            speech["confidence"] = str(data["confidence"])
+        return speech
     except Exception as e:
         return {"language": "", "cues": [], "error": f"could not read {path}: {e}"}
+
+
+def _language_is_a_guess(speech):
+    """Did Whisper only guess the spoken language? See LATIN_REC_MODEL."""
+    if not speech:
+        return False
+    if (speech.get("confidence") or "") == "low":
+        return True
+    try:
+        probability = float(speech.get("language_probability"))
+    except (TypeError, ValueError):
+        return False
+    return 0 < probability < LANGUAGE_GUESS_BELOW
+
+
+def rec_model_for(speech):
+    """The Paddle rec model that can read this video, or None.
+
+    None means the filter cannot read the text, so nothing is removed.
+    A guessed language does not pick a script-specific model.
+    """
+    if not speech or speech.get("error"):
+        return None
+    if _language_is_a_guess(speech):
+        return LATIN_REC_MODEL
+    return REC_MODELS.get(speech.get("language") or "")
 
 
 def _letters(text):

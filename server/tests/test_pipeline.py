@@ -308,6 +308,31 @@ def test_text_already_in_the_target_language_is_left_on_the_picture(
     assert [p["text"] for p in screen] == ["[बबच्चा]"]
 
 
+def test_a_guessed_language_does_not_skip_latin_as_already_vietnamese(
+        monkeypatch, tmp_path):
+    """A Spanish ad was heard as Korean at p=0.18 (a YouTube menu).
+
+    Every Latin CTA then looked like Vietnamese already, and nothing was
+    drawn. The language is a guess, so the script check must not run.
+    """
+    seen = _fake_translate(monkeypatch)
+    _write_screen(tmp_path / "screen_text.json", [
+        {"text": "Depositarán en 3 minutos", "box": [50, 430, 325, 393],
+         "start": 0.3, "end": 1.0},
+        {"text": "$1.014.500", "box": [285, 439, 884, 921],
+         "start": 0.0, "end": 5.8},
+    ])
+
+    ctx = FakeContext(tmp_path, params(translate_screen_text=True, target_lang="VI"))
+    screen = pipeline._translated_screen_text(
+        tmp_path / "screen_text.json", ctx.params,
+        {"language": "ko", "language_probability": 0.18, "confidence": "low"},
+        1080, 1920, ctx)
+
+    assert seen["texts"] == ["Depositarán en 3 minutos"]
+    assert [p["text"] for p in screen] == ["[Depositarán en 3 minutos]"]
+
+
 def test_a_translation_that_comes_back_word_for_word_draws_nothing(
         monkeypatch, tmp_path):
     """Covering good words with the same words can only make it worse."""

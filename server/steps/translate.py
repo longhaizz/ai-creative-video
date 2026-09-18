@@ -1030,6 +1030,25 @@ def _scripts_of(code: str) -> set:
     return set(named) if isinstance(named, tuple) else {named}
 
 
+def _language_is_a_guess(asr_meta) -> bool:
+    """Did Whisper only guess the spoken language?
+
+    The script check below needs a real source alphabet. A Spanish ad was
+    heard as Korean at p=0.18 because a YouTube menu said "자막은 설정에서
+    선택하실 수 있습니다", and every Latin CTA was then skipped as already
+    Vietnamese. Same threshold as transcribe.asr_quality.
+    """
+    if not asr_meta:
+        return False
+    if (asr_meta.get("confidence") or "") == "low":
+        return True
+    try:
+        probability = float(asr_meta.get("language_probability"))
+    except (TypeError, ValueError):
+        return False
+    return 0 < probability < 0.75
+
+
 def already_in_target(text: str, target_lang: str, asr_meta=None) -> bool:
     """Is this piece of text already in the language we translate into?
 
@@ -1053,6 +1072,8 @@ def already_in_target(text: str, target_lang: str, asr_meta=None) -> bool:
     letters = [c for c in (text or "") if c.isalpha()]
     if not letters:
         return True
+    if _language_is_a_guess(asr_meta):
+        source = ""
     if _scripts_of(code) & _scripts_of(source):
         # One alphabet for both: nothing here can tell them apart.
         return False
