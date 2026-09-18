@@ -279,6 +279,20 @@ def test_numbers_and_names_do_not_count_as_another_language():
     assert lines_wrong_language(["Hãy thử Shatai miễn phí"], "vi") == []
 
 
+def test_a_latin_brand_name_in_an_arabic_line_is_fine():
+    """The bug: "BeFit" inside a good Arabic line stopped the whole job."""
+    from server.steps.translate import lines_wrong_language
+
+    assert lines_wrong_language(["قم بتحميل تطبيق BeFit وابدأ الآن."], "ar") == []
+    assert lines_wrong_language(["BeFit アプリをダウンロード"], "ja") == []
+
+
+def test_an_english_line_left_in_an_arabic_dub_is_caught():
+    from server.steps.translate import lines_wrong_language
+
+    assert lines_wrong_language(["Download the BeFit app now."], "ar") == [0]
+
+
 def test_drifting_into_vietnamese_is_still_caught():
     """The diacritic heuristic still does the job the script check cannot:
     English and Vietnamese are written in the same alphabet."""

@@ -253,11 +253,21 @@ def _lines_in_another_script(cues, expected_code: str) -> list:
     wanted = (wanted,) if isinstance(wanted, str) else wanted
     bad = []
     for index, text in enumerate(cues or []):
-        foreign = sum(
-            1 for c in (text or "")
-            if c.isalpha() and _script_of(c) not in wanted
-        )
-        if foreign > FOREIGN_LETTERS_ALLOWED:
+        native = latin = foreign = 0
+        for c in text or "":
+            if not c.isalpha():
+                continue
+            script = _script_of(c)
+            if script in wanted:
+                native += 1
+            elif script == "LATIN":
+                # Brand names like "BeFit" stay in Latin letters inside an
+                # Arabic or Japanese line. Only a line that is mostly Latin
+                # came back untranslated.
+                latin += 1
+            else:
+                foreign += 1
+        if foreign > FOREIGN_LETTERS_ALLOWED or latin > native:
             bad.append(index)
     return bad
 
