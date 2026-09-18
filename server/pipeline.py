@@ -121,6 +121,7 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             ctx=ctx,
             speech_cues=_speech_file(work, cues, meta, ctx),
             screen_text=screen_path,
+            **_screen_keep(params),
         )
     elif screen_path is not None:
         _read_screen_only(video, work, params, cues, meta, screen_path, ctx)
@@ -398,6 +399,18 @@ def _screen_text_path(work: Path, params) -> Path | None:
     return work / "screen_text.json"
 
 
+def _screen_keep(params) -> dict:
+    """How long a piece of on-screen text must stay before it is translated.
+
+    The client can lower both floors to 0 to keep flashes and phone-UI
+    labels too. The defaults match speech_match.MIN_SCREEN_SECONDS.
+    """
+    return {
+        "screen_text_min_seconds": params.screen_text_min_seconds,
+        "screen_text_small_min_seconds": params.screen_text_small_min_seconds,
+    }
+
+
 def _read_screen_only(video: Path, work: Path, params, cues, meta,
                       screen_path: Path, ctx) -> None:
     """Read the text on the picture without painting anything out.
@@ -414,6 +427,7 @@ def _read_screen_only(video: Path, work: Path, params, cues, meta,
         speech_cues=_speech_file(work, cues, meta, ctx),
         screen_text=screen_path,
         detect_only=True,
+        **_screen_keep(params),
     )
 
 
@@ -597,6 +611,7 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
             speech_cues=(_speech_file(work, cues, meta, ctx)
                          if models.whisper is not None else None),
             screen_text=screen_path,
+            **_screen_keep(params),
         )
     elif screen_path is not None:
         _read_screen_only(video, work, params, cues, meta, screen_path, ctx)

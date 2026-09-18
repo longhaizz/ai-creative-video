@@ -56,6 +56,16 @@ def parse_args():
         "--detect-only", action="store_true",
         help="Find and dump the text, then stop without touching the video"
     )
+    # PATCH (dub server). How long on-screen text must stay before it is
+    # translated. 0 keeps flashes. Small type uses the second floor.
+    parser.add_argument(
+        "--screen-text-min-seconds", type=float, default=1.0,
+        help="Seconds on-screen text must stay before it is translated"
+    )
+    parser.add_argument(
+        "--screen-text-small-min-seconds", type=float, default=3.0,
+        help="Seconds small on-screen text must stay before it is translated"
+    )
     args = parser.parse_args()
     args.inpaint_mode = InpaintMode[args.inpaint_mode.replace('-','_').upper()]
     if args.subtitle_area_coords is None:

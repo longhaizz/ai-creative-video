@@ -71,6 +71,11 @@ class DubParams(BaseModel):
     # written back where it was, under a box of its own. Independent of
     # remove_subtitle: with that off the video is only read, never painted.
     translate_screen_text: bool = False
+    # How long a piece must stay on screen before it is translated. 0 keeps
+    # flashes too. Small type (under 3.5% of the frame) uses the second
+    # floor, so a phone-UI label that blinks past is not covered over.
+    screen_text_min_seconds: float = Field(1.0, ge=0.0, le=30.0)
+    screen_text_small_min_seconds: float = Field(3.0, ge=0.0, le=30.0)
 
     # -- lip sync ----------------------------------------------------------
     lipsync: bool = False
