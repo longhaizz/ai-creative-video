@@ -60,6 +60,10 @@ class SubtitleRemover:
         self.scan_all_text = False
         # PATCH (dub server). Stop after reading the text, painting nothing.
         self.detect_only = False
+        # PATCH (dub server). How long a piece of on-screen text must stay
+        # before it is translated. The CLI fills these in.
+        self.screen_min_seconds = 1.0
+        self.screen_small_min_seconds = 3.0
         # PATCH (dub server). What Whisper heard, to tell the subtitles from
         # other text in the band, or None. See tools/speech_match.py.
         self.speech = None
@@ -183,8 +187,11 @@ class SubtitleRemover:
         pass
 
     def propainter_mode(self, tbar):
-        sub_detector = SubtitleDetect(self.video_path, self.sub_areas, self.speech,
-                                      scan_all=self.scan_all_text)
+        sub_detector = SubtitleDetect(
+            self.video_path, self.sub_areas, self.speech,
+            scan_all=self.scan_all_text,
+            screen_min_seconds=self.screen_min_seconds,
+            screen_small_min_seconds=self.screen_small_min_seconds)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self.dump_boxes(sub_list)
         self.dump_screen_text(sub_detector.screen_text, sub_detector.screen_words)
@@ -287,8 +294,11 @@ class SubtitleRemover:
         sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar)
 
     def video_inpaint(self, tbar, model):
-        sub_detector = SubtitleDetect(self.video_path, self.sub_areas, self.speech,
-                                      scan_all=self.scan_all_text)
+        sub_detector = SubtitleDetect(
+            self.video_path, self.sub_areas, self.speech,
+            scan_all=self.scan_all_text,
+            screen_min_seconds=self.screen_min_seconds,
+            screen_small_min_seconds=self.screen_small_min_seconds)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self.dump_boxes(sub_list)
         self.dump_screen_text(sub_detector.screen_text, sub_detector.screen_words)
@@ -423,8 +433,11 @@ class SubtitleRemover:
         the inpaint model altogether, so it runs in seconds and needs no
         output video.
         """
-        sub_detector = SubtitleDetect(self.video_path, self.sub_areas, self.speech,
-                                      scan_all=self.scan_all_text)
+        sub_detector = SubtitleDetect(
+            self.video_path, self.sub_areas, self.speech,
+            scan_all=self.scan_all_text,
+            screen_min_seconds=self.screen_min_seconds,
+            screen_small_min_seconds=self.screen_small_min_seconds)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self.dump_boxes(sub_list)
         self.dump_screen_text(sub_detector.screen_text, sub_detector.screen_words)
@@ -602,6 +615,8 @@ if __name__ == '__main__':
     sr.dump_screen_text_path = args.dump_screen_text
     sr.scan_all_text = args.scan_all_text
     sr.detect_only = args.detect_only
+    sr.screen_min_seconds = args.screen_text_min_seconds
+    sr.screen_small_min_seconds = args.screen_text_small_min_seconds
     from backend.tools.speech_match import load_speech
     sr.speech = load_speech(args.speech_cues)
     config.inpaintMode.value = args.inpaint_mode

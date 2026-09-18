@@ -696,6 +696,22 @@ def test_a_menu_that_flashes_past_is_left_alone():
     assert _screen_h(reads) == []
 
 
+def test_a_zero_floor_keeps_flashes_and_phone_buttons():
+    """The UI can ask to translate every piece, however briefly it showed."""
+    flash = _with((307, 412, 1228, 1256), "أسلوب الذكاء", frames=range(1, 10, 3))
+    button = _with((292, 428, 1071, 1104), "إعادة التوليد", frames=range(1, 28, 3))
+    bands = sm.subtitle_bands(flash, CUES, FPS)
+    erase = sm.boxes_to_erase(flash, bands, FPS)
+    kept = sm.screen_text(flash, CUES, FPS, erase, bands, frame_height=FRAME_H,
+                          min_seconds=0, small_min_seconds=0)
+    assert _texts(kept) == ["أسلوب الذكاء"]
+    bands = sm.subtitle_bands(button, CUES, FPS)
+    erase = sm.boxes_to_erase(button, bands, FPS)
+    kept = sm.screen_text(button, CUES, FPS, erase, bands, frame_height=FRAME_H,
+                          min_seconds=0, small_min_seconds=0)
+    assert _texts(kept) == ["إعادة التوليد"]
+
+
 def test_small_text_that_stays_is_still_translated():
     """The Hindi body copy was as small, but stayed 4.7s."""
     reads = _with((65, 375, 164, 196), "आपके बच्े की हड़याँ अभी भी",

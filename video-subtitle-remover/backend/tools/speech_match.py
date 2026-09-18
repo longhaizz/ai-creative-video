@@ -445,7 +445,9 @@ def text_groups(reads, cues, fps):
     return groups
 
 
-def screen_text(reads, cues, fps, erase, bands, frame_height=0, words_out=None):
+def screen_text(reads, cues, fps, erase, bands, frame_height=0, words_out=None,
+                min_seconds=MIN_SCREEN_SECONDS,
+                small_min_seconds=SMALL_TEXT_MIN_SECONDS):
     """The text that stays on screen, ready to be translated.
 
     Everything the video paints out is left out of this: that is the
@@ -479,15 +481,19 @@ def screen_text(reads, cues, fps, erase, bands, frame_height=0, words_out=None):
         words.append(g)
     if words_out is not None:
         words_out.extend(words)
-    return pieces_from_words(words, bands, frame_height)
+    return pieces_from_words(words, bands, frame_height,
+                             min_seconds, small_min_seconds)
 
 
-def pieces_from_words(words, bands=None, frame_height=0):
+def pieces_from_words(words, bands=None, frame_height=0,
+                      min_seconds=MIN_SCREEN_SECONDS,
+                      small_min_seconds=SMALL_TEXT_MIN_SECONDS):
     """Put the words OCR kept back into lines and paragraphs."""
     cuts = _text_cuts(words)
     lines = _join_into_lines(_join_covering(words, cuts), cuts)
     lines = [line for line in lines
-             if _worth_translating(line, bands, frame_height)]
+             if _worth_translating(line, bands, frame_height,
+                                   min_seconds, small_min_seconds)]
     return _drop_nested(_join_into_paragraphs(lines, cuts))
 
 
@@ -563,13 +569,15 @@ def _drop_nested(blocks):
     return kept
 
 
-def _worth_translating(line, bands, frame_height=0):
+def _worth_translating(line, bands, frame_height=0,
+                       min_seconds=MIN_SCREEN_SECONDS,
+                       small_min_seconds=SMALL_TEXT_MIN_SECONDS):
     """The checks that only mean something once the words are a line."""
     if len(_letters(line["text"])) < MIN_CHARS:
         return False
     if _near_the_band(line["box"], bands.get(line["frame"]) if bands else None):
         return False
-    return _stayed_on_screen(line, frame_height)
+    return _stayed_on_screen(line, frame_height, min_seconds, small_min_seconds)
 
 
 def _join_into_lines(groups, cuts=()):
@@ -764,7 +772,9 @@ def _worth_reading(box, frame_height):
     return (ymax - ymin) >= MIN_SCREEN_HEIGHT_SHARE * frame_height
 
 
-def _stayed_on_screen(group, frame_height=0):
+def _stayed_on_screen(group, frame_height=0,
+                      min_seconds=MIN_SCREEN_SECONDS,
+                      small_min_seconds=SMALL_TEXT_MIN_SECONDS):
     """Was this text there long enough to be worth covering over?
 
     A piece gone in a moment is a row caught mid-scroll or a frame of a
@@ -776,11 +786,13 @@ def _stayed_on_screen(group, frame_height=0):
     pixels tall and on screen 0.1 to 2.6s. Height alone cannot drop them:
     a paragraph of body copy on another video was 29 to 40 pixels tall.
     That paragraph stayed 4.7s, though, and the phone screen never did.
+    0 on either floor keeps that class of text regardless of how briefly
+    it showed, which is what the UI asks for when it wants every label.
     """
     seen = group["last"] - group["first"]
     _, _, ymin, ymax = group["box"]
     small = frame_height > 0 and ymax - ymin < SMALL_TEXT_SHARE * frame_height
-    return seen >= (SMALL_TEXT_MIN_SECONDS if small else MIN_SCREEN_SECONDS)
+    return seen >= (small_min_seconds if small else min_seconds)
 
 def _near_the_band(box, band):
     """Does this box touch the band the subtitles sit on?

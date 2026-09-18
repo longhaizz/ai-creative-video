@@ -263,6 +263,18 @@ def test_detect_only_is_only_sent_when_asked():
     assert "--detect-only" in looking
 
 
+def test_how_long_text_must_stay_reaches_the_tool():
+    command = build_command(
+        "in.mp4", "out.mp4", "sttn-det", (1, 2, 3, 4), "boxes.json",
+        screen_text="screen.json",
+        screen_text_min_seconds=0.0, screen_text_small_min_seconds=0.5)
+    assert command[command.index("--screen-text-min-seconds") + 1] == "0.0"
+    assert command[command.index("--screen-text-small-min-seconds") + 1] == "0.5"
+    plain = build_command("in.mp4", "out.mp4", "sttn-det", (1, 2, 3, 4),
+                          "boxes.json")
+    assert "--screen-text-min-seconds" not in plain
+
+
 def test_detect_only_hands_back_the_video_it_was_given(monkeypatch, tmp_path):
     """Nothing was painted, so there is no new file to hand on."""
     video = tmp_path / "video.mp4"

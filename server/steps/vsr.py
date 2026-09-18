@@ -111,6 +111,8 @@ def build_command(
     speech_cues: Path | None = None,
     screen_text: Path | None = None,
     detect_only: bool = False,
+    screen_text_min_seconds: float = 1.0,
+    screen_text_small_min_seconds: float = 3.0,
 ) -> list[str]:
     ymin, ymax, xmin, xmax = area
     command = [
@@ -127,7 +129,11 @@ def build_command(
     if screen_text is not None:
         # Text to translate sits anywhere in the frame, so the whole frame
         # is read. The area above still says what may be painted over.
-        command += ["--dump-screen-text", str(screen_text), "--scan-all-text"]
+        command += [
+            "--dump-screen-text", str(screen_text), "--scan-all-text",
+            "--screen-text-min-seconds", str(screen_text_min_seconds),
+            "--screen-text-small-min-seconds", str(screen_text_small_min_seconds),
+        ]
     if detect_only:
         command.append("--detect-only")
     return command
@@ -198,6 +204,8 @@ def remove_subtitles(
     speech_cues: Path | None = None,
     screen_text: Path | None = None,
     detect_only: bool = False,
+    screen_text_min_seconds: float = 1.0,
+    screen_text_small_min_seconds: float = 3.0,
 ) -> tuple[Path, float | None]:
     """Paint over the burned-in subtitles.
 
@@ -228,8 +236,10 @@ def remove_subtitles(
     width, height = probe_size(video)
     area = area_to_pixels(width, height, top, bottom, left, right)
     dump_boxes = out_path.with_name("sub_boxes.json")
-    command = build_command(video, out_path, mode, area, dump_boxes, speech_cues,
-                            screen_text, detect_only)
+    command = build_command(
+        video, out_path, mode, area, dump_boxes, speech_cues,
+        screen_text, detect_only,
+        screen_text_min_seconds, screen_text_small_min_seconds)
 
     if ctx is not None:
         ctx.log(

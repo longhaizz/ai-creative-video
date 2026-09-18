@@ -164,6 +164,12 @@ def test_a_backwards_scan_area_is_refused(client):
         assert post_dub(http, vsr_top=0.9, vsr_bottom=0.2).status_code == 422
 
 
+def test_screen_text_floors_cannot_be_negative(client):
+    with client() as http:
+        assert post_dub(http, screen_text_min_seconds="-1").status_code == 422
+        assert post_dub(http, screen_text_small_min_seconds="-0.1").status_code == 422
+
+
 def test_no_dub_still_does_the_picture_work(client):
     with client() as http:
         assert post_dub(

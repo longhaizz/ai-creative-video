@@ -47,6 +47,8 @@ def params(**changes):
         subtitle_position=None,
         hook_text="",
         translate_screen_text=False,
+        screen_text_min_seconds=1.0,
+        screen_text_small_min_seconds=3.0,
         target_lang="same",
     )
     base.update(changes)
@@ -92,10 +94,11 @@ def _stub_vsr(monkeypatch):
     seen = {}
 
     def fake_remove(video, out_path, *args, ctx=None, speech_cues=None,
-                    screen_text=None, detect_only=False):
+                    screen_text=None, detect_only=False, **kwargs):
         seen["speech_cues"] = speech_cues
         seen["screen_text"] = screen_text
         seen["detect_only"] = detect_only
+        seen.update(kwargs)
         return video, None
 
     monkeypatch.setattr(pipeline.vsr, "remove_subtitles", fake_remove)
@@ -193,11 +196,14 @@ def test_the_remover_is_told_where_to_write_the_screen_text(monkeypatch, tmp_pat
 
     ctx = FakeContext(tmp_path, params(
         remove_subtitle=True, burn_subtitle=False,
-        translate_screen_text=True, target_lang="VI"))
+        translate_screen_text=True, target_lang="VI",
+        screen_text_min_seconds=0.0, screen_text_small_min_seconds=0.0))
     pipeline._subtitle_only(ctx, pipeline.Models(None, None, object()))
 
     assert seen["screen_text"] == tmp_path / "screen_text.json"
     assert seen["detect_only"] is False
+    assert seen["screen_text_min_seconds"] == 0.0
+    assert seen["screen_text_small_min_seconds"] == 0.0
 
 
 def test_without_removing_the_subtitles_the_video_is_only_read(monkeypatch, tmp_path):

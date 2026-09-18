@@ -32,7 +32,8 @@ class SubtitleDetect:
     # 采样间隔，根据视频帧率在 _init_sample_step 中自适应设置
     SAMPLE_STEP = 3
 
-    def __init__(self, video_path, sub_areas=[], speech=None, scan_all=False):
+    def __init__(self, video_path, sub_areas=[], speech=None, scan_all=False,
+                 screen_min_seconds=1.0, screen_small_min_seconds=3.0):
         self.video_path = video_path
         self.sub_areas = sub_areas
         # PATCH (dub server). What Whisper heard, or None. The recognition
@@ -45,6 +46,10 @@ class SubtitleDetect:
         # said the subtitles are. What gets painted over is unchanged: the
         # boxes are still cut back to sub_areas in keep_subtitle_line.
         self.scan_all = scan_all
+        # PATCH (dub server). How long a piece must stay to be translated.
+        # The UI sends these; 0 keeps flashes and phone-UI labels too.
+        self.screen_min_seconds = screen_min_seconds
+        self.screen_small_min_seconds = screen_small_min_seconds
         # Filled by keep_subtitle_line: the text that stays on screen.
         self.screen_text = []
         # The words those pieces were made of, to trace a bad piece back.
@@ -164,7 +169,9 @@ class SubtitleDetect:
         self.screen_words = []
         self.screen_text = screen_text(
             reads, self.speech["cues"], self.fps, erase, bands,
-            frame_height=self.frame_height, words_out=self.screen_words)
+            frame_height=self.frame_height, words_out=self.screen_words,
+            min_seconds=self.screen_min_seconds,
+            small_min_seconds=self.screen_small_min_seconds)
         # How far apart two reads are, so the text can be drawn from one
         # step before it was first read to one step after the last.
         for piece in self.screen_text:
