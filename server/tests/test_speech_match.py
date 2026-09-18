@@ -390,6 +390,16 @@ def test_croatian_is_read_with_the_latin_model():
     assert sm.REC_MODELS["bs"] == "latin_PP-OCRv5_mobile_rec"
 
 
+def test_a_guessed_language_is_read_with_the_latin_model():
+    """A Spanish ad heard as Korean must not go to the Korean rec model."""
+    speech = {"language": "ko", "cues": CUES, "error": "",
+              "language_probability": 0.18, "confidence": "low"}
+    assert sm.rec_model_for(speech) == sm.LATIN_REC_MODEL
+    sure = {"language": "ko", "cues": CUES, "error": "",
+            "language_probability": 0.99}
+    assert sm.rec_model_for(sure) == "korean_PP-OCRv5_mobile_rec"
+
+
 def test_no_path_means_the_filter_was_not_asked_for():
     assert sm.load_speech(None) is None
 

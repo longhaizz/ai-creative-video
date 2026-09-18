@@ -8,8 +8,8 @@ from .model_config import ModelConfig
 from .hardware_accelerator import HardwareAccelerator
 from .common_tools import get_readable_path
 from .ocr import get_coordinates
-from .speech_match import (REC_MODELS, boxes_to_erase, read_log, screen_text,
-                           speech_evidence, subtitle_bands)
+from .speech_match import (boxes_to_erase, read_log, rec_model_for,
+                           screen_text, speech_evidence, subtitle_bands)
 from backend.config import config, tr
 from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
@@ -39,7 +39,7 @@ class SubtitleDetect:
         # PATCH (dub server). What Whisper heard, or None. The recognition
         # model is picked by its language; None turns the filter off.
         self.speech = speech
-        self.rec_model = REC_MODELS.get(speech["language"]) if speech else None
+        self.rec_model = rec_model_for(speech)
         # PATCH (dub server). Look for text in the whole frame, not only in
         # sub_areas. The text to translate sits anywhere -- a headline at the
         # top, a price in the middle -- while sub_areas is where the user
