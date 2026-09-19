@@ -282,6 +282,7 @@ def write_ass(
     position: float,
     hook: dict | None = None,
     screen: list[dict] | None = None,
+    screen_box: bool = True,
 ) -> Path:
     """Write the subtitle file. `position` is a share of the frame height.
 
@@ -309,13 +310,13 @@ def write_ass(
         f"{_ass_style('Box', font, size, BOX_BORDER, border)}\n"
         f"{_ass_style('Default', font, size, BOX_FILL, BOX_PADDING)}\n"
         f"{_hook_style(hook, height)}\n"
-        f"{_screen_styles(screen, font, size)}"
+        f"{_screen_styles(screen, font, size, boxed=screen_box)}"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
         "Effect, Text\n"
     )
 
-    body = screen_dialogues(screen or [], width, height)
+    body = screen_dialogues(screen or [], width, height, boxed=screen_box)
     if hook is not None:
         line = hook_dialogue(hook, width, height)
         if line:
@@ -379,6 +380,7 @@ def burn(
     position: float = 0.75,
     hook: dict | None = None,
     screen: list[dict] | None = None,
+    screen_box: bool = True,
     ctx=None,
 ) -> Path:
     """Draw the cues and the hook onto the video for good. Returns out_path."""
@@ -402,7 +404,7 @@ def burn(
     with tempfile.TemporaryDirectory() as work:
         ass = write_ass(
             cues, Path(work) / "burn.ass", width, height, font, size, position,
-            hook=hook, screen=screen,
+            hook=hook, screen=screen, screen_box=screen_box,
         )
         result = _burn_once([
             config.FFMPEG_BIN, "-y", "-loglevel", "error",
@@ -541,13 +543,18 @@ def _overlap(a, b) -> bool:
     return a[0] < b[1] and b[0] < a[1] and a[2] < b[3] and b[2] < a[3]
 
 
-def screen_dialogues(pieces: list[dict], width: int, height: int) -> list[str]:
+def screen_dialogues(pieces: list[dict], width: int, height: int,
+                     boxed: bool = True) -> list[str]:
     """The ASS lines that cover the old text and write the new one.
 
-    Two lines per piece: a filled rectangle, then the translation on top of
-    it. The rectangle is drawn rather than left to the style's own box,
-    because the style's box hugs the text, and a translation shorter than
-    the original would leave the ends of the old text showing around it.
+    Two lines per piece when boxed: a filled rectangle, then the
+    translation on top of it. The rectangle is drawn rather than left to
+    the style's own box, because the style's box hugs the text, and a
+    translation shorter than the original would leave the ends of the old
+    text showing around it.
+
+    Without a box the old letters were painted out already, so only the
+    translation is drawn, outlined like the hook.
     """
     body = []
     for piece, (start, end) in zip(pieces, screen_spans(pieces)):
@@ -556,32 +563,40 @@ def screen_dialogues(pieces: list[dict], width: int, height: int) -> list[str]:
             continue
         lines, size, (x0, y0, box_w, box_h) = screen_layout(piece, width, height)
         start, end = _ass_time(start), _ass_time(end)
-        rect = (f"{{\\pos({x0},{y0})\\p1}}"
-                f"m 0 0 l {box_w} 0 l {box_w} {box_h} l 0 {box_h}"
-                "{\\p0}")
-        body.append(f"Dialogue: {SCREEN_RECT_LAYER},{start},{end},ScreenBox,,0,0,0,,{rect}")
+        if boxed:
+            rect = (f"{{\\pos({x0},{y0})\\p1}}"
+                    f"m 0 0 l {box_w} 0 l {box_w} {box_h} l 0 {box_h}"
+                    "{\\p0}")
+            body.append(f"Dialogue: {SCREEN_RECT_LAYER},{start},{end},ScreenBox,,0,0,0,,{rect}")
         middle = f"{{\\pos({x0 + box_w // 2},{y0 + box_h // 2})\\fs{size}}}"
         body.append(f"Dialogue: {SCREEN_TEXT_LAYER},{start},{end},Screen,,0,0,0,,"
                     + middle + "\\N".join(lines))
     return body
 
 
-def _screen_styles(pieces: list[dict] | None, font: str, size: int) -> str:
-    """The two styles screen text needs, or nothing when there is none.
+def _screen_styles(pieces: list[dict] | None, font: str, size: int,
+                   boxed: bool = True) -> str:
+    """The styles screen text needs, or nothing when there is none.
 
     ScreenBox is only ever used for the drawn rectangle, so its text colour
     is the fill: a drawing takes its colour from PrimaryColour. Screen is
-    the same black text as the subtitles, with no box of its own, because
-    the rectangle underneath is already the box.
+    black text on that rectangle, or white text with a black outline when
+    the old letters were painted out and there is no box to sit on.
     """
     if not pieces:
         return ""
-    return (
-        _ass_style("ScreenBox", font, size, BOX_FILL, 0,
-                   text_colour=BOX_FILL, border_style=1, alignment=7) + "\n"
-        + _ass_style("Screen", font, size, BOX_FILL, 0,
-                     text_colour=TEXT_COLOUR, border_style=1) + "\n"
-    )
+    styles = ""
+    if boxed:
+        styles += _ass_style("ScreenBox", font, size, BOX_FILL, 0,
+                             text_colour=BOX_FILL, border_style=1, alignment=7) + "\n"
+        styles += _ass_style("Screen", font, size, BOX_FILL, 0,
+                             text_colour=TEXT_COLOUR, border_style=1) + "\n"
+    else:
+        styles += _ass_style(
+            "Screen", font, size, HOOK_OUTLINE, HOOK_OUTLINE_WIDTH,
+            text_colour=HOOK_COLOUR, border_style=1,
+        ) + "\n"
+    return styles
 
 
 def describe_screen_piece(piece: dict, width: int, height: int,

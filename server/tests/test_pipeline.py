@@ -49,6 +49,7 @@ def params(**changes):
         translate_screen_text=False,
         screen_text_min_seconds=1.0,
         screen_text_small_min_seconds=3.0,
+        screen_text_inpaint=False,
         target_lang="same",
     )
     base.update(changes)
@@ -91,10 +92,16 @@ def test_a_video_nobody_speaks_in_still_comes_back(monkeypatch, tmp_path):
 
 def _stub_vsr(monkeypatch):
     """Record what the subtitle remover was given, and paint nothing."""
-    seen = {}
+    seen = {"calls": []}
 
     def fake_remove(video, out_path, *args, ctx=None, speech_cues=None,
                     screen_text=None, detect_only=False, **kwargs):
+        seen["calls"].append({
+            "mode": args[0] if args else None,
+            "detect_only": detect_only,
+            "inpaint_boxes": kwargs.get("inpaint_boxes"),
+            "screen_text": screen_text,
+        })
         seen["speech_cues"] = speech_cues
         seen["screen_text"] = screen_text
         seen["detect_only"] = detect_only
@@ -406,3 +413,62 @@ def test_a_picture_that_cannot_be_made_leaves_the_text_alone(monkeypatch, tmp_pa
 
     assert seen["images"] is None
     assert [p["text"] for p in screen] == ["[बबच्चा]"]
+
+
+def test_inpaint_paints_out_old_letters_then_burns_without_a_box(
+        monkeypatch, tmp_path):
+    """LAMA first, then outlined text: the white rectangle would hide the
+    reconstructed background the inpaint pass just paid for."""
+    stub_reading(monkeypatch, [])
+    seen = _stub_vsr(monkeypatch)
+    monkeypatch.setattr(pipeline.vsr, "probe_timing", lambda video: (10.0, 50))
+    pieces = [{
+        "text": "GIẢM GIÁ", "box": [10, 100, 20, 50],
+        "start": 0.0, "end": 1.0, "step": 0.1,
+    }]
+    monkeypatch.setattr(
+        pipeline, "_translated_screen_text", lambda *a, **k: pieces)
+    burned = {}
+
+    def fake_burn(video, cues, out_path, width, height, **kw):
+        burned.update(kw)
+        out_path.write_bytes(b"subbed")
+        return out_path
+
+    monkeypatch.setattr(pipeline.subtitle, "burn", fake_burn)
+    (tmp_path / "video.mp4").write_bytes(b"v")
+    ctx = FakeContext(tmp_path, params(
+        translate_screen_text=True, screen_text_inpaint=True,
+        target_lang="VI", burn_subtitle=False))
+    pipeline._subtitle_only(ctx, pipeline.Models(None, None, object()))
+
+    inpaint = [call for call in seen["calls"] if call["inpaint_boxes"]]
+    assert len(inpaint) == 1
+    assert inpaint[0]["mode"] == "lama"
+    dump = json.loads(inpaint[0]["inpaint_boxes"].read_text(encoding="utf-8"))
+    assert dump, "timed boxes must reach the tool"
+    assert burned.get("screen_box") is False
+
+
+def test_without_inpaint_the_white_box_stays(monkeypatch, tmp_path):
+    stub_reading(monkeypatch, [])
+    seen = _stub_vsr(monkeypatch)
+    monkeypatch.setattr(
+        pipeline, "_translated_screen_text",
+        lambda *a, **k: [{"text": "SALE", "box": [1, 2, 3, 4],
+                          "start": 0.0, "end": 1.0, "step": 0.1}])
+    burned = {}
+
+    def fake_burn(video, cues, out_path, width, height, **kw):
+        burned.update(kw)
+        out_path.write_bytes(b"subbed")
+        return out_path
+
+    monkeypatch.setattr(pipeline.subtitle, "burn", fake_burn)
+    (tmp_path / "video.mp4").write_bytes(b"v")
+    ctx = FakeContext(tmp_path, params(
+        translate_screen_text=True, target_lang="VI", burn_subtitle=False))
+    pipeline._subtitle_only(ctx, pipeline.Models(None, None, object()))
+
+    assert not any(call["inpaint_boxes"] for call in seen["calls"])
+    assert burned.get("screen_box", True) is True

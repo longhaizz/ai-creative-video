@@ -16,6 +16,7 @@ from server.jobs import PipelineError
 from server.steps.vsr import (
     NO_SUBTITLE_EXIT_CODE,
     area_to_pixels,
+    boxes_from_pieces,
     build_command,
     remove_subtitles,
     subtitle_position,
@@ -318,3 +319,37 @@ def test_a_missing_or_broken_screen_text_file_is_no_text(tmp_path):
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
     assert read_screen_text(broken) == []
+
+
+def test_given_boxes_reach_the_tool(tmp_path):
+    command = build_command(
+        "in.mp4", "out.mp4", "lama", (0, 100, 0, 100), "boxes.json",
+        inpaint_boxes=tmp_path / "screen_inpaint.json")
+    assert command[command.index("--inpaint-mode") + 1] == "lama"
+    assert command[command.index("--inpaint-boxes") + 1].endswith(
+        "screen_inpaint.json")
+    plain = build_command("in.mp4", "out.mp4", "sttn-det", (1, 2, 3, 4),
+                          "boxes.json")
+    assert "--inpaint-boxes" not in plain
+
+
+def test_a_piece_covers_every_frame_it_will_be_drawn_on():
+    """Burn widens by one OCR step; inpaint has to cover that same span."""
+    pieces = [{"text": "SALE", "box": [10, 40, 20, 50],
+               "start": 1.0, "end": 2.0, "step": 0.1}]
+    boxes = boxes_from_pieces(pieces, fps=10, frame_count=100)
+    # 0.9s → frame 10, 2.1s → frame 22, 1-indexed.
+    assert min(boxes) == 10
+    assert max(boxes) == 22
+    assert boxes[10] == [(10, 40, 20, 50)]
+
+
+def test_two_pieces_on_the_same_frame_keep_both_boxes():
+    pieces = [
+        {"text": "A", "box": [0, 10, 0, 10], "start": 0.0, "end": 1.0, "step": 0},
+        {"text": "B", "box": [20, 30, 20, 30], "start": 0.0, "end": 1.0, "step": 0},
+    ]
+    boxes = boxes_from_pieces(pieces, fps=1, frame_count=2)
+    assert (0, 10, 0, 10) in boxes[1]
+    assert (20, 30, 20, 30) in boxes[1]
+

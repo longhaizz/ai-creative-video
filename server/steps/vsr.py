@@ -47,15 +47,15 @@ OUTLIER_SHARE = 0.10
 PROBE_TIMEOUT = 60.0
 
 
-def probe_size(video: Path) -> tuple[int, int]:
-    """Return (width, height) of the video."""
+def _probe_stream(video: Path, entries: str) -> dict:
+    """The first video stream's fields, or fail the way probe_size always did."""
     try:
         result = subprocess.run(
             [
                 config.FFPROBE_BIN,
                 "-v", "error",
                 "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
+                "-show_entries", f"stream={entries}",
                 "-of", "json",
                 str(video),
             ],
@@ -77,7 +77,71 @@ def probe_size(video: Path) -> tuple[int, int]:
     streams = json.loads(result.stdout).get("streams") or []
     if not streams:
         raise PipelineError("The file has no video stream", code="invalid_input")
-    return int(streams[0]["width"]), int(streams[0]["height"])
+    return streams[0]
+
+
+def probe_timing(video: Path) -> tuple[float, int]:
+    """Return (fps, frame_count) of the video.
+
+    Frame numbers in the subtitle tool are 1-indexed at this fps, so the
+    dump of boxes to paint out has to use the same clock.
+    """
+    stream = _probe_stream(video, "r_frame_rate,nb_frames,duration")
+    rate = stream.get("r_frame_rate") or "0/1"
+    try:
+        num, den = rate.split("/")
+        fps = float(num) / float(den) if float(den) else 0.0
+    except ValueError:
+        try:
+            fps = float(rate)
+        except ValueError:
+            fps = 0.0
+    try:
+        frames = int(stream["nb_frames"])
+    except (KeyError, TypeError, ValueError):
+        try:
+            frames = int(float(stream.get("duration") or 0) * fps + 0.5)
+        except (TypeError, ValueError):
+            frames = 0
+    return fps, max(frames, 0)
+
+
+def boxes_from_pieces(pieces: list[dict], fps: float, frame_count: int
+                      ) -> dict[int, list[tuple[int, int, int, int]]]:
+    """Turn timed OCR boxes into the {frame: boxes} dump the tool paints from.
+
+    Frames are 1-indexed, matching SubtitleDetect. Each piece covers the
+    same span subtitle.burn will draw on, so the letters come off before
+    the translation goes back.
+    """
+    from server.steps.subtitle import screen_spans
+
+    out: dict[int, list[tuple[int, int, int, int]]] = {}
+    if fps <= 0 or frame_count <= 0:
+        return out
+    for piece, (start, end) in zip(pieces, screen_spans(pieces)):
+        box = piece.get("box") or ()
+        if len(box) != 4:
+            continue
+        xmin, xmax, ymin, ymax = (int(round(float(v))) for v in box)
+        if xmax <= xmin or ymax <= ymin:
+            continue
+        first = max(1, int(start * fps) + 1)
+        last = min(frame_count, max(first, int(end * fps) + 1))
+        coords = (xmin, xmax, ymin, ymax)
+        for frame in range(first, last + 1):
+            found = out.setdefault(frame, [])
+            if coords not in found:
+                found.append(coords)
+    for frame in out:
+        out[frame] = sorted(out[frame])
+    return out
+
+
+def probe_size(video: Path) -> tuple[int, int]:
+    """Return (width, height) of the video."""
+    stream = _probe_stream(video, "width,height")
+    return int(stream["width"]), int(stream["height"])
 
 
 def area_to_pixels(
@@ -113,6 +177,7 @@ def build_command(
     detect_only: bool = False,
     screen_text_min_seconds: float = 1.0,
     screen_text_small_min_seconds: float = 3.0,
+    inpaint_boxes: Path | None = None,
 ) -> list[str]:
     ymin, ymax, xmin, xmax = area
     command = [
@@ -136,6 +201,10 @@ def build_command(
         ]
     if detect_only:
         command.append("--detect-only")
+    if inpaint_boxes is not None:
+        # Timed boxes the caller already has. The tool paints those out
+        # and skips finding any of its own.
+        command += ["--inpaint-boxes", str(inpaint_boxes)]
     return command
 
 
@@ -206,6 +275,7 @@ def remove_subtitles(
     detect_only: bool = False,
     screen_text_min_seconds: float = 1.0,
     screen_text_small_min_seconds: float = 3.0,
+    inpaint_boxes: Path | None = None,
 ) -> tuple[Path, float | None]:
     """Paint over the burned-in subtitles.
 
@@ -223,6 +293,10 @@ def remove_subtitles(
     stops after that reading, painting nothing, for a job that wants the
     text translated but the old subtitles left where they are. Both are read
     back with read_screen_text.
+
+    inpaint_boxes is a dump of {frame: boxes} the caller already has. The
+    tool paints those out and skips finding any of its own, for the
+    on-screen text pass that must not scan for subtitles a second time.
     """
     video = Path(video).resolve()
     out_path = Path(out_path).resolve()
@@ -232,6 +306,8 @@ def remove_subtitles(
         speech_cues = Path(speech_cues).resolve()
     if screen_text is not None:
         screen_text = Path(screen_text).resolve()
+    if inpaint_boxes is not None:
+        inpaint_boxes = Path(inpaint_boxes).resolve()
 
     width, height = probe_size(video)
     area = area_to_pixels(width, height, top, bottom, left, right)
@@ -239,13 +315,17 @@ def remove_subtitles(
     command = build_command(
         video, out_path, mode, area, dump_boxes, speech_cues,
         screen_text, detect_only,
-        screen_text_min_seconds, screen_text_small_min_seconds)
+        screen_text_min_seconds, screen_text_small_min_seconds,
+        inpaint_boxes)
 
     if ctx is not None:
-        ctx.log(
-            f"Removing subtitles ({mode}) in {width}x{height}, "
-            f"area y={area[0]}-{area[1]} x={area[2]}-{area[3]}"
-        )
+        if inpaint_boxes is not None:
+            ctx.log(f"Painting out given boxes ({mode}) in {width}x{height}")
+        else:
+            ctx.log(
+                f"Removing subtitles ({mode}) in {width}x{height}, "
+                f"area y={area[0]}-{area[1]} x={area[2]}-{area[3]}"
+            )
 
     process = subprocess.Popen(
         command,

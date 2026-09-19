@@ -25,6 +25,7 @@ confuse it.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -260,6 +261,7 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     hook = _hook(params, video_seconds)
     screen = _translated_screen_text(screen_path, params, meta, width, height, ctx,
                                      work=work)
+    result, screen_box = _inpaint_screen_text(result, work, params, screen, ctx)
     if params.burn_subtitle or hook is not None or screen:
         ctx.step("Burning in the subtitles")
         lines = _subtitle_cues(work, cues) if params.burn_subtitle else []
@@ -270,6 +272,7 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             position=_subtitle_position(params.subtitle_position, detected_position),
             hook=hook,
             screen=screen,
+            screen_box=screen_box,
             ctx=ctx,
         )
 
@@ -319,6 +322,38 @@ def _remove_hook(video: Path, work: Path, params, ctx) -> Path:
         ctx=ctx,
     )
     return cleaned
+
+
+def _inpaint_screen_text(video: Path, work: Path, params, screen: list[dict],
+                         ctx) -> tuple[Path, bool]:
+    """Paint the original on-screen letters out before the translation is drawn.
+
+    Returns (video, fill_white_box). The white box stays when this pass is
+    off or when the boxes could not be mapped onto frames: drawing outlined
+    text over letters that are still there would look worse than covering
+    them.
+    """
+    if not getattr(params, "screen_text_inpaint", False) or not screen:
+        return video, True
+    fps, frames = vsr.probe_timing(video)
+    boxes = vsr.boxes_from_pieces(screen, fps, frames)
+    if not boxes:
+        ctx.log("Could not map on-screen text to frames, keeping the white box")
+        return video, True
+    path = work / "screen_inpaint.json"
+    path.write_text(
+        json.dumps({str(frame): [list(box) for box in found]
+                    for frame, found in boxes.items()}),
+        encoding="utf-8",
+    )
+    ctx.step("Painting out the old on-screen text")
+    cleaned, _ = vsr.remove_subtitles(
+        video, work / "no_screen.mp4", "lama",
+        0.0, 1.0, 0.0, 1.0,
+        ctx=ctx,
+        inpaint_boxes=path,
+    )
+    return cleaned, False
 
 
 def _subtitle_position(asked: float | None, detected: float | None) -> float:
@@ -641,6 +676,7 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
     width, height = audio.video_size(video)
     screen = _translated_screen_text(screen_path, params, meta, width, height, ctx,
                                      work=work)
+    video, screen_box = _inpaint_screen_text(video, work, params, screen, ctx)
     if lines or hook is not None or screen:
         ctx.step("Burning in the subtitles")
         video = subtitle.burn(
@@ -651,6 +687,7 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
                 params.subtitle_position, detected_position),
             hook=hook,
             screen=screen,
+            screen_box=screen_box,
             ctx=ctx,
         )
 
