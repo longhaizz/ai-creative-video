@@ -170,6 +170,12 @@ def test_screen_text_floors_cannot_be_negative(client):
         assert post_dub(http, screen_text_small_min_seconds="-0.1").status_code == 422
 
 
+def test_screen_text_inpaint_is_accepted(client):
+    with client() as http:
+        assert post_dub(http, screen_text_inpaint="true").status_code == 202
+
+
+
 def test_no_dub_still_does_the_picture_work(client):
     with client() as http:
         assert post_dub(

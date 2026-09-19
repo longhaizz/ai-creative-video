@@ -66,6 +66,12 @@ def parse_args():
         "--screen-text-small-min-seconds", type=float, default=3.0,
         help="Seconds small on-screen text must stay before it is translated"
     )
+    # PATCH (dub server). Boxes the caller already has, as {frame: boxes}.
+    # Paint those out and skip finding any of its own.
+    parser.add_argument(
+        "--inpaint-boxes", type=str, default=None,
+        help="JSON dump of frame -> boxes to paint out, skipping detection"
+    )
     args = parser.parse_args()
     args.inpaint_mode = InpaintMode[args.inpaint_mode.replace('-','_').upper()]
     if args.subtitle_area_coords is None:

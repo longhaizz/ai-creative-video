@@ -628,6 +628,27 @@ def test_each_piece_draws_a_box_and_then_its_text():
     assert ",Screen," in body[1] and "SALE" in body[1]
 
 
+def test_inpainted_text_has_no_white_box():
+    """The background was reconstructed; a rectangle would hide it."""
+    body = screen_dialogues([_piece("SALE")], W, H, boxed=False)
+    assert len(body) == 1
+    assert ",ScreenBox," not in body[0]
+    assert ",Screen," in body[0] and "SALE" in body[0]
+
+
+def test_inpainted_screen_style_is_an_outline_not_a_box(tmp_path):
+    ass = write_ass([], tmp_path / "a.ass", W, H, "Noto Sans", 40, 0.75,
+                    screen=[_piece("SALE")], screen_box=False)
+    lines = ass.read_text(encoding="utf-8").splitlines()
+    assert not any(line.startswith("Style: ScreenBox,") for line in lines)
+    style = next(line for line in lines if line.startswith("Style: Screen,"))
+    fields = style.split(",")
+    assert fields[3] == "&H00FFFFFF"
+    assert fields[15] == "1"
+    assert int(fields[16]) == 3
+
+
+
 def test_a_piece_with_no_text_draws_nothing():
     assert screen_dialogues([_piece("  ")], W, H) == []
 

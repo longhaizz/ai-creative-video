@@ -44,6 +44,30 @@ import numpy as np
 # Exception` further up the call stack, a plain Exception does not.
 NO_SUBTITLE_EXIT_CODE = 3
 
+
+def load_inpaint_boxes(path):
+    """Boxes the dub server already timed, as {frame: [(xmin,xmax,ymin,ymax), ...]}.
+
+    PATCH (dub server). Keys in the dump are strings because JSON has no
+    int keys; the rest of this file indexes frames as ints.
+    """
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        traceback.print_exc()
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for key, boxes in data.items():
+        try:
+            frame = int(key)
+        except (TypeError, ValueError):
+            continue
+        out[frame] = [tuple(b) for b in boxes]
+    return out
+
 class SubtitleRemover:
     def __init__(self, vd_path, gui_mode=False):
         # 线程锁
@@ -64,6 +88,8 @@ class SubtitleRemover:
         # before it is translated. The CLI fills these in.
         self.screen_min_seconds = 1.0
         self.screen_small_min_seconds = 3.0
+        # PATCH (dub server). Boxes the caller already has, or None.
+        self.inpaint_boxes_path = None
         # PATCH (dub server). What Whisper heard, to tell the subtitles from
         # other text in the band, or None. See tools/speech_match.py.
         self.speech = None
@@ -293,25 +319,35 @@ class SubtitleRemover:
         sttn_video_inpaint = STTNAutoInpaint(self.hardware_accelerator.device, self.model_config.STTN_AUTO_MODEL_PATH, self.video_path)
         sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar)
 
-    def video_inpaint(self, tbar, model):
-        sub_detector = SubtitleDetect(
-            self.video_path, self.sub_areas, self.speech,
-            scan_all=self.scan_all_text,
-            screen_min_seconds=self.screen_min_seconds,
-            screen_small_min_seconds=self.screen_small_min_seconds)
-        sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
-        self.dump_boxes(sub_list)
-        self.dump_screen_text(sub_detector.screen_text, sub_detector.screen_words)
-        if len(sub_list) == 0:
-            sys.exit(NO_SUBTITLE_EXIT_CODE)
-        continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
-        tbar.write(f"Subtitle detected: {continuous_frame_no_list}")
-        continuous_frame_no_list = expand_frame_ranges(continuous_frame_no_list, config.subtitleTimelineBackwardFrameCount.value, config.subtitleTimelineForwardFrameCount.value)
-        tbar.write(f"Subtitle timeline expand ({config.subtitleTimelineBackwardFrameCount.value} <- -> {config.subtitleTimelineForwardFrameCount.value}): {continuous_frame_no_list}")
-        continuous_frame_no_list = sub_detector.filter_and_merge_intervals(continuous_frame_no_list, config.sttnReferenceLength.value)
-        tbar.write(f'Subtitle filter_and_merge_intervals: {continuous_frame_no_list}')
-        del sub_detector
-        gc.collect()
+    def video_inpaint(self, tbar, model, sub_list=None, given=False):
+        if sub_list is None:
+            sub_detector = SubtitleDetect(
+                self.video_path, self.sub_areas, self.speech,
+                scan_all=self.scan_all_text,
+                screen_min_seconds=self.screen_min_seconds,
+                screen_small_min_seconds=self.screen_small_min_seconds)
+            sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
+            self.dump_boxes(sub_list)
+            self.dump_screen_text(sub_detector.screen_text, sub_detector.screen_words)
+            if len(sub_list) == 0:
+                sys.exit(NO_SUBTITLE_EXIT_CODE)
+            continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
+            tbar.write(f"Subtitle detected: {continuous_frame_no_list}")
+            continuous_frame_no_list = expand_frame_ranges(continuous_frame_no_list, config.subtitleTimelineBackwardFrameCount.value, config.subtitleTimelineForwardFrameCount.value)
+            tbar.write(f"Subtitle timeline expand ({config.subtitleTimelineBackwardFrameCount.value} <- -> {config.subtitleTimelineForwardFrameCount.value}): {continuous_frame_no_list}")
+            continuous_frame_no_list = sub_detector.filter_and_merge_intervals(continuous_frame_no_list, config.sttnReferenceLength.value)
+            tbar.write(f'Subtitle filter_and_merge_intervals: {continuous_frame_no_list}')
+            del sub_detector
+            gc.collect()
+        else:
+            # PATCH (dub server). Boxes the caller already timed; do not
+            # grow the ranges or merge them for STTN, or neighbouring
+            # frames without text get painted too.
+            self.dump_boxes(sub_list)
+            if len(sub_list) == 0:
+                sys.exit(NO_SUBTITLE_EXIT_CODE)
+            continuous_frame_no_list = SubtitleDetect.find_continuous_ranges_with_same_mask(sub_list)
+            tbar.write(f"Given boxes: {continuous_frame_no_list}")
         start_end_map = dict()
         for start, end in continuous_frame_no_list:
             # 确保区间不超出视频总帧数，否则会导致 FramePrefetcher 哨兵被内循环消费后外层死锁
@@ -350,12 +386,15 @@ class SubtitleRemover:
                     frames_need_inpaint.append(frame)
                 mask_area_coordinates = []
                 # 1. 获取当前批次的mask坐标全集
-                for mask_index in range(start_frame_index, end_frame_index):
+                for mask_index in range(start_frame_index, end_frame_index + 1):
                     if mask_index in sub_list.keys():
                         for area in sub_list[mask_index]:
                             xmin, xmax, ymin, ymax = area
                             # 判断是不是非字幕区域(如果宽大于长，则认为是错误检测)
-                            if (ymax - ymin) - (xmax - xmin) > config.subtitleYXAxisDifferencePixel.value:
+                            # PATCH (dub server). Given boxes are trusted:
+                            # a tall headline is still the text to paint out.
+                            if (not given
+                                    and (ymax - ymin) - (xmax - xmin) > config.subtitleYXAxisDifferencePixel.value):
                                 continue
                             if area not in mask_area_coordinates:
                                 mask_area_coordinates.append(area)
@@ -477,7 +516,13 @@ class SubtitleRemover:
         if self.detect_only:
             self.detect_only_mode(tbar)
             return
-        if self.is_picture:
+        if self.inpaint_boxes_path:
+            # PATCH (dub server). Paint the boxes the caller already has.
+            # LAMA is per-frame static inpaint, the same mode the hook uses.
+            sub_list = load_inpaint_boxes(self.inpaint_boxes_path)
+            self.append_output(f'Inpainting {len(sub_list)} frames from given boxes')
+            self.video_inpaint(tbar, self.lama_inpaint, sub_list=sub_list, given=True)
+        elif self.is_picture:
             original_frame = read_image(self.video_path)
             if original_frame is None:
                 self.append_output(tr['Main']['ReadImageFailed'].format(self.video_path))
@@ -617,6 +662,7 @@ if __name__ == '__main__':
     sr.detect_only = args.detect_only
     sr.screen_min_seconds = args.screen_text_min_seconds
     sr.screen_small_min_seconds = args.screen_text_small_min_seconds
+    sr.inpaint_boxes_path = args.inpaint_boxes
     from backend.tools.speech_match import load_speech
     sr.speech = load_speech(args.speech_cues)
     config.inpaintMode.value = args.inpaint_mode
