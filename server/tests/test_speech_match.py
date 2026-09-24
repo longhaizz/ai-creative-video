@@ -849,3 +849,33 @@ def test_paragraphs_that_take_turns_in_one_place_stay_apart():
     assert pieces[1]["text"].endswith("सक्षम है।")
     assert "अंतर महसूस कर सकता" in pieces[2]["text"]
     assert not any("सखत" in p["text"] and "अंतर" in p["text"] for p in pieces)
+
+
+# -- boxes ------------------------------------------------------------------
+
+
+def test_filled_frames_cover_the_longer_line_that_replaces_a_short_one():
+    """The whole point: OCR runs every third frame, and the line changes in
+    between. Covering only the short line leaves both ends of the long one."""
+    short = [(400, 600, 800, 860)]
+    long = [(100, 900, 800, 860)]
+    assert sm.cover_both(short, long) == [(100, 900, 800, 860)]
+
+
+def test_a_second_line_elsewhere_is_not_swallowed_into_one_mask():
+    line = [(100, 900, 800, 860)]
+    headline = [(100, 900, 100, 160)]
+    assert sm.cover_both(line, headline) == [
+        (100, 900, 800, 860), (100, 900, 100, 160)]
+
+
+def test_text_reaching_past_the_area_is_kept_and_cut_to_it():
+    area = (800, 900, 100, 600)          # ymin, ymax, xmin, xmax
+    box = (50, 650, 810, 880)            # sticks out both sides
+    assert sm.clip_to_area(box, area) == (100, 600, 810, 880)
+
+
+def test_text_that_barely_grazes_the_area_is_left_alone():
+    area = (800, 900, 100, 600)
+    assert sm.clip_to_area((550, 2000, 810, 880), area) is None
+    assert sm.clip_to_area((0, 90, 810, 880), area) is None

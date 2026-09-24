@@ -965,3 +965,69 @@ def read_log(reads, cues, fps, erase):
     if len(groups) > len(lines):
         lines.append(f"OCR ... {len(groups) - len(lines)} more lines not shown")
     return lines
+
+
+# -- boxes ------------------------------------------------------------------
+#
+# Two rules about boxes that used to sit in subtitle_detect.py. They are
+# plain geometry, and they live here so they can be tested without paddle.
+
+# How much of a box has to lie inside the area the user drew before that box
+# counts as text in the area.
+AREA_OVERLAP_SHARE = 0.5
+
+
+def clip_to_area(box, area):
+    """The part of box inside area, or None when too little of it is.
+
+    Upstream wanted the box to sit ENTIRELY inside the area, and dropped it
+    whole otherwise. A hook box or a subtitle band drawn by eye is reached
+    past by a pixel all the time, and that text then stayed on the picture
+    untouched: the line was found, it simply was never painted.
+
+    Overlapping is enough now, and what comes back is cut to the area, so
+    nothing outside the box the user drew is ever painted over.
+    """
+    xmin, xmax, ymin, ymax = box
+    s_ymin, s_ymax, s_xmin, s_xmax = area
+    left, right = max(xmin, s_xmin), min(xmax, s_xmax)
+    top, bottom = max(ymin, s_ymin), min(ymax, s_ymax)
+    if right <= left or bottom <= top:
+        return None
+    whole = (xmax - xmin) * (ymax - ymin)
+    if whole <= 0:
+        return None
+    if (right - left) * (bottom - top) < AREA_OVERLAP_SHARE * whole:
+        return None
+    return (left, right, top, bottom)
+
+
+def boxes_touch(box1, box2):
+    """Do these two boxes share any pixel?"""
+    xmin1, xmax1, ymin1, ymax1 = box1
+    xmin2, xmax2, ymin2, ymax2 = box2
+    return (xmin1 <= xmax2 and xmin2 <= xmax1
+            and ymin1 <= ymax2 and ymin2 <= ymax1)
+
+
+def cover_both(earlier, later):
+    """Boxes covering what either of two sampled frames showed.
+
+    Boxes that touch become the one box around the pair, which is how a
+    line replaced by a longer one stays covered in the frames between two
+    samples. Boxes that touch nothing are carried over as they are, so a
+    second line elsewhere in the frame is not swallowed into one huge mask.
+    """
+    covered = [tuple(box) for box in earlier]
+    for box in later:
+        box = tuple(box)
+        for index, kept in enumerate(covered):
+            if boxes_touch(box, kept):
+                covered[index] = (
+                    min(box[0], kept[0]), max(box[1], kept[1]),
+                    min(box[2], kept[2]), max(box[3], kept[3]),
+                )
+                break
+        else:
+            covered.append(box)
+    return covered

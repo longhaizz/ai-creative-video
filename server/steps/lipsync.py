@@ -23,7 +23,20 @@ from server.steps import audio
 
 
 SCENE_THRESHOLD = 0.3
-MIN_SHOT_SECONDS = 0.4
+
+# The frame rate LatentSync works at. It converts whatever it is given to
+# this (latentsync/utils/util.py reads the video through "ffmpeg -r 25") and
+# writes its result at it, so every piece that goes into the join has to be
+# at this rate too. Joining 25fps and 30fps pieces with "-c copy" gives the
+# whole file the rate of the first one, and the rest play at the wrong
+# speed: that is the stutter.
+LIPSYNC_FPS = 25
+
+# One model window is 16 frames (data.num_frames in the unet config). A shot
+# shorter than that cannot fill a single window, so the model loops the
+# frames to make up the length and the mouth barely moves. Shots below this
+# are left joined to their neighbour instead.
+MIN_SHOT_SECONDS = 16 / LIPSYNC_FPS
 
 
 class NoFaceError(PipelineError):
@@ -209,6 +222,7 @@ class LipsyncModel:
             ctx.log(f"Lip sync in {len(ranges)} shots")
 
         pieces: list[Path] = []
+        skipped = 0
         for index, (start, end) in enumerate(ranges):
             if ctx is not None:
                 ctx.check_cancel()
@@ -217,21 +231,54 @@ class LipsyncModel:
             cut_segment(video, start, end, clip)
             cut_segment(audio_path, start, end, wav)
             synced = work / f"shot_{index:03d}_lip.mp4"
+            # One line per shot, so a video that comes back barely synced
+            # can be read instead of guessed at: how long each shot was,
+            # how many frames the model saw, and whether it ran at all.
+            frames = round((end - start) * LIPSYNC_FPS)
             try:
                 self.run(
                     clip.resolve(), wav.resolve(), synced.resolve(),
                     steps, guidance, ctx=ctx,
                 )
                 piece = synced
+                done = "synced"
             except PipelineError as error:
-                if ctx is not None:
-                    ctx.log(f"Shot {index + 1}: skip lip sync ({error})")
+                skipped += 1
                 piece = clip
+                done = f"kept as it was ({error})"
+            if ctx is not None:
+                ctx.log(f"Shot {index + 1}/{len(ranges)} "
+                        f"{start:.2f}-{end:.2f}s ({end - start:.2f}s, "
+                        f"{frames} frames): {done}")
             norm = work / f"shot_{index:03d}_n.mp4"
             _scale_clip(piece, norm, width, height)
             pieces.append(norm)
 
-        return concat_videos(pieces, out_path)
+        if ctx is not None:
+            ctx.log(f"Lip sync: {len(ranges) - skipped}/{len(ranges)} shots "
+                    f"synced, {skipped} left as they were")
+        joined = concat_videos(pieces, out_path)
+        _check_length(joined, ranges[-1][1], ctx)
+        return joined
+
+
+def _check_length(video: Path, expected: float, ctx) -> None:
+    """Say so in the log when the joined shots do not add up.
+
+    A warning, not a failure: the video still plays. What it catches is the
+    join going wrong again later, which is invisible in the file and obvious
+    here. Nothing is measured when there is no log to write to.
+    """
+    if ctx is None:
+        return
+    got = audio.duration(video)
+    # Two frames of slack, not one: a container's clock often runs a little
+    # past its last frame, so the last shot can come up a frame short
+    # however exactly it was asked for. Drift worth reading about is tens
+    # of frames, not one.
+    if abs(got - expected) > 2 / LIPSYNC_FPS:
+        ctx.log(f"Lip sync: the joined shots last {got:.2f}s, not the "
+                f"{expected:.2f}s they were cut from -- the sound will drift")
 
 
 def shot_ranges(
@@ -239,9 +286,19 @@ def shot_ranges(
     cuts: list[float],
     min_len: float = MIN_SHOT_SECONDS,
 ) -> list[tuple[float, float]]:
-    """Turn cut timestamps into (start, end) shots spanning `total`."""
+    """Turn cut timestamps into (start, end) shots spanning `total`.
+
+    Every edge is put on the LIPSYNC_FPS grid. Off the grid, a shot holds a
+    fraction of a frame, and the model rounds it up to a whole one. A
+    fortieth of a second per shot is nothing; twenty shots of it is the
+    mouth running half a second ahead of the sound by the end.
+
+    The end is rounded down, never up, so the shots stay inside the video.
+    """
+    total = int(total * LIPSYNC_FPS) / LIPSYNC_FPS
     edges = [0.0]
     for t in cuts:
+        t = round(t * LIPSYNC_FPS) / LIPSYNC_FPS
         if t - edges[-1] >= min_len and total - t >= min_len:
             edges.append(t)
     edges.append(total)
@@ -305,7 +362,17 @@ def cut_segment(src: Path, start: float, end: float, dest: Path) -> Path:
     if dest.suffix.lower() == ".wav":
         command += ["-vn", "-c:a", "pcm_s16le"]
     else:
-        command += ["-an", "-c:v", "libx264", "-pix_fmt", "yuv420p"]
+        # -r makes every shot come out at the same rate, whether it goes
+        # through the model or is kept as it was. Rates that do not match
+        # are what "-c copy" cannot join.
+        #
+        # -frames:v says how many frames to keep, and it is the only way to
+        # be exact. Asking for 3.000s of a file whose container clock runs
+        # a little past its last frame gives 77 frames, not 75, and those
+        # spare frames are the drift all over again.
+        command += ["-an", "-r", str(LIPSYNC_FPS),
+                    "-frames:v", str(round(length * LIPSYNC_FPS)),
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p"]
     command.append(str(dest))
     audio.run_ffmpeg(command)
     return dest
@@ -319,7 +386,8 @@ def _scale_clip(src: Path, dest: Path, width: int, height: int) -> Path:
         "-vf",
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1",
-        "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest),
+        "-an", "-r", str(LIPSYNC_FPS),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dest),
     ])
     return dest
 

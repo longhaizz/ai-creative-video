@@ -495,6 +495,7 @@ def _translated_screen_text(screen_path: Path | None, params, meta,
     # Imported here, so reading this file does not need an OpenAI key.
     from server.steps.translate import already_in_target, translate_labels
 
+    in_hook = len(pieces) - len(kept)
     todo = []
     for piece in kept:
         if already_in_target(piece["text"], params.target_lang, meta):
@@ -531,6 +532,14 @@ def _translated_screen_text(screen_path: Path | None, params, meta,
         ctx.log(f"Screen text: {piece['text']!r} -> {text!r}")
         piece["text"] = text
         out.append(piece)
+    # One line saying where every piece went. Each reason is already logged
+    # on its own above, but counting them by hand over a long video is how
+    # "it hardly ever removes anything" stays a feeling instead of a number.
+    ctx.log(
+        f"Screen text: {len(pieces)} found, {in_hook} in the hook box, "
+        f"{len(kept) - len(todo)} already in the target language, "
+        f"{len(todo) - len(out)} came back unchanged, {len(out)} drawn"
+    )
     return out
 
 
