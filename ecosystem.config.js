@@ -43,7 +43,6 @@ module.exports = {
       env: Object.assign(
         {
           VSR_PYTHON: '/opt/venv-vsr/bin/python',
-          OPEN_DUBBING_PYTHON: '/opt/venv-od/bin/python',
           HF_HOME: '/models/huggingface',
         },
         readEnvFile(path.join(root, '.env')),
