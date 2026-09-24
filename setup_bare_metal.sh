@@ -16,7 +16,6 @@ set -euo pipefail
 
 MAIN=/opt/venv-main
 VSR=/opt/venv-vsr
-OD=/opt/venv-od
 export HF_HOME="${HF_HOME:-/models/huggingface}"
 
 cd "$(dirname "$0")"
@@ -129,42 +128,16 @@ if not numpy.__version__.startswith("2.2"):
 PY
 fi
 
-# --- 3b. Open Dubbing venv --------------------------------------------------
-# Demucs + Whisper + Pyannote. Not in the main venv: pyannote's transformers
-# stack collides with LatentSync. Same cu121 extra index as the main venv
-# so Demucs actually uses the card.
-say "open dubbing venv ($OD)"
-[ -x "$OD/bin/python" ] || sudo python3.10 -m venv "$OD"
-sudo chown -R "$(id -u):$(id -g)" "$OD"
-if ok "$OD/bin/python" -c "import torch, demucs, faster_whisper, pyannote.audio; assert torch.cuda.is_available()"; then
-    echo "already ok, skip"
-else
-    "$OD/bin/pip" install --upgrade pip
-    "$OD/bin/pip" install -r server/requirements-open-dubbing.txt \
-        --extra-index-url https://download.pytorch.org/whl/cu121
-
-    "$OD/bin/python" - <<'PY'
-import torch, demucs, faster_whisper, pyannote.audio, sys
-print("od venv:", torch.__version__, "cuda:", torch.cuda.is_available())
-if not torch.cuda.is_available():
-    sys.exit("open dubbing venv has no CUDA; torch must be the cu121 build")
-print("od ok")
-PY
-fi
-
 # --- 4. model weights -------------------------------------------------------
 say "model weights (HF_HOME=$HF_HOME)"
 sudo mkdir -p "$HF_HOME"
 sudo chown -R "$(id -u):$(id -g)" "$HF_HOME"
-PY="$MAIN/bin/python" ./download_models.sh
+PY="$MAIN/bin/python" VSR_PY="$VSR/bin/python" ./download_models.sh
 
 say "done"
-[ -f .env ] || echo "Warning: no .env yet. PM2 reads it for API_KEY, OPENAI_API_KEY, HF_TOKEN."
-if [ -f .env ] && ! grep -qE '^[[:space:]]*HF_TOKEN=.+' .env; then
-    echo "Warning: .env has no HF_TOKEN. Pyannote jobs will fail until you add one."
-fi
+[ -f .env ] || echo "Warning: no .env yet. PM2 reads it for API_KEY and the LLM key."
 cat <<'EOF'
 Next:
-  Add HF_TOKEN to .env if it is missing.
+  cp .env.example .env    # if missing, then fill in API_KEY and OPENAI_API_KEY
   pm2 delete dub; pm2 start ecosystem.config.js
 EOF
