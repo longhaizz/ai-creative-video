@@ -8,8 +8,9 @@ from .model_config import ModelConfig
 from .hardware_accelerator import HardwareAccelerator
 from .common_tools import get_readable_path
 from .ocr import get_coordinates
-from .speech_match import (boxes_to_erase, read_log, rec_model_for,
-                           screen_text, speech_evidence, subtitle_bands)
+from .speech_match import (boxes_to_erase, clip_to_area, cover_both, read_log,
+                           rec_model_for, screen_text, speech_evidence,
+                           subtitle_bands)
 from backend.config import config, tr
 from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
@@ -22,7 +23,6 @@ from backend.tools.inpaint_tools import is_frame_number_in_ab_sections
 # change with it: with a speech file, only boxes on the subtitle line are.
 # ponytail: Paddle's own default; lower it if text is still missed
 SCREEN_BOX_THRESH = 0.6
-
 
 class SubtitleDetect:
     """
@@ -187,8 +187,9 @@ class SubtitleDetect:
             return {}
         kept = {}
         for frame_no, boxes in sampled_results.items():
-            on_line = [box for box in boxes
-                       if box in erase.get(frame_no, {}) and self._inside_areas(box)]
+            on_line = [clipped for box in boxes
+                       if box in erase.get(frame_no, {})
+                       and (clipped := self._clip_to_areas(box)) is not None]
             if on_line:
                 kept[frame_no] = on_line
         dropped = sum(map(len, sampled_results.values())) - sum(map(len, kept.values()))
@@ -200,19 +201,20 @@ class SubtitleDetect:
             f"subtitle showed up or went away")
         return kept
 
-    def _inside_areas(self, box):
-        """Is this box inside one of the areas the user asked us to clean?
+    def _clip_to_areas(self, box):
+        """The part of this box the user asked us to clean, or None.
 
         With scan_all the detector looks at the whole frame, so a box can
         come from outside those areas. Only painting over is held to them;
         reading is not.
         """
         if not self.scan_all or not self.sub_areas:
-            return True
-        xmin, xmax, ymin, ymax = box
-        return any(s_xmin <= xmin and xmax <= s_xmax
-                   and s_ymin <= ymin and ymax <= s_ymax
-                   for s_ymin, s_ymax, s_xmin, s_xmax in self.sub_areas)
+            return tuple(box)
+        for area in self.sub_areas:
+            clipped = clip_to_area(box, area)
+            if clipped is not None:
+                return clipped
+        return None
 
     def detect_subtitle(self, img):
         temp_list = []
@@ -229,17 +231,14 @@ class SubtitleDetect:
                 continue
             if not has_areas:
                 temp_list.extend(coordinate_list)
-            elif len(sub_areas) == 1:
-                # 单区域快速路径（最常见场景）
-                s_ymin, s_ymax, s_xmin, s_xmax = sub_areas[0]
-                for xmin, xmax, ymin, ymax in coordinate_list:
-                    if s_xmin <= xmin and xmax <= s_xmax and s_ymin <= ymin and ymax <= s_ymax:
-                        temp_list.append((xmin, xmax, ymin, ymax))
             else:
-                for xmin, xmax, ymin, ymax in coordinate_list:
-                    for s_ymin, s_ymax, s_xmin, s_xmax in sub_areas:
-                        if s_xmin <= xmin and xmax <= s_xmax and s_ymin <= ymin and ymax <= s_ymax:
-                            temp_list.append((xmin, xmax, ymin, ymax))
+                # PATCH (dub server). Overlapping the area is enough, and
+                # the box is cut back to it. See clip_to_area.
+                for box in coordinate_list:
+                    for area in sub_areas:
+                        clipped = clip_to_area(box, area)
+                        if clipped is not None:
+                            temp_list.append(clipped)
                             break
         return temp_list
 
@@ -288,7 +287,15 @@ class SubtitleDetect:
         for f, next_f in zip(detected_nos, detected_nos[1:]):
             subtitle_frame_no_box_dict[f] = sampled_results[f]
             if next_f - f <= max_gap:
-                fill_mask = sampled_results[f]
+                # PATCH (dub server). The filled frames take the boxes of
+                # BOTH sampled frames around them, not only the one before.
+                # A line that is replaced by a longer one changes between
+                # two samples, and copying the earlier, shorter box forward
+                # paints over part of the new line and leaves both ends of
+                # it standing. Covering a little too much for one or two
+                # frames does not show; the ends of a subtitle do.
+                fill_mask = cover_both(
+                    sampled_results[f], sampled_results[next_f])
                 for fill_f in range(f + 1, next_f):
                     subtitle_frame_no_box_dict[fill_f] = fill_mask
         # 添加最后一个检测帧

@@ -139,3 +139,26 @@ def test_the_tee_keeps_a_copy_and_still_writes_through():
     tee.flush()
     assert console.getvalue() == "[lipsync] unet 1.0s\n"
     assert tee.value() == "[lipsync] unet 1.0s\n"
+
+
+def test_shot_edges_sit_on_the_model_frame_grid():
+    """Off the grid, every shot is rounded up to a whole frame and the
+    fractions add up until the mouth runs ahead of the sound."""
+    ranges = shot_ranges(10.0, [2.501, 5.017, 7.999])
+    for start, end in ranges:
+        assert round(start * 25) == start * 25
+        assert round(end * 25) == end * 25
+
+
+def test_the_shots_add_up_to_the_video():
+    ranges = shot_ranges(10.0, [2.501, 5.017, 7.999])
+    assert ranges[0][0] == 0.0
+    assert sum(end - start for start, end in ranges) == ranges[-1][1]
+    for (_, end), (next_start, _) in zip(ranges, ranges[1:]):
+        assert end == next_start
+
+
+def test_a_shot_shorter_than_one_model_window_is_not_cut_out():
+    """16 frames at 25fps is 0.64s. Below that the model loops the frames
+    and the mouth barely moves, so the cut is left alone."""
+    assert shot_ranges(10.0, [5.0, 5.3]) == [(0.0, 5.0), (5.0, 10.0)]
