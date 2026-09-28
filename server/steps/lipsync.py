@@ -58,9 +58,10 @@ def _inside(repo_dir: Path):
     image from paths relative to its own root, so it only works when that is
     the current directory.
 
-    ponytail: chdir is process-wide, which is safe here only because one
-    worker thread runs one job at a time. If a second worker ever appears,
-    pass absolute paths into the upstream code instead.
+    ponytail: chdir is process-wide. The HTTP threads keep running while
+    we are in here, so every path they use must be absolute: config.py
+    resolves them at import for that reason. A second worker would also
+    break this; pass absolute paths into the upstream code then.
     """
     old = Path.cwd()
     os.chdir(repo_dir)
@@ -124,6 +125,18 @@ class LipsyncModel:
 
     def load(self) -> None:
         """Build the pipeline and put it on the GPU. Called once, at start-up."""
+        import onnxruntime
+
+        # The face detector runs on onnxruntime. With the CPU build installed
+        # over the GPU one it still works, only many times slower, and nothing
+        # says so. Stop here instead. See the note in server/Dockerfile.
+        if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+            raise RuntimeError(
+                "onnxruntime has no CUDA: the CPU build was installed over "
+                "onnxruntime-gpu. Fix it with: pip uninstall -y onnxruntime "
+                "onnxruntime-gpu && pip install --no-deps onnxruntime-gpu==1.21.0"
+            )
+
         if str(self.repo_dir) not in sys.path:
             sys.path.insert(0, str(self.repo_dir))
 
