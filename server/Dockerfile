@@ -59,7 +59,17 @@ RUN python3.10 -m venv /opt/venv-main \
     && /opt/venv-main/bin/pip install "numpy==1.26.4" "Cython<3.1" \
     && /opt/venv-main/bin/pip install insightface==0.7.3 --no-build-isolation \
     && /opt/venv-main/bin/pip install -r server/requirements-models.txt \
-        --extra-index-url https://download.pytorch.org/whl/cu121
+        --extra-index-url https://download.pytorch.org/whl/cu121 \
+    && /opt/venv-main/bin/pip uninstall -y onnxruntime onnxruntime-gpu \
+    && /opt/venv-main/bin/pip install --no-deps onnxruntime-gpu==1.21.0
+
+# The last two lines above are not a mistake. faster-whisper depends on
+# "onnxruntime", the CPU build, and pip installs it next to onnxruntime-gpu
+# because to pip they are two different packages. Both write the same
+# onnxruntime/ folder, and the CPU one wins: the face detector in LatentSync
+# then runs on the CPU, without any error. pip has no way to say that the
+# GPU build replaces the CPU one, so both are removed and only the GPU one
+# goes back. LipsyncModel.load() refuses to start if this ever breaks.
 
 # -------------------------------------------------------------------------
 # Subtitle remover venv. The order and the three index URLs come from

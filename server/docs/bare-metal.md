@@ -45,7 +45,13 @@ python3.10 -m venv /opt/venv-main
 /opt/venv-main/bin/pip install -r server/requirements.txt
 /opt/venv-main/bin/pip install -r server/requirements-models.txt \
     --extra-index-url https://download.pytorch.org/whl/cu121
+
+# Bắt buộc, và phải chạy SAU cùng
+/opt/venv-main/bin/pip uninstall -y onnxruntime onnxruntime-gpu
+/opt/venv-main/bin/pip install --no-deps onnxruntime-gpu==1.21.0
 ```
+
+**Vì sao phải gỡ rồi cài lại onnxruntime.** `faster-whisper` kéo theo `onnxruntime` bản CPU. Pip cài nó song song với `onnxruntime-gpu` của LatentSync, vì với pip đây là hai gói khác nhau. Nhưng cả hai cùng ghi vào thư mục `onnxruntime/`, và bản CPU sẽ thắng. Khi đó bộ dò mặt của LatentSync chạy trên CPU mà không báo lỗi gì. Vì vậy **mỗi lần chạy lại `pip install -r ...` trong venv này, đều phải chạy lại hai lệnh trên.** Nếu quên, server sẽ không khởi động được và in ra đúng lệnh cần chạy.
 
 Kiểm:
 
