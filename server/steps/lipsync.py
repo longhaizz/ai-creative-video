@@ -58,9 +58,10 @@ def _inside(repo_dir: Path):
     image from paths relative to its own root, so it only works when that is
     the current directory.
 
-    ponytail: chdir is process-wide, which is safe here only because one
-    worker thread runs one job at a time. If a second worker ever appears,
-    pass absolute paths into the upstream code instead.
+    ponytail: chdir is process-wide. The HTTP threads keep running while
+    we are in here, so every path they use must be absolute: config.py
+    resolves them at import for that reason. A second worker would also
+    break this; pass absolute paths into the upstream code then.
     """
     old = Path.cwd()
     os.chdir(repo_dir)

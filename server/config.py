@@ -15,14 +15,17 @@ from pathlib import Path
 API_KEY = os.getenv("API_KEY", "")
 
 # Where result files live until the client downloads them or the TTL ends.
-JOBS_DIR = Path(os.getenv("JOBS_DIR", "jobs"))
+# Relative paths are made absolute now, at import. Lip sync calls os.chdir
+# for the whole process, and a relative path read after that points into
+# the LatentSync folder.
+JOBS_DIR = Path(os.getenv("JOBS_DIR", "jobs")).resolve()
 
 # When a job is older than this, delete both its state and its files. 1 hour.
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "3600"))
 
 # What every take measured, kept between jobs so the length guess gets
 # better. Deliberately NOT under JOBS_DIR: that folder is wiped at boot.
-DURATION_DATA = Path(os.getenv("DURATION_DATA", "data/duration.csv"))
+DURATION_DATA = Path(os.getenv("DURATION_DATA", "data/duration.csv")).resolve()
 
 # The preset voices: one wav per voice, and the file name is the voice id.
 # Made from the samples one folder up by server/scripts/prepare_voices.py.
@@ -71,13 +74,13 @@ FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 # -- video-subtitle-remover ------------------------------------------------
 # It runs in its own venv (see server/requirements-vsr.txt), so we call it
 # with that interpreter and from its own folder.
-VSR_DIR = Path(os.getenv("VSR_DIR", "video-subtitle-remover"))
+VSR_DIR = Path(os.getenv("VSR_DIR", "video-subtitle-remover")).resolve()
 VSR_PYTHON = os.getenv("VSR_PYTHON", "/opt/venv-vsr/bin/python")
 
 # -- LatentSync ------------------------------------------------------------
 # The vendored source, and the two files it needs. The config and the
 # checkpoint are named relative to the repo, the way upstream expects them.
-LATENTSYNC_DIR = Path(os.getenv("LATENTSYNC_DIR", "LatentSync"))
+LATENTSYNC_DIR = Path(os.getenv("LATENTSYNC_DIR", "LatentSync")).resolve()
 LATENTSYNC_CONFIG = Path(
     os.getenv("LATENTSYNC_CONFIG", "configs/unet/stage2_512.yaml")
 )
