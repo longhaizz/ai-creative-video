@@ -1,3 +1,5 @@
+from urllib.parse import unquote
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -96,6 +98,36 @@ def test_job_runs_and_the_result_can_be_downloaded(client):
         assert wait_until(
             lambda: http.get(f"/jobs/{job_id}", headers=AUTH).status_code == 404
         )
+
+
+def test_a_content_name_is_the_name_of_the_download(client):
+    name = "Kem chống nắng giúp da hết thâm chỉ sau bảy ngày dùng"
+
+    def run(context):
+        result = context.workdir / "result.mp4"
+        result.write_bytes(b"fake video")
+        if context.params.name_from_content:
+            context.set_output_name(name)
+        return result
+
+    with client(run) as http:
+        job_id = post_dub(http, name_from_content="true").json()["job_id"]
+        assert wait_for_status(http, job_id, "done")
+        body = http.get(f"/jobs/{job_id}", headers=AUTH).json()
+        assert body["output_name"] == name
+        result = http.get(f"/jobs/{job_id}/result", headers=AUTH)
+        disposition = unquote(result.headers["content-disposition"])
+        assert f"{name}.mp4" in disposition
+
+
+def test_without_the_tick_the_download_keeps_the_job_id(client):
+    with client() as http:
+        job_id = post_dub(http).json()["job_id"]
+        assert wait_for_status(http, job_id, "done")
+        body = http.get(f"/jobs/{job_id}", headers=AUTH).json()
+        assert "output_name" not in body
+        result = http.get(f"/jobs/{job_id}/result", headers=AUTH)
+        assert f'filename="{job_id}.mp4"' in result.headers["content-disposition"]
 
 
 def test_result_before_the_job_is_done_is_refused(client):

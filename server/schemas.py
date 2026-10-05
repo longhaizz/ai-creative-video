@@ -111,6 +111,11 @@ class DubParams(BaseModel):
     # a client never sends it.
     source_title: str = Field("", max_length=200)
 
+    # The desktop tool ticks this when the download should be named from the
+    # translated speech, in the target language. Off leaves the name the
+    # client already has.
+    name_from_content: bool = False
+
     # -- replace the hook --------------------------------------------------
     # The headline the video came with is painted out of the box below, and
     # this text is written in its place. Empty text means no hook work at
