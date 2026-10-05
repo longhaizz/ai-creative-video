@@ -62,6 +62,7 @@ class Job:
     error: str | None = None
     error_code: str | None = None
     result_path: Path | None = None
+    output_name: str | None = None
     cancelled: bool = False
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
@@ -92,6 +93,14 @@ class JobContext:
         """Call this between steps. It raises if the user pressed Stop."""
         if self._runner._is_cancelled(self.job_id):
             raise JobCancelled()
+
+    def set_output_name(self, name: str) -> None:
+        """The file name the client should save, without an extension.
+
+        Set only when a title was actually written. Leaving it unset is how
+        the download keeps the job id and the client keeps its own name.
+        """
+        self._runner._set_output_name(self.job_id, name)
 
 
 RunDub = Callable[[JobContext], Path]
@@ -264,6 +273,8 @@ class JobRunner:
                 "error": job.error,
                 "error_code": job.error_code,
             }
+            if job.output_name:
+                state["output_name"] = job.output_name
         position = self.queue_position(job_id)
         if position is not None:
             state["queue_position"] = position
@@ -354,6 +365,12 @@ class JobRunner:
         if done and started is not None:
             name = f"{name} (previous step took {now - started:.1f}s)"
         self._append_log(job_id, name)
+
+    def _set_output_name(self, job_id: str, name: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None and name:
+                job.output_name = name
 
     def _is_cancelled(self, job_id: str) -> bool:
         with self._lock:

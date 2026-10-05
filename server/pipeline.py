@@ -34,6 +34,7 @@ from server.jobs import JobContext, PipelineError
 from server.steps import audio, open_dubbing, separate, subtitle, transcribe, vsr
 from server.steps.lipsync import NoFaceError, detect_scenes
 from server.steps.synth import preset_voice
+from server.steps.title import content_title
 
 
 class Models:
@@ -209,6 +210,10 @@ def _dub(ctx: JobContext, models: Models) -> Path:
     )
     ctx.log(f"Voice track: {audio.duration(speech):.1f}s of {video_seconds:.1f}s")
     ctx.check_cancel()
+    # The lines just spoken are the words the viewer hears, already in the
+    # target language. Naming from them costs one model call; failing at it
+    # must not throw away the dub.
+    _maybe_name_output(ctx, work, meta)
 
     # 6. Move the mouth. This reads `speech`, which is voice only: music in
     # that track would drive the mouth wrong, so the mix comes after.
@@ -368,6 +373,53 @@ def _subtitle_position(asked: float | None, detected: float | None) -> float:
     if detected is not None:
         return detected
     return DEFAULT_SUBTITLE_POSITION
+
+
+def _maybe_name_output(ctx: JobContext, work: Path, meta: dict) -> None:
+    """Set the download name from the spoken lines, when the tool asked.
+
+    Off, or anything short of a real title, leaves the name unset. The
+    client then keeps the file name it already had.
+    """
+    if not getattr(ctx.params, "name_from_content", False):
+        return
+    if not getattr(ctx.params, "dub", True):
+        ctx.log(
+            "Keeping the original file name: this job does not dub, "
+            "so there is no translated speech")
+        return
+    try:
+        title = _title_from_speech(ctx, work, meta)
+    except Exception as error:  # a name is not worth losing the dub
+        ctx.log(f"Naming failed: {error}; keeping the original file name")
+        return
+    if title:
+        ctx.set_output_name(title)
+        ctx.log(f"Output file name: {title}")
+
+
+def _title_from_speech(ctx: JobContext, work: Path, meta: dict) -> str | None:
+    path = work / "spoken_cues.json"
+    if not path.is_file():
+        ctx.log(
+            "Keeping the original file name: there is no translated "
+            "speech to name it from")
+        return None
+    spoken = json.loads(path.read_text(encoding="utf-8"))
+    speech = " ".join(
+        (item.get("text") or "").strip()
+        for item in spoken
+        if isinstance(item, dict) and (item.get("text") or "").strip()
+    )
+    if not speech:
+        ctx.log(
+            "Keeping the original file name: there is no translated "
+            "speech to name it from")
+        return None
+    return content_title(
+        speech, ctx.params.target_lang, config.LLM_API_KEY,
+        asr_meta=meta, log=ctx.log,
+    )
 
 
 def _subtitle_cues(work: Path, cues: list[dict]) -> list[dict]:
@@ -620,6 +672,9 @@ def _subtitle_only(ctx: JobContext, models: Models) -> Path:
     """
     params = ctx.params
     work = ctx.workdir
+    # There is no translated script on this path, so a ticked box cannot
+    # name the file. Say so and leave the name the client already has.
+    _maybe_name_output(ctx, work, {})
     video = _source_video(work)
     # Where the old subtitles sat, if anything looked. Same rule as the dub
     # path: the new text goes back where the old text was.

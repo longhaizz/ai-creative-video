@@ -185,6 +185,9 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
         # same dub twice, and the disk is not free.
         assert job.result_path is not None
         ext = job.result_path.suffix.lower()
+        # A content title replaces the job id. Without one, the client keeps
+        # the name it already had and this file is only a handle.
+        stem = job.output_name or job_id
         media_type = {
             ".mp4": "video/mp4",
             ".wav": "audio/wav",
@@ -194,7 +197,7 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
         return FileResponse(
             job.result_path,
             media_type=media_type,
-            filename=f"{job_id}{ext}",
+            filename=f"{stem}{ext}",
             background=BackgroundTask(runner.drop, job_id),
         )
 
