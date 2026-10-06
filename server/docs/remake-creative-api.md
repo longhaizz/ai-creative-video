@@ -21,11 +21,12 @@ GET  /health                 kiểm tra kết nối (nút Kiểm tra)
 GET  /voices                 danh sách giọng preset
 POST /dub                    nộp video, nhận job_id
 GET  /jobs/{id}?since=N      hỏi trạng thái, mỗi 2 giây
+GET  /jobs/{id}/subtitle     tải phụ đề .srt khi has_subtitle = true (trước result)
 GET  /jobs/{id}/result       tải file khi status = done
 DELETE /jobs/{id}            huỷ (nút Stop)
 ```
 
-Tool nộp hết video trong lô trước, rồi mới poll. Không gửi lại `POST /dub` khi mạng chớp: POST không được retry, vì retry sẽ xếp thêm một bản copy lên GPU.
+Tool nộp video lần lượt ở một luồng riêng và poll song song, nên video nào xong là tải về ngay dù các video sau còn đang upload. Không gửi lại `POST /dub` khi mạng chớp: POST không được retry, vì retry sẽ xếp thêm một bản copy lên GPU.
 
 Bool gửi dạng chuỗi `true` / `false`, không phải `True`.
 
@@ -176,6 +177,21 @@ Hết `queued` và `running` thì dừng poll. `done` thì tải file. `failed` 
 | `internal` | lỗi khác |
 
 Job không còn (hết hạn, đã tải, chưa từng có) thì `404`.
+
+Job `done` có file phụ đề thì response có thêm `"has_subtitle": true`. Không có file thì không có field này.
+
+## GET /jobs/{id}/subtitle
+
+Phụ đề `.srt` (UTF-8) của lời lồng tiếng, tức ngôn ngữ đích, canh theo audio đã lồng. Chỉ job có lồng tiếng mới có; không phụ thuộc `burn_subtitle`. Mỗi phụ đề tối đa 2 dòng, 42 ký tự một dòng. Không gồm hook và chữ trên hình.
+
+Header `Content-Disposition` mang **cùng tên với video**, chỉ khác đuôi: `output_name` nếu có, không thì `job_id`.
+
+Phải gọi **trước** `/result`, vì tải video xong là server xoá job. Gọi endpoint này không xoá job. Job chưa `done` là `409`. Job không có phụ đề là `404`.
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" \
+  "$BASE/jobs/$JOB/subtitle" -o out.srt
+```
 
 ## GET /jobs/{id}/result
 

@@ -33,6 +33,10 @@ CANCELLED = "cancelled"
 # can be short: the expensive part, deleting the files, is skipped then.
 SWEEP_SECONDS = 60.0
 
+# The subtitles of the new speech, next to the result in the job folder. The
+# pipeline writes it and the API sends it; a job without one has no such file.
+SUBTITLE_FILE = "result.srt"
+
 
 class JobCancelled(Exception):
     """The pipeline raises this when the user cancels a running job."""
@@ -275,6 +279,10 @@ class JobRunner:
             }
             if job.output_name:
                 state["output_name"] = job.output_name
+            # Only looked at when the job is done: the client must fetch the
+            # subtitles before the result, because the result ends the job.
+            if job.status == DONE and (job.workdir / SUBTITLE_FILE).is_file():
+                state["has_subtitle"] = True
         position = self.queue_position(job_id)
         if position is not None:
             state["queue_position"] = position

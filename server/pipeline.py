@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 from server import config
-from server.jobs import JobContext, PipelineError
+from server.jobs import SUBTITLE_FILE, JobContext, PipelineError
 from server.steps import audio, open_dubbing, separate, subtitle, transcribe, vsr
 from server.steps.lipsync import NoFaceError, detect_scenes
 from server.steps.synth import preset_voice
@@ -281,8 +281,25 @@ def _dub(ctx: JobContext, models: Models) -> Path:
             ctx=ctx,
         )
 
+    _write_subtitle_file(work, ctx)
     ctx.step("Done")
     return result
+
+
+def _write_subtitle_file(work: Path, ctx: JobContext) -> None:
+    """Leave the new speech next to the result as an .srt file.
+
+    It is written whether or not the subtitles were burned in: a clean video
+    with its subtitles in a separate file is a thing people ask for. The
+    lines come from spoken_cues.json for the same reason as _subtitle_cues.
+    """
+    path = work / "spoken_cues.json"
+    if not path.is_file():
+        return
+    lines = _spoken_lines(json.loads(path.read_text(encoding="utf-8")))
+    count = subtitle.write_srt(lines, work / SUBTITLE_FILE)
+    if count:
+        ctx.log(f"Subtitle file: {count} subtitles")
 
 
 DEFAULT_SUBTITLE_POSITION = 0.75
