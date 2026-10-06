@@ -130,6 +130,45 @@ def test_without_the_tick_the_download_keeps_the_job_id(client):
         assert f'filename="{job_id}.mp4"' in result.headers["content-disposition"]
 
 
+def test_the_subtitle_file_has_the_name_of_the_video(client):
+    name = "Orchid Watering Tips"
+
+    def run(context):
+        result = context.workdir / "result.mp4"
+        result.write_bytes(b"fake video")
+        (context.workdir / "result.srt").write_bytes(b"1\n")
+        context.set_output_name(name)
+        return result
+
+    with client(run) as http:
+        job_id = post_dub(http).json()["job_id"]
+        assert wait_for_status(http, job_id, "done")
+        assert http.get(f"/jobs/{job_id}", headers=AUTH).json()["has_subtitle"]
+
+        subtitle = http.get(f"/jobs/{job_id}/subtitle", headers=AUTH)
+        assert subtitle.status_code == 200
+        assert subtitle.content == b"1\n"
+        assert f"{name}.srt" in unquote(subtitle.headers["content-disposition"])
+
+        # Sending the subtitles does not end the job: the video is still there.
+        result = http.get(f"/jobs/{job_id}/result", headers=AUTH)
+        assert f"{name}.mp4" in unquote(result.headers["content-disposition"])
+
+
+def test_a_job_without_subtitles_says_so(client):
+    with client() as http:
+        job_id = post_dub(http).json()["job_id"]
+        assert wait_for_status(http, job_id, "done")
+        assert "has_subtitle" not in http.get(f"/jobs/{job_id}", headers=AUTH).json()
+        assert http.get(f"/jobs/{job_id}/subtitle", headers=AUTH).status_code == 404
+
+
+def test_subtitle_before_the_job_is_done_is_refused(client):
+    with client(FakePipeline(sleep=0.3)) as http:
+        job_id = post_dub(http).json()["job_id"]
+        assert http.get(f"/jobs/{job_id}/subtitle", headers=AUTH).status_code == 409
+
+
 def test_result_before_the_job_is_done_is_refused(client):
     with client(FakePipeline(sleep=0.3)) as http:
         job_id = post_dub(http).json()["job_id"]

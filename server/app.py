@@ -17,7 +17,7 @@ from starlette.background import BackgroundTask
 
 from server import config
 from server.auth import require_api_key
-from server.jobs import DONE, JobContext, JobRunner, PipelineError
+from server.jobs import DONE, SUBTITLE_FILE, JobContext, JobRunner, PipelineError
 from server.limits import BodySizeLimit
 from server.schemas import CloneRequest, DubRequest
 from server.steps.synth import list_voices
@@ -199,6 +199,30 @@ def create_app(run_dub=not_built_yet, models=()) -> FastAPI:
             media_type=media_type,
             filename=f"{stem}{ext}",
             background=BackgroundTask(runner.drop, job_id),
+        )
+
+    @app.get("/jobs/{job_id}/subtitle")
+    def job_subtitle(job_id: str):
+        """The new speech as an .srt file. Ask for it before the result.
+
+        It carries the same name as the result, so the two files sit side by
+        side as a pair. The job is not forgotten here: only the result does
+        that.
+        """
+        job = get_job_or_404(job_id)
+        if job.status != DONE:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Job is {job.status}, so there are no subtitles to send",
+            )
+        path = job.workdir / SUBTITLE_FILE
+        if not path.is_file():
+            raise HTTPException(
+                status_code=404, detail="This job has no subtitle file")
+        return FileResponse(
+            path,
+            media_type="application/x-subrip",
+            filename=f"{job.output_name or job_id}.srt",
         )
 
     @app.delete("/jobs/{job_id}")

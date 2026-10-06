@@ -686,3 +686,33 @@ def test_a_one_line_piece_is_laid_out_as_before():
     one = {**_piece("Try it now", (227, 488, 262, 324)), "line_height": 62, "lines": 1}
     assert screen_layout(one, W, H) == screen_layout(
         _piece("Try it now", (227, 488, 262, 324)), W, H)
+
+
+# -- the .srt file --------------------------------------------------------
+
+from server.steps.subtitle import write_srt   # noqa: E402
+
+
+def test_the_srt_file_keeps_the_times_and_splits_long_lines(tmp_path):
+    path = tmp_path / "result.srt"
+    count = write_srt(
+        [
+            {"start": 0.0, "end": 1.5, "text": "Hello there."},
+            {"start": 3661.25, "end": 3663.0, "text": "word " * 40},
+        ],
+        path,
+    )
+    blocks = path.read_text(encoding="utf-8").strip().split("\n\n")
+    assert count == len(blocks) > 2
+    assert blocks[0] == "1\n00:00:00,000 --> 00:00:01,500\nHello there."
+    assert blocks[1].startswith("2\n01:01:01,250 --> ")
+    assert blocks[-1].split("\n")[1].endswith("--> 01:01:03,000")
+    for block in blocks:
+        text = block.split("\n")[2:]
+        assert 1 <= len(text) <= 2 and all(len(line) <= 42 for line in text)
+
+
+def test_no_speech_means_no_srt_file(tmp_path):
+    path = tmp_path / "result.srt"
+    assert write_srt([{"start": 0.0, "end": 1.0, "text": "  "}], path) == 0
+    assert not path.exists()

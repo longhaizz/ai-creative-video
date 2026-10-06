@@ -154,6 +154,41 @@ def normalize_cues(
     return out
 
 
+# The .srt file is read by players and upload forms, not drawn by us, so it
+# does not follow the frame width. 42 characters on two lines is the usual
+# size for a subtitle.
+SRT_CHARS_PER_LINE = 42
+SRT_LINES_PER_CUE = 2
+
+
+def _srt_time(seconds: float) -> str:
+    """SRT wants hh:mm:ss,mmm, with a comma before the milliseconds."""
+    millis = max(0, int(round(seconds * 1000)))
+    hours, millis = divmod(millis, 3_600_000)
+    minutes, millis = divmod(millis, 60_000)
+    whole, millis = divmod(millis, 1000)
+    return f"{hours:02d}:{minutes:02d}:{whole:02d},{millis:03d}"
+
+
+def write_srt(cues: list[dict], path: Path) -> int:
+    """Write the cues as an .srt file. Returns how many subtitles it holds.
+
+    Nothing is written when there are no cues: an empty .srt is a file the
+    client would save and nobody could use.
+    """
+    cues = normalize_cues(cues, SRT_CHARS_PER_LINE, SRT_LINES_PER_CUE)
+    if not cues:
+        return 0
+    blocks = [
+        f"{index}\n{_srt_time(cue['start'])} --> {_srt_time(cue['end'])}\n"
+        f"{cue['text']}\n"
+        for index, cue in enumerate(cues, start=1)
+    ]
+    # newline="\n" so the file is the same bytes on every system.
+    path.write_text("\n".join(blocks), encoding="utf-8", newline="\n")
+    return len(cues)
+
+
 def _ass_time(seconds: float) -> str:
     """ASS wants h:mm:ss.cc, with centiseconds and no leading zero on hours."""
     if seconds < 0:
